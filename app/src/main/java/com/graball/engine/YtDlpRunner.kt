@@ -19,7 +19,8 @@ data class DownloadProgress(
 interface DownloadListener {
     /** Called on the runner's worker thread; post to main before touching UI. */
     fun onProgress(progress: DownloadProgress)
-    fun onFinished(exitCode: Int)
+    /** [detail] carries the last error lines when [exitCode] is nonzero. */
+    fun onFinished(exitCode: Int, detail: String = "")
     fun onError(message: String)
     /** Final output files, delivered just before onFinished when known. */
     fun onDownloadedFiles(files: List<File>) {}
@@ -70,11 +71,19 @@ class YtDlpRunner(
                 process = proc
                 val destinations = mutableListOf<File>()
                 var merged: File? = null
+                // Last non-progress output lines: the evidence when the
+                // run fails. Progress lines are noise; error lines from
+                // yt-dlp, Python tracebacks, and linker errors are signal.
+                val tail = ArrayDeque<String>()
                 BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         val raw = line ?: break
                         listener.onProgress(parseProgress(raw))
+                        if (!PROGRESS_REGEX.containsMatchIn(raw)) {
+                            tail.addLast(raw)
+                            while (tail.size > 8) tail.removeFirst()
+                        }
                         DESTINATION_REGEX.find(raw)?.groupValues?.get(1)?.let {
                             destinations += File(it.trim())
                         }
@@ -91,7 +100,8 @@ class YtDlpRunner(
                 if (finalFiles.isNotEmpty()) {
                     listener.onDownloadedFiles(finalFiles)
                 }
-                listener.onFinished(exitCode)
+                val detail = if (exitCode == 0) "" else tail.joinToString("\n")
+                listener.onFinished(exitCode, detail)
             } catch (e: Exception) {
                 Log.e(TAG, "Download failed", e)
                 listener.onError(e.message ?: "Unknown error")
@@ -149,7 +159,7 @@ class YtDlpRunner(
 
     private fun parseProgress(raw: String): DownloadProgress {
         // Typical line: [download]  42.3% of 12.34MiB at  1.23MiB/s ETA 00:07
-        val percent = Regex("""\[download\]\s+(\d+(?:\.\d+)?)%""")
+        val percent = PROGRESS_REGEX
             .find(raw)?.groupValues?.get(1)?.toFloatOrNull()
         val speed = Regex("""at\s+(\S+/s)""").find(raw)?.groupValues?.get(1)
         val eta = Regex("""ETA\s+(\S+)""").find(raw)?.groupValues?.get(1)
@@ -158,6 +168,9 @@ class YtDlpRunner(
 
     companion object {
         private const val TAG = "YtDlpRunner"
+
+        /** Matches yt-dlp progress lines, which are noise for error tails. */
+        private val PROGRESS_REGEX = Regex("""\[download\]\s+(\d+(?:\.\d+)?)%""")
 
         /** "[download] Destination: /path" and "[ExtractAudio] Destination:". */
         private val DESTINATION_REGEX =

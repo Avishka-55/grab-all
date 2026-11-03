@@ -34,6 +34,10 @@ object RuntimeExtractor {
     private const val TAG = "RuntimeExtractor"
     private const val MARKER = ".version"
 
+    /** Reason the last extraction failed; null when it never ran or worked. */
+    var lastError: String? = null
+        private set
+
     data class Component(
         /** Asset path of the component zip, e.g. "runtime/qjs.zip". */
         val assetZip: String,
@@ -66,6 +70,7 @@ object RuntimeExtractor {
         if (marker.exists() && marker.readText().trim() == version) {
             return true
         }
+        lastError = null
         try {
             if (runtimeDir.exists()) {
                 runtimeDir.deleteRecursively()
@@ -91,6 +96,7 @@ object RuntimeExtractor {
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Runtime extraction failed", e)
+            lastError = e.message ?: e.toString()
             return false
         }
     }

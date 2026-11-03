@@ -16,7 +16,9 @@ import java.io.File
 class MainActivity : AppCompatActivity() {
 
     private lateinit var queueContainer: LinearLayout
+    private lateinit var cookiesStatus: TextView
     private val rowStatus = mutableMapOf<String, TextView>()
+    private val rowDetail = mutableMapOf<String, TextView>()
 
     private val progressListener: (DownloadProgressBus.State) -> Unit = { state ->
         updateRow(state)
@@ -26,6 +28,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         queueContainer = findViewById(R.id.queueContainer)
+        cookiesStatus = findViewById(R.id.cookiesStatus)
         val linkInput = findViewById<EditText>(R.id.linkInput)
         findViewById<Button>(R.id.downloadButton).setOnClickListener {
             val url = linkInput.text.toString().trim()
@@ -50,6 +53,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Visible proof of whether the cookies import worked, so a failed
+        // download never leaves the user guessing about the session.
+        cookiesStatus.text = if (RuntimePaths.cookiesFile(this).exists()) {
+            getString(R.string.cookies_saved)
+        } else {
+            getString(R.string.cookies_missing)
+        }
         DownloadProgressBus.subscribe(progressListener)
     }
 
@@ -62,6 +72,7 @@ class MainActivity : AppCompatActivity() {
     private fun addRow(url: String, statusText: String) {
         if (rowStatus.containsKey(url)) {
             rowStatus[url]?.text = statusText
+            rowDetail[url]?.visibility = android.view.View.GONE
             return
         }
         val row = LinearLayout(this).apply {
@@ -78,10 +89,16 @@ class MainActivity : AppCompatActivity() {
             text = statusText
             textSize = 13f
         }
+        val detail = TextView(this).apply {
+            textSize = 12f
+            visibility = android.view.View.GONE
+        }
         row.addView(title)
         row.addView(status)
+        row.addView(detail)
         queueContainer.addView(row)
         rowStatus[url] = status
+        rowDetail[url] = detail
     }
 
     private fun updateRow(state: DownloadProgressBus.State) {
@@ -89,6 +106,7 @@ class MainActivity : AppCompatActivity() {
             addRow(state.id, "")
             rowStatus[state.id]!!
         }
+        val detailView = rowDetail[state.id]
         statusView.text = when (state.status) {
             DownloadProgressBus.Status.DOWNLOADING -> {
                 val pct = state.percent?.toInt()
@@ -97,6 +115,14 @@ class MainActivity : AppCompatActivity() {
             }
             DownloadProgressBus.Status.COMPLETE -> getString(R.string.queue_done)
             DownloadProgressBus.Status.FAILED -> getString(R.string.queue_failed)
+        }
+        if (state.status == DownloadProgressBus.Status.FAILED &&
+            !state.detail.isNullOrBlank() && detailView != null
+        ) {
+            detailView.text = state.detail
+            detailView.visibility = android.view.View.VISIBLE
+        } else {
+            detailView?.visibility = android.view.View.GONE
         }
     }
 }

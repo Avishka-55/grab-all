@@ -63,7 +63,8 @@ class DownloadService : Service() {
                     updateNotification("Runtime setup failed", null)
                     DownloadProgressBus.post(
                         DownloadProgressBus.State(
-                            url, null, DownloadProgressBus.Status.FAILED
+                            url, null, DownloadProgressBus.Status.FAILED,
+                            RuntimeExtractor.lastError ?: "Runtime setup failed"
                         )
                     )
                     stopSelf()
@@ -98,7 +99,7 @@ class DownloadService : Service() {
                                 downloadedFiles = files
                             }
 
-                            override fun onFinished(exitCode: Int) {
+                            override fun onFinished(exitCode: Int, detail: String) {
                                 if (exitCode == 0) {
                                     downloadedFiles.forEach { file ->
                                         if (file.exists() &&
@@ -125,7 +126,8 @@ class DownloadService : Service() {
                                     )
                                     DownloadProgressBus.post(
                                         DownloadProgressBus.State(
-                                            url, null, DownloadProgressBus.Status.FAILED
+                                            url, null, DownloadProgressBus.Status.FAILED,
+                                            detail.ifBlank { "yt-dlp exited $exitCode" }
                                         )
                                     )
                                 }
@@ -138,7 +140,7 @@ class DownloadService : Service() {
                                 )
                                 DownloadProgressBus.post(
                                     DownloadProgressBus.State(
-                                        url, null, DownloadProgressBus.Status.FAILED
+                                        url, null, DownloadProgressBus.Status.FAILED, message
                                     )
                                 )
                                 this@DownloadService.stopSelf()
@@ -150,7 +152,8 @@ class DownloadService : Service() {
                 updateNotification("Download error: " + (e.message ?: "unknown"), null)
                 DownloadProgressBus.post(
                     DownloadProgressBus.State(
-                        url, null, DownloadProgressBus.Status.FAILED
+                        url, null, DownloadProgressBus.Status.FAILED,
+                        e.message ?: "unknown error"
                     )
                 )
                 stopSelf()
