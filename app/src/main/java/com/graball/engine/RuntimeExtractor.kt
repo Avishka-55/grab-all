@@ -100,12 +100,16 @@ object RuntimeExtractor {
         ZipInputStream(BufferedInputStream(input)).use { zip ->
             val destRoot = destDir.canonicalPath + File.separator
             var entry: ZipEntry? = zip.nextEntry
-            while (entry != null) {
-                val out = File(destDir, entry.name)
+            while (true) {
+                // Copy to a val: the loop var can't be smart-cast inside
+                // the require lambda below (Kotlin forbids smart-casting a
+                // var captured by a closure), so all uses go through this.
+                val current = entry ?: break
+                val out = File(destDir, current.name)
                 require(out.canonicalPath.startsWith(destRoot)) {
-                    "Bad zip entry: " + entry.name
+                    "Bad zip entry: " + current.name
                 }
-                if (entry.isDirectory) {
+                if (current.isDirectory) {
                     out.mkdirs()
                 } else {
                     out.parentFile?.mkdirs()
