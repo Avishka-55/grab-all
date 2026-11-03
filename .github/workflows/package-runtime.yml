@@ -144,9 +144,12 @@ jobs:
       - name: Build p4a python3 distribution for armeabi-v7a
         run: |
           set -o pipefail
-          # libffi's autoreconf needs libtool's m4 macros; the runner
-          # image ships autoconf/automake but not libtool.
-          sudo apt-get update -qq && sudo apt-get install -y -qq libtool libtool-bin
+          # p4a's own libffi recipe notes: it needs automake (aclocal),
+          # autoconf (autoreconf), and libltdl-dev — that last package
+          # is what defines the LT_SYS_SYMBOL_USCORE macro. Plain
+          # libtool alone does not provide it, which is why run 4 failed
+          # at the same step even with libtool installed.
+          sudo apt-get update -qq && sudo apt-get install -y -qq libtool libtool-bin libltdl-dev
           python3 -m pip install --upgrade pip
           python3 -m pip install python-for-android cython
       - name: Cache p4a build dir (resume, not rebuild)
