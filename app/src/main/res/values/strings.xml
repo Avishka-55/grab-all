@@ -3,4 +3,6 @@
     <string name="skeleton_note">Project skeleton — the download engine lands next.</string>
     <string name="paste_hint">Paste video link</string>
     <string name="download">Download</string>
+    <string name="done_save_login">Done — save login</string>
+    <string name="login_youtube">Log in to YouTube</string>
 </resources>
