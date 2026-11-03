@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">GrabAll</string>
+    <string name="skeleton_note">Project skeleton — the download engine lands next.</string>
+    <string name="paste_hint">Paste video link</string>
+    <string name="download">Download</string>
+</resources>
