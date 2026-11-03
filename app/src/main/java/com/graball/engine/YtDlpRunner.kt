@@ -54,6 +54,23 @@ class YtDlpRunner(
     @Volatile
     private var process: Process? = null
 
+    /**
+     * CPython is built --enable-shared, so the interpreter itself and
+     * ctypes both need libpython3.13.so. The loader finds it via
+     * LD_LIBRARY_PATH pointing at the extracted python lib dir; without
+     * it the process dies at startup (and ctypes dies with
+     * "libpython3.13.so not found", as seen on device in v0.2.4).
+     */
+    private fun pythonProcessBuilder(command: List<String>): ProcessBuilder {
+        val builder = ProcessBuilder(command)
+        val pythonDir = pythonBinary.parentFile?.parentFile
+        if (pythonDir != null) {
+            builder.environment()["LD_LIBRARY_PATH"] =
+                File(pythonDir, "lib").absolutePath
+        }
+        return builder
+    }
+
     /** Download [url] to [outputTemplate] (yt-dlp -o template). */
     fun download(
         url: String,
@@ -74,7 +91,7 @@ class YtDlpRunner(
             try {
                 val command = buildCommand(url, outputTemplate, extraArgs)
                 Log.d(TAG, "Running: " + command.joinToString(" "))
-                val proc = ProcessBuilder(command)
+                val proc = pythonProcessBuilder(command)
                     .redirectErrorStream(true)
                     .start()
                 process = proc
@@ -129,7 +146,7 @@ class YtDlpRunner(
      */
     fun version(): String? {
         return try {
-            val proc = ProcessBuilder(
+            val proc = pythonProcessBuilder(
                 listOf(pythonBinary.absolutePath, ytDlpScript.absolutePath, "--version")
             ).redirectErrorStream(true).start()
             val first = BufferedReader(InputStreamReader(proc.inputStream)).readLine()

@@ -193,7 +193,7 @@ class DownloadService : Service() {
         private const val NOTIFICATION_ID = 1
 
         /** Bump when the bundled native assets change, to force re-extraction. */
-        private const val RUNTIME_VERSION = "python3.13-ytdlp2026.10.26-v2"
+        private const val RUNTIME_VERSION = "python3.13-ytdlp2026.10.26-v3"
 
         private const val EXTRA_URL = "com.graball.engine.extra.URL"
         private const val EXTRA_OUTPUT = "com.graball.engine.extra.OUTPUT"

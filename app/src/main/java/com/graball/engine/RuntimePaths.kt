@@ -32,6 +32,10 @@ object RuntimePaths {
     fun pythonBinary(context: Context): File =
         File(runtimeDir(context), "python/bin/python")
 
+    /** Directory holding libpython3.13.so (CPython is built --enable-shared). */
+    fun pythonLibDir(context: Context): File =
+        File(runtimeDir(context), "python/lib")
+
     /** Extracted yt-dlp script (plus its yt-dlp-ejs data files alongside). */
     fun ytDlpScript(context: Context): File =
         File(runtimeDir(context), "ytdlp/yt-dlp")
