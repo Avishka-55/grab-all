@@ -1,0 +1,157 @@
+name: Package runtime
+
+# Builds the four native runtime zips RuntimeExtractor expects in
+# assets/runtime/ (python, yt-dlp, QuickJS, ffmpeg) for armeabi-v7a.
+# Manual trigger only: `gh workflow run package-runtime.yml`.
+# Each job uploads its zip (or probe files) as an artifact; jobs are
+# independent, so one failing does not block the others.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ytdlp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build yt-dlp package zip
+        run: |
+          rm -rf ytdlp-build && mkdir -p ytdlp-build/pkg
+          cd ytdlp-build
+          python3 -m pip download "yt-dlp[default]" -d wheels
+          ls wheels
+          cd pkg
+          for w in ../wheels/*.whl; do python3 -m zipfile -e "$w" .; done
+          printf 'import sys\nfrom yt_dlp import main\nsys.exit(main())\n' > yt-dlp
+          cd ..
+          python3 - <<'EOF'
+          import zipfile, os
+          skip = ('.dist-info', '__pycache__')
+          with zipfile.ZipFile('ytdlp.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for root, _, files in os.walk('pkg'):
+                  for f in files:
+                      p = os.path.join(root, f)
+                      rel = os.path.relpath(p, 'pkg')
+                      if any(s in rel for s in skip):
+                          continue
+                      z.write(p, rel)
+          EOF
+          ls -la ytdlp.zip
+          python3 -c "import zipfile; print('\n'.join(sorted(zipfile.ZipFile('ytdlp.zip').namelist())[:8]))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ytdlp-zip
+          path: ytdlp-build/ytdlp.zip
+
+  qjs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cross-compile QuickJS for armeabi-v7a
+        run: |
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          ls "$NDK_BIN" | grep armv7a | head
+          curl -sL -o quickjs.tar.xz https://bellard.org/quickjs/quickjs-2024-01-13.tar.xz
+          tar xf quickjs.tar.xz
+          cd quickjs-2024-01-13
+          make CC="$NDK_BIN/armv7a-linux-androideabi21-clang" AR="$NDK_BIN/llvm-ar" -j"$(nproc)"
+          ls -la qjs build/qjs 2>&1 | head
+          mkdir -p ../qjs-pkg/bin
+          cp qjs ../qjs-pkg/bin/qjs 2>/dev/null || cp build/qjs ../qjs-pkg/bin/qjs
+          cd ..
+          python3 - <<'EOF'
+          import zipfile
+          with zipfile.ZipFile('qjs.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              z.write('qjs-pkg/bin/qjs', 'bin/qjs')
+          EOF
+          ls -la qjs.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qjs-zip
+          path: qjs.zip
+
+  ffmpeg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cross-compile ffmpeg for armeabi-v7a
+        run: |
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          SYSROOT="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          curl -sL -o ffmpeg.tar.xz https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
+          tar xf ffmpeg.tar.xz
+          cd ffmpeg-7.1
+          ./configure \
+            --target-os=android --arch=arm --cpu=armv7-a \
+            --enable-cross-compile \
+            --cross-prefix="$NDK_BIN/armv7a-linux-androideabi-" \
+            --cc="$NDK_BIN/armv7a-linux-androideabi21-clang" \
+            --sysroot="$SYSROOT" \
+            --prefix="$PWD/../ffmpeg-install" \
+            --disable-doc --disable-ffplay --disable-ffprobe \
+            --disable-avdevice --disable-network --disable-swscale \
+            --disable-everything \
+            --enable-swresample \
+            --enable-demuxer=mp4,mov,matroska,webm \
+            --enable-muxer=mp4,matroska,webm \
+            --enable-decoder=h264,aac,opus,vorbis,mp3 \
+            --enable-encoder=aac \
+            --enable-parser=h264,aac,opus,vorbis,mpegaudio \
+            --enable-bsf=aac_adtstoasc,h264_mp4toannexb \
+            --enable-protocol=file,pipe \
+            --enable-filter=aresample,anull 2>&1 | tail -15
+          make -j"$(nproc)" 2>&1 | tail -5
+          make install 2>&1 | tail -3
+          ../ffmpeg-install/bin/ffmpeg -version | head -2
+          ../ffmpeg-install/bin/ffmpeg -muxers 2>/dev/null | grep -E " mp4| matroska| webm"
+          mkdir -p ../ffmpeg-pkg/bin
+          cp ../ffmpeg-install/bin/ffmpeg ../ffmpeg-pkg/bin/ffmpeg
+          cd ..
+          python3 - <<'EOF'
+          import zipfile
+          with zipfile.ZipFile('ffmpeg.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              z.write('ffmpeg-pkg/bin/ffmpeg', 'bin/ffmpeg')
+          EOF
+          ls -la ffmpeg.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-zip
+          path: ffmpeg.zip
+
+  p4a-probe:
+    # Probe only: build a python-for-android distribution for
+    # armeabi-v7a and report what it actually produces — specifically
+    # whether a runnable python interpreter binary exists in the tree.
+    # No zip is assembled here until that question is answered.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build p4a python3 distribution for armeabi-v7a
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install python-for-android cython
+          mkdir -p p4a-probe && cd p4a-probe
+          p4a create --requirements=python3 --arch=armeabi-v7a \
+            --sdk-dir="$ANDROID_HOME" --ndk-dir="$ANDROID_NDK_LATEST_HOME" \
+            --ndk-api=21 --android-api=21 --dist-name=graball-probe 2>&1 | tail -30
+          echo "--- distribution tree (depth 4) ---"
+          find . -maxdepth 4 -type d | head -60
+          echo "--- python binaries and libs ---"
+          find . -type f \( -name "python*" -o -name "libpython*" \) | head -40
+          echo "--- stdlib dirs ---"
+          find . -type d -name "python3.*" | head -20
+      - name: Collect probe files
+        if: always()
+        run: |
+          cd p4a-probe
+          find . -type f \( -name "python*" -o -name "libpython*" -o -path "*lib/python*" \) \
+            -not -path "*__pycache__*" | head -300 > probe-file-list.txt
+          wc -l probe-file-list.txt
+          tar czf ../p4a-probe-files.tar.gz --files-from probe-file-list.txt 2>/dev/null || true
+          ls -la ../p4a-probe-files.tar.gz probe-file-list.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p4a-probe
+          path: |
+            p4a-probe-files.tar.gz
+            p4a-probe/probe-file-list.txt
