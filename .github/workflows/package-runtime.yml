@@ -118,8 +118,10 @@ jobs:
             --enable-filter=aresample,anull 2>&1 | tail -15
           make -j"$(nproc)" 2>&1 | tail -5
           make install 2>&1 | tail -3
-          ../ffmpeg-install/bin/ffmpeg -version | head -2
-          ../ffmpeg-install/bin/ffmpeg -muxers 2>/dev/null | grep -E " mp4| matroska| webm"
+          # Verify WITHOUT executing: this is an ARM binary, running it
+          # on the x86 runner fails with "Exec format error" (run 5's
+          # lesson — the build itself was fine, only my check was wrong).
+          test -s ../ffmpeg-install/bin/ffmpeg && file ../ffmpeg-install/bin/ffmpeg
           mkdir -p ../ffmpeg-pkg/bin
           cp ../ffmpeg-install/bin/ffmpeg ../ffmpeg-pkg/bin/ffmpeg
           cd ..
@@ -134,66 +136,134 @@ jobs:
           name: ffmpeg-zip
           path: ffmpeg.zip
 
-  p4a-probe:
-    # Probe only: build a python-for-android distribution for
-    # armeabi-v7a and report what it actually produces — specifically
-    # whether a runnable python interpreter binary exists in the tree.
-    # No zip is assembled here until that question is answered.
+  cpython:
+    # Standalone CPython 3.13 for armeabi-v7a. Run 5 proved p4a only
+    # produces a JNI library (libpython3.14.so), not a runnable
+    # interpreter, so Python is cross-compiled directly: a host python,
+    # then static OpenSSL/libffi/xz (static so no LD_LIBRARY_PATH is
+    # needed on device), then the target build with --disable-shared
+    # (no libpython .so needed at runtime). Layout matches
+    # RuntimeExtractor: bin/python + lib/python3.13/.
     runs-on: ubuntu-latest
     steps:
-      - name: Build p4a python3 distribution for armeabi-v7a
+      - name: Install cross-build tools
         run: |
-          set -o pipefail
-          # p4a's own libffi recipe notes: it needs automake (aclocal),
-          # autoconf (autoreconf), and libltdl-dev — that last package
-          # is what defines the LT_SYS_SYMBOL_USCORE macro. Plain
-          # libtool alone does not provide it, which is why run 4 failed
-          # at the same step even with libtool installed.
-          sudo apt-get update -qq && sudo apt-get install -y -qq libtool libtool-bin libltdl-dev
-          python3 -m pip install --upgrade pip
-          python3 -m pip install python-for-android cython
-      - name: Cache p4a build dir (resume, not rebuild)
+          sudo apt-get update -qq && sudo apt-get install -y -qq autoconf automake libtool libtool-bin libltdl-dev
+      - name: Cache native deps
         uses: actions/cache@v4
         with:
-          # p4a reuses a dist's already-built recipes, so a restored dir
-          # resumes a failed build instead of restarting it. Bump the
-          # -vN suffix whenever the build flags below change, so a stale
-          # dist from different flags can never be reused.
-          path: ~/.local/share/python-for-android
-          key: p4a-armeabi-v7a-python3-api34-v1
-      - name: Run p4a create
+          # Only the small, version-pinned dep installs are cached;
+          # each dep writes a .done marker only after a full install,
+          # so a partial install is never reused. Bump the key suffix
+          # when a dep version changes.
+          path: deps-install
+          key: cpython-deps-openssl3.2.0-libffi3.4.2-xz5.4.0-v1
+      - name: Download sources
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors -o cpython.tar.gz https://github.com/python/cpython/archive/refs/tags/v3.13.0.tar.gz
+          tar xf cpython.tar.gz
+          mv cpython-3.13.0 cpython-host
+          tar xf cpython.tar.gz
+          mv cpython-3.13.0 cpython-target
+          curl -fsSL --retry 3 --retry-all-errors -o openssl.tar.gz https://github.com/openssl/openssl/archive/refs/tags/openssl-3.2.0.tar.gz
+          tar xf openssl.tar.gz
+          curl -fsSL --retry 3 --retry-all-errors -o libffi.tar.gz https://github.com/libffi/libffi/archive/v3.4.2.tar.gz
+          tar xf libffi.tar.gz
+          curl -fsSL --retry 3 --retry-all-errors -o xz.tar.gz https://github.com/tukaani-project/xz/releases/download/v5.4.0/xz-5.4.0.tar.gz || echo "XZ_DOWNLOAD_FAILED" > xz.failed
+          if [ ! -f xz.failed ]; then tar xf xz.tar.gz; fi
+          ls -d cpython-host cpython-target openssl-openssl-3.2.0 libffi-3.4.2 xz-5.4.0 2>/dev/null || true
+      - name: Build host python
         run: |
           set -o pipefail
-          mkdir -p p4a-probe && cd p4a-probe
-          p4a create --requirements=python3 --arch=armeabi-v7a \
-            --bootstrap=sdl2 \
-            --sdk-dir="$ANDROID_HOME" --ndk-dir="$ANDROID_NDK_LATEST_HOME" \
-            --ndk-api=21 --android-api=34 --dist-name=graball-probe 2>&1 | tee p4a-build.log | tail -40
-          # NOTE: --android-api is only the SDK platform the runner has
-          # (34+ here); --ndk-api=21 is what keeps the result runnable on
-          # Android 5.0+ devices.
-          echo "--- p4a storage ---"
-          ls ~/.local/share/python-for-android/dists/ 2>/dev/null || true
-          echo "--- distribution tree (depth 4) ---"
-          find ~/.local/share/python-for-android/dists/graball-probe . -maxdepth 4 -type d 2>/dev/null | head -60
-          echo "--- python binaries and libs ---"
-          find ~/.local/share/python-for-android/dists/graball-probe . -type f \( -name "python*" -o -name "libpython*" \) 2>/dev/null | head -40
-          echo "--- stdlib dirs ---"
-          find ~/.local/share/python-for-android/dists/graball-probe . -type d -name "python3.*" 2>/dev/null | head -20
-      - name: Collect probe files
-        if: always()
+          cd cpython-host
+          ./configure --prefix="$PWD/../host-install" --disable-test-modules --without-ensurepip 2>&1 | tee ../host-configure.log | tail -3
+          make -j"$(nproc)" 2>&1 | tee ../host-build.log | tail -3
+          make install 2>&1 | tee ../host-install.log | tail -3
+          cd ..
+          ls -la host-install/bin/python3.13
+      - name: Build native deps (static)
         run: |
-          cd p4a-probe
-          find ~/.local/share/python-for-android/dists/graball-probe . -type f \( -name "python*" -o -name "libpython*" -o -path "*lib/python*" \) \
-            -not -path "*__pycache__*" 2>/dev/null | head -300 > probe-file-list.txt
-          wc -l probe-file-list.txt
-          tar czf ../p4a-probe-files.tar.gz --files-from probe-file-list.txt 2>/dev/null || true
-          ls -la ../p4a-probe-files.tar.gz probe-file-list.txt p4a-build.log 2>/dev/null || true
+          set -o pipefail
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          mkdir -p deps-install
+          if [ ! -f deps-install/openssl/.done ]; then
+            cd openssl-openssl-3.2.0
+            export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+            ./Configure android-arm -D__ANDROID_API__=21 --prefix="$PWD/../deps-install/openssl" no-shared no-tests 2>&1 | tee ../openssl-configure.log | tail -3
+            make -j"$(nproc)" build_sw 2>&1 | tee ../openssl-build.log | tail -3
+            make install_sw 2>&1 | tee ../openssl-install.log | tail -3
+            touch "$PWD/../deps-install/openssl/.done"
+            cd ..
+          else
+            echo "openssl: restored from cache, skipping"
+          fi
+          if [ ! -f deps-install/libffi/.done ]; then
+            cd libffi-3.4.2
+            ./autogen.sh 2>&1 | tee ../libffi-autogen.log | tail -3
+            CC="$NDK_BIN/armv7a-linux-androideabi21-clang" AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
+              ./configure --host=armv7a-linux-androideabi --prefix="$PWD/../deps-install/libffi" --disable-shared --enable-static --disable-docs 2>&1 | tee ../libffi-configure.log | tail -3
+            make -j"$(nproc)" 2>&1 | tee ../libffi-build.log | tail -3
+            make install 2>&1 | tee ../libffi-install.log | tail -3
+            touch "$PWD/../deps-install/libffi/.done"
+            cd ..
+          else
+            echo "libffi: restored from cache, skipping"
+          fi
+          if [ ! -f xz.failed ] && [ ! -f deps-install/xz/.done ]; then
+            cd xz-5.4.0
+            CC="$NDK_BIN/armv7a-linux-androideabi21-clang" AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
+              ./configure --host=armv7a-linux-androideabi --prefix="$PWD/../deps-install/xz" --disable-shared --enable-static --disable-doc 2>&1 | tee ../xz-configure.log | tail -3
+            make -j"$(nproc)" 2>&1 | tee ../xz-build.log | tail -3
+            make install 2>&1 | tee ../xz-install.log | tail -3
+            touch "$PWD/../deps-install/xz/.done"
+            cd ..
+          elif [ -f xz.failed ]; then
+            echo "xz: download failed earlier, continuing without _lzma"
+          else
+            echo "xz: restored from cache, skipping"
+          fi
+      - name: Cross-compile target python
+        run: |
+          set -o pipefail
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          mkdir -p target-build && cd target-build
+          export PKG_CONFIG_LIBDIR="$PWD/../deps-install/libffi/lib/pkgconfig:$PWD/../deps-install/xz/lib/pkgconfig"
+          CC="$NDK_BIN/armv7a-linux-androideabi21-clang" \
+            AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
+            CFLAGS="-I$PWD/../deps-install/openssl/include -I$PWD/../deps-install/libffi/include -I$PWD/../deps-install/xz/include" \
+            LDFLAGS="-L$PWD/../deps-install/openssl/lib -L$PWD/../deps-install/openssl/lib64 -L$PWD/../deps-install/libffi/lib -L$PWD/../deps-install/xz/lib" \
+            ../cpython-target/configure \
+            --host=armv7a-linux-androideabi \
+            --build=x86_64-linux-gnu \
+            --with-build-python="$PWD/../host-install/bin/python3.13" \
+            --prefix="$PWD/../target-install" \
+            --disable-test-modules \
+            --without-ensurepip \
+            --with-openssl="$PWD/../deps-install/openssl" 2>&1 | tee ../target-configure.log | tail -5
+          make -j"$(nproc)" 2>&1 | tee ../target-build.log | tail -5
+          make install 2>&1 | tee ../target-install.log | tail -3
+          cd ..
+          echo "--- modules that failed to build (if any) ---"
+          grep -iE "failed to build|not built" target-build.log | head -20 || true
+          file target-install/bin/python3.13
+          ls target-install/lib/python3.13/lib-dynload/ | head -40
+      - name: Package python zip
+        run: |
+          mkdir -p python-pkg/bin python-pkg/lib
+          cp target-install/bin/python3.13 python-pkg/bin/python
+          cp -r target-install/lib/python3.13 python-pkg/lib/
+          find python-pkg -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+          python3 - <<'EOF'
+          import zipfile, os
+          with zipfile.ZipFile('python.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for root, _, files in os.walk('python-pkg'):
+                  for f in files:
+                      p = os.path.join(root, f)
+                      z.write(p, os.path.relpath(p, 'python-pkg'))
+          EOF
+          ls -la python.zip
+          python3 -c "import zipfile; n=zipfile.ZipFile('python.zip').namelist(); print('entries:', len(n)); [print('has', m, ':', any(m in x for x in n)) for m in ['_ssl', '_hashlib', '_socket', '_ctypes', '_lzma']]"
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: p4a-probe
-          path: |
-            p4a-probe-files.tar.gz
-            p4a-probe/probe-file-list.txt
-            p4a-probe/p4a-build.log
+          name: python-zip
+          path: python.zip
