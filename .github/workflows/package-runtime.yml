@@ -140,10 +140,14 @@ jobs:
     # Standalone CPython 3.13 for armeabi-v7a. Run 5 proved p4a only
     # produces a JNI library (libpython3.14.so), not a runnable
     # interpreter, so Python is cross-compiled directly: a host python,
-    # then static OpenSSL/libffi/xz (static so no LD_LIBRARY_PATH is
-    # needed on device), then the target build with --disable-shared
-    # (no libpython .so needed at runtime). Layout matches
-    # RuntimeExtractor: bin/python + lib/python3.13/.
+    # then static OpenSSL/libffi/xz, then the target build with
+    # --enable-shared. Shared is REQUIRED, not optional: a static build
+    # has no libpython3.13.so, and ctypes (imported at startup via
+    # platform.android_ver) dies with "dlopen failed: library
+    # libpython3.13.so not found" (seen on device in v0.2.4). The app
+    # sets LD_LIBRARY_PATH to runtime/python/lib so both the
+    # interpreter and ctypes find it. Layout matches
+    # RuntimeExtractor: bin/python + lib/python3.13/ + lib/libpython*.
     runs-on: ubuntu-latest
     steps:
       - name: Install cross-build tools
@@ -261,6 +265,7 @@ jobs:
             --prefix="$PWD/../target-install" \
             --disable-test-modules \
             --without-ensurepip \
+            --enable-shared \
             --with-openssl="$PWD/../deps-install/openssl" 2>&1 | tee ../target-configure.log | tail -5
           make -j"$(nproc)" 2>&1 | tee ../target-build.log | tail -5
           make install 2>&1 | tee ../target-install.log | tail -3
@@ -274,6 +279,7 @@ jobs:
           mkdir -p python-pkg/bin python-pkg/lib
           cp target-install/bin/python3.13 python-pkg/bin/python
           cp -r target-install/lib/python3.13 python-pkg/lib/
+          cp target-install/lib/libpython3.13.so* python-pkg/lib/
           find python-pkg -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
           python3 - <<'EOF'
           import zipfile, os
@@ -284,7 +290,7 @@ jobs:
                       z.write(p, os.path.relpath(p, 'python-pkg'))
           EOF
           ls -la python.zip
-          python3 -c "import zipfile; n=zipfile.ZipFile('python.zip').namelist(); print('entries:', len(n)); [print('has', m, ':', any(m in x for x in n)) for m in ['_ssl', '_hashlib', '_socket', '_ctypes', '_lzma']]"
+          python3 -c "import zipfile; n=zipfile.ZipFile('python.zip').namelist(); print('entries:', len(n)); [print('has', m, ':', any(m in x for x in n)) for m in ['_ssl', '_hashlib', '_socket', '_ctypes', '_lzma', 'libpython']]"
       - uses: actions/upload-artifact@v4
         with:
           name: python-zip
