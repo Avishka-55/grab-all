@@ -88,9 +88,12 @@ jobs:
           set -o pipefail
           NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           SYSROOT="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          curl -fsSL --retry 3 -o ffmpeg.tar.xz https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
-          tar xf ffmpeg.tar.xz
-          cd ffmpeg-7.1
+          # ffmpeg.org's TLS fails from these runners (exit 35, twice in a
+          # row after two good downloads), so fetch the same release
+          # from FFmpeg's GitHub mirror instead.
+          curl -fsSL --retry 3 --retry-all-errors -o ffmpeg.tar.gz https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.tar.gz
+          tar xf ffmpeg.tar.gz
+          cd FFmpeg-n7.1
           ./configure \
             --target-os=android --arch=arm --cpu=armv7-a \
             --enable-cross-compile \
