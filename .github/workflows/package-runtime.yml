@@ -210,7 +210,7 @@ jobs:
             cd libffi-3.4.2
             ./autogen.sh 2>&1 | tee ../libffi-autogen.log | tail -3
             CC="$NDK_BIN/armv7a-linux-androideabi21-clang" AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
-              ./configure --host=armv7a-linux-androideabi --prefix="$PWD/../deps-install/libffi" --disable-shared --enable-static --disable-docs 2>&1 | tee ../libffi-configure.log | tail -3
+              ./configure --host=arm-linux-androideabi --prefix="$PWD/../deps-install/libffi" --disable-shared --enable-static --disable-docs 2>&1 | tee ../libffi-configure.log | tail -3
             make -j"$(nproc)" 2>&1 | tee ../libffi-build.log | tail -3
             make install 2>&1 | tee ../libffi-install.log | tail -3
             touch "$PWD/../deps-install/libffi/.done"
@@ -221,7 +221,7 @@ jobs:
           if [ ! -f xz.failed ] && [ ! -f deps-install/xz/.done ]; then
             cd xz-5.4.0
             CC="$NDK_BIN/armv7a-linux-androideabi21-clang" AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
-              ./configure --host=armv7a-linux-androideabi --prefix="$PWD/../deps-install/xz" --disable-shared --enable-static --disable-doc 2>&1 | tee ../xz-configure.log | tail -3
+              ./configure --host=arm-linux-androideabi --prefix="$PWD/../deps-install/xz" --disable-shared --enable-static --disable-doc 2>&1 | tee ../xz-configure.log | tail -3
             make -j"$(nproc)" 2>&1 | tee ../xz-build.log | tail -3
             make install 2>&1 | tee ../xz-install.log | tail -3
             touch "$PWD/../deps-install/xz/.done"
@@ -276,3 +276,9 @@ jobs:
         with:
           name: python-zip
           path: python.zip
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpython-logs
+          path: "*.log"
