@@ -211,7 +211,12 @@ jobs:
             ./autogen.sh 2>&1 | tee ../libffi-autogen.log | tail -3
             CC="$NDK_BIN/armv7a-linux-androideabi21-clang" AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
               ./configure --host=arm-linux-androideabi --prefix="$PWD/../deps-install/libffi" --disable-shared --enable-static --disable-docs 2>&1 | tee ../libffi-configure.log | tail -3
-            make -j"$(nproc)" 2>&1 | tee ../libffi-build.log | tail -3
+            # Build ONLY libffi.la, not plain "make": libffi uses
+            # AX_ENABLE_BUILDDIR, whose top-level "all-configured"
+            # wrapper breaks on plain make when cross-compiling (the
+            # library itself links fine first — run 9 proved that).
+            # p4a's recipe uses "make libffi.la" for the same reason.
+            make libffi.la -j"$(nproc)" 2>&1 | tee ../libffi-build.log | tail -3
             make install 2>&1 | tee ../libffi-install.log | tail -3
             touch "$PWD/../deps-install/libffi/.done"
             cd ..
