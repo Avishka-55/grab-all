@@ -146,6 +146,18 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq libtool libtool-bin
           python3 -m pip install --upgrade pip
           python3 -m pip install python-for-android cython
+      - name: Cache p4a build dir (resume, not rebuild)
+        uses: actions/cache@v4
+        with:
+          # p4a reuses a dist's already-built recipes, so a restored dir
+          # resumes a failed build instead of restarting it. Bump the
+          # -vN suffix whenever the build flags below change, so a stale
+          # dist from different flags can never be reused.
+          path: ~/.local/share/python-for-android
+          key: p4a-armeabi-v7a-python3-api34-v1
+      - name: Run p4a create
+        run: |
+          set -o pipefail
           mkdir -p p4a-probe && cd p4a-probe
           p4a create --requirements=python3 --arch=armeabi-v7a \
             --bootstrap=sdl2 \
