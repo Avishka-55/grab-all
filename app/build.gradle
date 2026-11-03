@@ -1,29 +1,29 @@
 plugins {
-    id com.android.application
-    id org.jetbrains.kotlin.android
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
 }
 
 android {
-    namespace com.graball
+    namespace 'com.graball'
     compileSdk 34
 
     defaultConfig {
-        applicationId com.graball
+        applicationId 'com.graball'
         minSdk 21
         targetSdk 34
         versionCode 1
-        versionName 0.1.0
+        versionName '0.1.0'
     }
 
     // Release signing activates only when keystore properties are supplied
     // (CI secrets). Without them, assembleRelease produces an unsigned APK.
     signingConfigs {
         release {
-            if (project.hasProperty(KEYSTORE_FILE)) {
-                storeFile file(project.property(KEYSTORE_FILE))
-                storePassword project.property(KEYSTORE_PASSWORD)
-                keyAlias project.property(KEY_ALIAS)
-                keyPassword project.property(KEY_PASSWORD)
+            if (project.hasProperty('KEYSTORE_FILE')) {
+                storeFile file(project.property('KEYSTORE_FILE'))
+                storePassword project.property('KEYSTORE_PASSWORD')
+                keyAlias project.property('KEY_ALIAS')
+                keyPassword project.property('KEY_PASSWORD')
             }
         }
     }
@@ -31,7 +31,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            if (project.hasProperty(KEYSTORE_FILE)) {
+            if (project.hasProperty('KEYSTORE_FILE')) {
                 signingConfig signingConfigs.release
             }
         }
@@ -42,13 +42,13 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = 17
+        jvmTarget = '17'
     }
 }
 
 dependencies {
-    implementation androidx.appcompat:appcompat:1.7.0
-    implementation androidx.constraintlayout:constraintlayout:2.1.4
-    implementation com.squareup.okhttp3:okhttp:4.12.0
-    implementation org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 }
