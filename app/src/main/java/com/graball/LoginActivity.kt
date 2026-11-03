@@ -80,7 +80,12 @@ class LoginActivity : AppCompatActivity() {
      * WebView sign-in is refused). Accepts Netscape-format files and
      * space-separated exports (converted to tabs, like the Telegram bot).
      * Only youtube.com / google.com lines are kept; anything else is
-     * rejected without writing.
+     * rejected without writing. The "# Netscape HTTP Cookie File"
+     * header is always written first: yt-dlp rejects a headerless file
+     * ("does not look like a Netscape format cookies file"), which is
+     * exactly what the old import produced by dropping every "#" line.
+     * "#HttpOnly_" cookie lines are kept: they are real session cookies
+     * in Netscape format, not comments.
      */
     private fun importCookies(uri: android.net.Uri) {
         val text = try {
@@ -94,7 +99,10 @@ class LoginActivity : AppCompatActivity() {
         }
         val kept = text.lines().mapNotNull { line ->
             val trimmed = line.trim()
-            if (trimmed.isEmpty() || trimmed.startsWith("#")) return@mapNotNull null
+            if (trimmed.isEmpty()) return@mapNotNull null
+            if (trimmed.startsWith("#") && !trimmed.startsWith("#HttpOnly_")) {
+                return@mapNotNull null
+            }
             val fields = trimmed.split("\t", " ").filter { it.isNotEmpty() }
             if (fields.size < 7) return@mapNotNull null
             val domain = fields[0]
@@ -109,7 +117,9 @@ class LoginActivity : AppCompatActivity() {
         }
         val file = RuntimePaths.cookiesFile(this)
         file.parentFile?.mkdirs()
-        file.writeText(kept.joinToString("\n") + "\n")
+        file.writeText(
+            "# Netscape HTTP Cookie File\n" + kept.joinToString("\n") + "\n"
+        )
         Toast.makeText(this, "Cookies imported in app", Toast.LENGTH_SHORT).show()
         finish()
     }

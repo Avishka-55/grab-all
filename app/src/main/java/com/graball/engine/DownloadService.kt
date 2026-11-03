@@ -69,7 +69,26 @@ class DownloadService : Service() {
                     )
                     stopSelf()
                 } else {
-                    val cookies = RuntimePaths.cookiesFile(this).takeIf { it.exists() }
+                    // Repair cookies files saved by older imports, which
+                    // dropped the "# Netscape HTTP Cookie File" header
+                    // that yt-dlp requires. Only prepends when the file
+                    // exists and lacks the header; never touches a good file.
+                    val cookiesFile = RuntimePaths.cookiesFile(this)
+                    if (cookiesFile.exists()) {
+                        try {
+                            val first = cookiesFile.bufferedReader().readLine()
+                            if (first == null ||
+                                !first.startsWith("# Netscape HTTP Cookie File")
+                            ) {
+                                val body = cookiesFile.readText()
+                                cookiesFile.writeText(
+                                    "# Netscape HTTP Cookie File\n" + body
+                                )
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+                    val cookies = cookiesFile.takeIf { it.exists() }
                     val newRunner = YtDlpRunner(
                         pythonBinary = RuntimePaths.pythonBinary(this),
                         ytDlpScript = RuntimePaths.ytDlpScript(this),
