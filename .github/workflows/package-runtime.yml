@@ -155,9 +155,9 @@ jobs:
           # Only the small, version-pinned dep installs are cached;
           # each dep writes a .done marker only after a full install,
           # so a partial install is never reused. Bump the key suffix
-          # when a dep version changes.
+          # when a dep version or build flag changes (v2: openssl -fPIC).
           path: deps-install
-          key: cpython-deps-openssl3.2.0-libffi3.4.2-xz5.4.0-v1
+          key: cpython-deps-openssl3.2.0-libffi3.4.2-xz5.4.0-v2
       - name: Download sources
         run: |
           curl -fsSL --retry 3 --retry-all-errors -o cpython.tar.gz https://github.com/python/cpython/archive/refs/tags/v3.13.0.tar.gz
@@ -198,7 +198,11 @@ jobs:
           mkdir -p deps-install
           if [ ! -f deps-install/openssl/.done ]; then
             cd openssl-openssl-3.2.0
-            ./Configure android-arm -D__ANDROID_API__=21 --prefix="$PWD/../deps-install/openssl" no-shared no-tests 2>&1 | tee ../openssl-configure.log | tail -3
+            ./Configure android-arm -D__ANDROID_API__=21 --prefix="$PWD/../deps-install/openssl" no-shared no-tests -fPIC 2>&1 | tee ../openssl-configure.log | tail -3
+            # -fPIC is required even for a static-only build: with
+            # no-shared OpenSSL drops PIC, and CPython's _ssl/_hashlib
+            # shared modules then fail to link (R_ARM_REL32, run 10).
+            # libffi/xz static libs were already PIC-safe.
             make -j"$(nproc)" build_sw 2>&1 | tee ../openssl-build.log | tail -3
             make install_sw 2>&1 | tee ../openssl-install.log | tail -3
             touch "$PWD/../deps-install/openssl/.done"
