@@ -61,6 +61,11 @@ class DownloadService : Service() {
             try {
                 if (!RuntimeExtractor.extractIfNeeded(this, RUNTIME_VERSION)) {
                     updateNotification("Runtime setup failed", null)
+                    DownloadProgressBus.post(
+                        DownloadProgressBus.State(
+                            url, null, DownloadProgressBus.Status.FAILED
+                        )
+                    )
                     stopSelf()
                 } else {
                     val cookies = RuntimePaths.cookiesFile(this).takeIf { it.exists() }
@@ -82,6 +87,11 @@ class DownloadService : Service() {
                                     "Downloading…"
                                 }
                                 this@DownloadService.updateNotification(text, pct?.toInt())
+                                DownloadProgressBus.post(
+                                    DownloadProgressBus.State(
+                                        url, pct, DownloadProgressBus.Status.DOWNLOADING
+                                    )
+                                )
                             }
 
                             override fun onDownloadedFiles(files: List<File>) {
@@ -104,9 +114,19 @@ class DownloadService : Service() {
                                     this@DownloadService.updateNotification(
                                         "Download complete", null
                                     )
+                                    DownloadProgressBus.post(
+                                        DownloadProgressBus.State(
+                                            url, 100f, DownloadProgressBus.Status.COMPLETE
+                                        )
+                                    )
                                 } else {
                                     this@DownloadService.updateNotification(
                                         "Download failed (exit $exitCode)", null
+                                    )
+                                    DownloadProgressBus.post(
+                                        DownloadProgressBus.State(
+                                            url, null, DownloadProgressBus.Status.FAILED
+                                        )
                                     )
                                 }
                                 this@DownloadService.stopSelf()
@@ -116,6 +136,11 @@ class DownloadService : Service() {
                                 this@DownloadService.updateNotification(
                                     "Download error: $message", null
                                 )
+                                DownloadProgressBus.post(
+                                    DownloadProgressBus.State(
+                                        url, null, DownloadProgressBus.Status.FAILED
+                                    )
+                                )
                                 this@DownloadService.stopSelf()
                             }
                         })
@@ -123,6 +148,11 @@ class DownloadService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Download service failed", e)
                 updateNotification("Download error: " + (e.message ?: "unknown"), null)
+                DownloadProgressBus.post(
+                    DownloadProgressBus.State(
+                        url, null, DownloadProgressBus.Status.FAILED
+                    )
+                )
                 stopSelf()
             }
         }.start()

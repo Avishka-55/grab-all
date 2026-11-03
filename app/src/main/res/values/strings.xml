@@ -5,4 +5,10 @@
     <string name="download">Download</string>
     <string name="done_save_login">Done — save login</string>
     <string name="login_youtube">Log in to YouTube</string>
+    <string name="queue_header">Downloads</string>
+    <string name="queue_queued">Queued…</string>
+    <string name="queue_downloading">Downloading… %1$d%%</string>
+    <string name="queue_downloading_unknown">Downloading…</string>
+    <string name="queue_done">Done ✓</string>
+    <string name="queue_failed">Failed</string>
 </resources>
