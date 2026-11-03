@@ -184,22 +184,20 @@ jobs:
       - name: Build native deps (static)
         run: |
           set -o pipefail
-          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          # OpenSSL's android config (Configurations/15-android.conf)
+          # only accepts a toolchain found by which("clang") inside
+          # $ANDROID_NDK_ROOT/.../prebuilt/ — it reads ANDROID_NDK_ROOT
+          # (not ANDROID_NDK_HOME) and rejects compilers found elsewhere
+          # by that pattern match. Symlinks in a private dir failed run 7
+          # for exactly that reason, so: use that same NDK dir, export it
+          # explicitly, and put its bin dir on PATH.
+          NDK_ROOT="${ANDROID_NDK_ROOT:-$ANDROID_NDK_LATEST_HOME}"
+          export ANDROID_NDK_ROOT="$NDK_ROOT"
+          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="$NDK_BIN:$PATH"
           mkdir -p deps-install
-          # OpenSSL 3.2's android-arm target still looks for the legacy
-          # GCC toolchain names, which the modern NDK no longer ships
-          # (only clang) — run 6 died on "no NDK arm-linux-androideabi-gcc
-          # on $PATH". Symlink clang under those names onto PATH.
-          mkdir -p ndkbin
-          ln -sf "$NDK_BIN/armv7a-linux-androideabi21-clang" ndkbin/arm-linux-androideabi-gcc
-          ln -sf "$NDK_BIN/armv7a-linux-androideabi21-clang++" ndkbin/arm-linux-androideabi-g++
-          ln -sf "$NDK_BIN/llvm-ar" ndkbin/arm-linux-androideabi-ar
-          ln -sf "$NDK_BIN/llvm-ranlib" ndkbin/arm-linux-androideabi-ranlib
-          ln -sf "$NDK_BIN/llvm-strip" ndkbin/arm-linux-androideabi-strip
-          export PATH="$PWD/ndkbin:$PATH"
           if [ ! -f deps-install/openssl/.done ]; then
             cd openssl-openssl-3.2.0
-            export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
             ./Configure android-arm -D__ANDROID_API__=21 --prefix="$PWD/../deps-install/openssl" no-shared no-tests 2>&1 | tee ../openssl-configure.log | tail -3
             make -j"$(nproc)" build_sw 2>&1 | tee ../openssl-build.log | tail -3
             make install_sw 2>&1 | tee ../openssl-install.log | tail -3
