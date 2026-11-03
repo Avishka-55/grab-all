@@ -61,6 +61,15 @@ class YtDlpRunner(
         extraArgs: List<String> = emptyList(),
         listener: DownloadListener
     ) {
+        // The version marker can skip extraction while the bits are
+        // wrong (v0.2.0 left a non-executable python binary behind), so
+        // enforce executability on every run, not just during extraction.
+        if (!RuntimeExtractor.ensureExecutable(pythonBinary)) {
+            listener.onError(
+                "Python engine not executable: " + pythonBinary.absolutePath
+            )
+            return
+        }
         Thread {
             try {
                 val command = buildCommand(url, outputTemplate, extraArgs)

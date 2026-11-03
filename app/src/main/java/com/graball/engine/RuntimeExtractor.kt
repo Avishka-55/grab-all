@@ -38,6 +38,28 @@ object RuntimeExtractor {
     var lastError: String? = null
         private set
 
+    /**
+     * Make [file] executable, verifying the result. File.setExecutable
+     * can silently fail on some devices (v0.2.0 left a non-executable
+     * python binary behind), so fall back to chmod 755 and check
+     * canExecute() afterwards. Returns true when the file is executable.
+     */
+    fun ensureExecutable(file: File): Boolean {
+        if (file.canExecute()) return true
+        try {
+            file.setExecutable(true, false)
+        } catch (_: Exception) {
+        }
+        if (file.canExecute()) return true
+        try {
+            val proc = Runtime.getRuntime()
+                .exec(arrayOf("chmod", "755", file.absolutePath))
+            proc.waitFor()
+        } catch (_: Exception) {
+        }
+        return file.canExecute()
+    }
+
     data class Component(
         /** Asset path of the component zip, e.g. "runtime/qjs.zip". */
         val assetZip: String,
@@ -85,7 +107,9 @@ object RuntimeExtractor {
                 component.executables.forEach { relativePath ->
                     val binary = File(dest, relativePath)
                     if (binary.exists()) {
-                        binary.setExecutable(true)
+                        if (!ensureExecutable(binary)) {
+                            Log.w(TAG, "Could not make executable: " + binary.absolutePath)
+                        }
                     } else {
                         Log.w(TAG, "Expected executable missing: " + binary.absolutePath)
                     }
