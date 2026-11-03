@@ -55,6 +55,9 @@ jobs:
           curl -sL -o quickjs.tar.xz https://bellard.org/quickjs/quickjs-2024-01-13.tar.xz
           tar xf quickjs.tar.xz
           cd quickjs-2024-01-13
+          # bionic bundles pthread into libc: there is no separate
+          # libpthread on Android, so the stock -lpthread link fails.
+          sed -i 's/-lpthread//g' Makefile
           make CC="$NDK_BIN/armv7a-linux-androideabi21-clang" AR="$NDK_BIN/llvm-ar" -j"$(nproc)"
           ls -la qjs build/qjs 2>&1 | head
           mkdir -p ../qjs-pkg/bin
@@ -76,6 +79,7 @@ jobs:
     steps:
       - name: Cross-compile ffmpeg for armeabi-v7a
         run: |
+          set -o pipefail
           NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           SYSROOT="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           curl -sL -o ffmpeg.tar.xz https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
@@ -86,10 +90,13 @@ jobs:
             --enable-cross-compile \
             --cross-prefix="$NDK_BIN/armv7a-linux-androideabi-" \
             --cc="$NDK_BIN/armv7a-linux-androideabi21-clang" \
+            --ar="$NDK_BIN/llvm-ar" --ranlib="$NDK_BIN/llvm-ranlib" \
+            --nm="$NDK_BIN/llvm-nm" \
             --sysroot="$SYSROOT" \
             --prefix="$PWD/../ffmpeg-install" \
             --disable-doc --disable-ffplay --disable-ffprobe \
             --disable-avdevice --disable-network --disable-swscale \
+            --disable-vulkan \
             --disable-everything \
             --enable-swresample \
             --enable-demuxer=mp4,mov,matroska,webm \
@@ -127,27 +134,31 @@ jobs:
     steps:
       - name: Build p4a python3 distribution for armeabi-v7a
         run: |
+          set -o pipefail
           python3 -m pip install --upgrade pip
           python3 -m pip install python-for-android cython
           mkdir -p p4a-probe && cd p4a-probe
           p4a create --requirements=python3 --arch=armeabi-v7a \
+            --bootstrap=sdl2 \
             --sdk-dir="$ANDROID_HOME" --ndk-dir="$ANDROID_NDK_LATEST_HOME" \
-            --ndk-api=21 --android-api=21 --dist-name=graball-probe 2>&1 | tail -30
+            --ndk-api=21 --android-api=21 --dist-name=graball-probe 2>&1 | tee p4a-build.log | tail -40
+          echo "--- p4a storage ---"
+          ls ~/.local/share/python-for-android/dists/ 2>/dev/null || true
           echo "--- distribution tree (depth 4) ---"
-          find . -maxdepth 4 -type d | head -60
+          find ~/.local/share/python-for-android/dists/graball-probe . -maxdepth 4 -type d 2>/dev/null | head -60
           echo "--- python binaries and libs ---"
-          find . -type f \( -name "python*" -o -name "libpython*" \) | head -40
+          find ~/.local/share/python-for-android/dists/graball-probe . -type f \( -name "python*" -o -name "libpython*" \) 2>/dev/null | head -40
           echo "--- stdlib dirs ---"
-          find . -type d -name "python3.*" | head -20
+          find ~/.local/share/python-for-android/dists/graball-probe . -type d -name "python3.*" 2>/dev/null | head -20
       - name: Collect probe files
         if: always()
         run: |
           cd p4a-probe
-          find . -type f \( -name "python*" -o -name "libpython*" -o -path "*lib/python*" \) \
-            -not -path "*__pycache__*" | head -300 > probe-file-list.txt
+          find ~/.local/share/python-for-android/dists/graball-probe . -type f \( -name "python*" -o -name "libpython*" -o -path "*lib/python*" \) \
+            -not -path "*__pycache__*" 2>/dev/null | head -300 > probe-file-list.txt
           wc -l probe-file-list.txt
           tar czf ../p4a-probe-files.tar.gz --files-from probe-file-list.txt 2>/dev/null || true
-          ls -la ../p4a-probe-files.tar.gz probe-file-list.txt
+          ls -la ../p4a-probe-files.tar.gz probe-file-list.txt p4a-build.log 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -155,3 +166,4 @@ jobs:
           path: |
             p4a-probe-files.tar.gz
             p4a-probe/probe-file-list.txt
+            p4a-probe/p4a-build.log
