@@ -9,7 +9,6 @@
     <string name="import_cookies">Import cookies file</string>
     <string name="browse_reload">↻</string>
     <string name="login_youtube">Log in to YouTube</string>
-    <string name="queue_header">Downloads Queue</string>
     <string name="queue_queued">Queued…</string>
     <string name="queue_downloading">Downloading… %1$d%%</string>
     <string name="queue_downloading_unknown">Downloading…</string>
@@ -34,11 +33,10 @@
     <string name="tab_youtube">YouTube</string>
     <string name="tab_music">Music</string>
     <string name="tab_more">More</string>
-    <string name="nav_download">Download</string>
-    <string name="nav_play">Play</string>
+    <string name="nav_grab">Grab</string>
+    <string name="nav_downloads">Downloads</string>
     <string name="nav_settings">Settings</string>
     <string name="soon_toast">%1$s coming soon</string>
-    <string name="player_soon">Player coming soon</string>
     <string name="settings_title">Settings</string>
     <string name="settings_back">← Back</string>
     <string name="settings_session">YouTube session</string>

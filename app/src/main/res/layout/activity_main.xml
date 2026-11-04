@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Option 4 (bold colorful) main screen: gradient header, tabs,
-     search bar, Quick Grab Sites grid, queue, bottom nav. All
+     search bar, Quick Grab Sites grid, bottom nav. All
      pre-redesign control IDs are preserved (linkInput, grabButton,
      grabPanel, grabType, qualitySpinner, audioOnlyCheck, playlistRow,
-     playlistSpinner, downloadButton, queueHeader, queueContainer) so
-     MainActivity's logic is untouched. The old queue ScrollView is
-     gone: the whole content scrolls in contentScroll instead.
+     playlistSpinner, downloadButton) so MainActivity's logic is
+     untouched. The old queue ScrollView is gone: the whole content
+     scrolls in contentScroll instead. The queue itself moved to the
+     Downloads screen in v0.6.0.
      The Browse/Import buttons lived here until v0.5.9: Browse
      duplicated the YouTube site card, and cookies import moved to
      the Settings screen. -->
@@ -36,8 +37,8 @@
             android:textStyle="bold" />
     </LinearLayout>
 
-    <!-- Bottom nav: Download is this screen; Play is coming
-         soon; Settings is a real screen since v0.5.9. -->
+    <!-- Bottom nav: Grab is this screen; Downloads holds the
+         queue since v0.6.0; Settings is a real screen. -->
     <LinearLayout
         android:id="@+id/bottomNav"
         android:layout_width="0dp"
@@ -51,7 +52,30 @@
         app:layout_constraintEnd_toEndOf="parent">
 
         <LinearLayout
-            android:id="@+id/navDownload"
+            android:id="@+id/navGrab"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:src="@android:drawable/ic_menu_add"
+                android:tint="@color/graball_orange" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/nav_grab"
+                android:textColor="@color/graball_orange"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/navDownloads"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
@@ -62,36 +86,13 @@
                 android:layout_width="24dp"
                 android:layout_height="24dp"
                 android:src="@android:drawable/stat_sys_download"
-                android:tint="@color/graball_orange" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/nav_download"
-                android:textColor="@color/graball_orange"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/navPlay"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@android:drawable/ic_media_play"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="@string/nav_play"
+                android:text="@string/nav_downloads"
                 android:textColor="@color/graball_tab_text"
                 android:textSize="12sp" />
         </LinearLayout>
@@ -556,22 +557,6 @@
                         android:textSize="11sp" />
                 </LinearLayout>
             </LinearLayout>
-
-            <TextView
-                android:id="@+id/queueHeader"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
-                android:text="@string/queue_header"
-                android:textColor="@color/graball_text"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <LinearLayout
-                android:id="@+id/queueContainer"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical" />
         </LinearLayout>
     </ScrollView>
 

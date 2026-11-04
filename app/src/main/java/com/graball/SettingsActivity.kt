@@ -1,6 +1,8 @@
 package com.graball
 
+import android.content.Intent
 import android.os.Bundle
+import android.widget.LinearLayout
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -35,6 +37,20 @@ class SettingsActivity : AppCompatActivity() {
         cookiesStatus = findViewById(R.id.settingsCookiesStatus)
         findViewById<Button>(R.id.settingsBack).setOnClickListener {
             finish()
+        }
+        findViewById<LinearLayout>(R.id.navGrab).setOnClickListener {
+            startActivity(
+                Intent(this, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+            )
+        }
+        findViewById<LinearLayout>(R.id.navDownloads).setOnClickListener {
+            startActivity(
+                Intent(this, DownloadsActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+            )
         }
         findViewById<Button>(R.id.settingsImportButton).setOnClickListener {
             importLauncher.launch("*/*")
