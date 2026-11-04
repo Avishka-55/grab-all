@@ -225,12 +225,18 @@ class BrowseActivity : AppCompatActivity() {
         // panel's kind): the user may have navigated after opening
         // the panel without tapping Refresh link. Spinner values are
         // left exactly as the user set them — no re-restore here.
+        // The explicit null check also smart-casts url to non-null
+        // for everything below (the kind check alone cannot).
         val url = webView.url ?: currentUrl
-        val kind = if (url == null) {
-            LinkKind.UNKNOWN
-        } else {
-            LinkDetector.detect(url, strictYouTube = true)
+        if (url == null) {
+            Toast.makeText(
+                this,
+                "Open a YouTube video or playlist first",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
         }
+        val kind = LinkDetector.detect(url, strictYouTube = true)
         if (kind == LinkKind.UNKNOWN) {
             Toast.makeText(
                 this,
@@ -250,7 +256,7 @@ class BrowseActivity : AppCompatActivity() {
         } else {
             "single"
         }
-        if (mode == "single" && url!!.contains("playlist?list=")) {
+        if (mode == "single" && url.contains("playlist?list=")) {
             Toast.makeText(
                 this,
                 "That's a playlist — pick how many videos above",
