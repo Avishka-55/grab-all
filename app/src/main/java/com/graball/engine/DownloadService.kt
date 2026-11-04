@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -30,6 +32,31 @@ class DownloadService : Service() {
 
     @Volatile
     private var runner: YtDlpRunner? = null
+
+    /** URL of the download currently running, if any. */
+    @Volatile
+    private var currentUrl: String? = null
+
+    /**
+     * URLs paused by the user (or by a network switch). A pause kills
+     * the yt-dlp process, so onFinished runs with a nonzero exit — but
+     * a paused download must report PAUSED, not FAILED, and must keep
+     * its staging dir fully intact for the resume. The entry is
+     * cleared when the pause is reported, and again when a new
+     * download for the same URL starts, so a later real failure can
+     * never be misreported as a pause.
+     */
+    private val pausedUrls =
+        Collections.synchronizedSet(mutableSetOf<String>())
+
+    /** Pause reason per URL (\"Network changed\", or null for manual). */
+    private val pauseReasons = mutableMapOf<String, String?>()
+
+    /** Network callback for auto-pause on a network switch. */
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** Default network the current download started on, if known. */
+    private var startNetwork: Network? = null
 
     /** Final files from the runner, used as a fallback at finish time. */
     private var downloadedFiles: List<File> = emptyList()
@@ -84,6 +111,66 @@ class DownloadService : Service() {
             )
             notificationManager().createNotificationChannel(channel)
         }
+        registerNetworkCallback()
+    }
+
+    override fun onDestroy() {
+        unregisterNetworkCallback()
+        super.onDestroy()
+    }
+
+    /**
+     * Auto-pause on a network switch. A switch (WiFi↔mobile, VPN
+     * on/off) kills the download's socket; yt-dlp's retries then go
+     * out over the NEW network, where a VPN/datacenter IP can get
+     * bot-checked and fail again and again. Pausing instead keeps
+     * the half-download and lets the user resume deliberately —
+     * ideally with the VPN off. A pause is harmless if the switch
+     * would have survived: one tap resumes from the .part file.
+     */
+    private fun registerNetworkCallback() {
+        val manager =
+            getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val start = startNetwork
+                if (start != null && network != start) {
+                    autoPause("Network changed")
+                }
+            }
+
+            override fun onLost(network: Network) {
+                if (network == startNetwork) {
+                    autoPause("Network changed")
+                }
+            }
+        }
+        networkCallback = callback
+        try {
+            manager.registerDefaultNetworkCallback(callback)
+        } catch (_: Exception) {
+            networkCallback = null
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        try {
+            val manager =
+                getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            manager?.unregisterNetworkCallback(callback)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun autoPause(reason: String) {
+        val url = currentUrl ?: return
+        if (runner == null) return
+        pausedUrls.add(url)
+        pauseReasons[url] = reason
+        runner?.cancel()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -92,6 +179,32 @@ class DownloadService : Service() {
         val safeIntent = intent ?: return START_NOT_STICKY
         if (safeIntent.action == ACTION_CANCEL) {
             runner?.cancel()
+            return START_NOT_STICKY
+        }
+        if (safeIntent.action == ACTION_PAUSE) {
+            val url = currentUrl ?: return START_NOT_STICKY
+            if (runner == null) return START_NOT_STICKY
+            pausedUrls.add(url)
+            pauseReasons[url] = null
+            runner?.cancel()
+            return START_NOT_STICKY
+        }
+        if (safeIntent.action == ACTION_RESUME) {
+            val url = safeIntent.getStringExtra(EXTRA_URL)
+                ?: return START_NOT_STICKY
+            val params = paramsByUrl[url]
+            if (params == null) {
+                Toast.makeText(
+                    this,
+                    "Start the download again from the link",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return START_NOT_STICKY
+            }
+            startDownload(
+                this, url, params.outputTemplate, params.audioOnly,
+                params.maxHeight, params.playlistMode
+            )
             return START_NOT_STICKY
         }
         val url = safeIntent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
@@ -115,6 +228,23 @@ class DownloadService : Service() {
         }
         publishedPaths.clear()
         skippedNames.clear()
+        // A fresh start clears any stale pause mark, so a later real
+        // failure is never misreported as a pause.
+        pausedUrls.remove(url)
+        pauseReasons.remove(url)
+        logsByUrl.remove(url)
+        currentUrl = url
+        paramsByUrl[url] = DownloadParams(
+            outputTemplate, audioOnly, maxHeight, playlistMode
+        )
+        // The network this download starts on: a switch away from it
+        // auto-pauses (see registerNetworkCallback).
+        startNetwork = try {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)
+                ?.activeNetwork
+        } catch (_: Exception) {
+            null
+        }
 
         startForeground(NOTIFICATION_ID, buildNotification("Preparing download…", null))
         Thread {
@@ -200,8 +330,35 @@ class DownloadService : Service() {
                                 files.forEach { skippedNames.add(it.name) }
                             }
 
+                            override fun onLog(log: String) {
+                                logsByUrl[url] = log
+                            }
+
                             override fun onFinished(exitCode: Int, detail: String) {
                                 activeUrls.remove(url)
+                                currentUrl = null
+                                if (pausedUrls.contains(url)) {
+                                    // Pause, not failure: the user (or
+                                    // a network switch) stopped it
+                                    // deliberately. Keep staging fully
+                                    // intact — the resume restarts this
+                                    // same download in the same dir,
+                                    // and yt-dlp continues from .part.
+                                    pausedUrls.remove(url)
+                                    val reason = pauseReasons.remove(url)
+                                    this@DownloadService.updateNotification(
+                                        "Download paused", null
+                                    )
+                                    DownloadProgressBus.post(
+                                        DownloadProgressBus.State(
+                                            url, null,
+                                            DownloadProgressBus.Status.PAUSED,
+                                            reason
+                                        )
+                                    )
+                                    this@DownloadService.stopSelf()
+                                    return
+                                }
                                 if (exitCode == 0) {
                                     // The runner's Destination/Merger log
                                     // lines go STALE when --remux-video
@@ -314,6 +471,7 @@ class DownloadService : Service() {
 
                             override fun onError(message: String) {
                                 activeUrls.remove(url)
+                                currentUrl = null
                                 this@DownloadService.updateNotification(
                                     "Download error: $message", null
                                 )
@@ -329,6 +487,7 @@ class DownloadService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Download service failed", e)
                 activeUrls.remove(url)
+                currentUrl = null
                 updateNotification("Download error: " + (e.message ?: "unknown"), null)
                 DownloadProgressBus.post(
                     DownloadProgressBus.State(
@@ -381,6 +540,32 @@ class DownloadService : Service() {
         private const val EXTRA_MAX_HEIGHT = "com.graball.engine.extra.MAX_HEIGHT"
         private const val EXTRA_PLAYLIST_MODE = "com.graball.engine.extra.PLAYLIST_MODE"
         private const val ACTION_CANCEL = "com.graball.engine.action.CANCEL"
+        private const val ACTION_PAUSE = "com.graball.engine.action.PAUSE"
+        private const val ACTION_RESUME = "com.graball.engine.action.RESUME"
+
+        /**
+         * Everything needed to restart a download exactly as it
+         * started (same quality, audio mode, playlist size, staging
+         * dir). Kept per URL so a paused row can resume without the
+         * activity remembering anything — including rows the browser
+         * started. Lives in the companion, so it survives the service
+         * stopping after a pause; it does NOT survive a process death,
+         * in which case resume falls back to "start again from the
+         * link".
+         */
+        private data class DownloadParams(
+            val outputTemplate: String,
+            val audioOnly: Boolean,
+            val maxHeight: Int?,
+            val playlistMode: String
+        )
+
+        private val paramsByUrl = mutableMapOf<String, DownloadParams>()
+
+        /** Full non-progress log per URL, for the copy-log button. */
+        private val logsByUrl = mutableMapOf<String, String>()
+
+        fun getLog(url: String): String? = logsByUrl[url]
 
         fun startDownload(
             context: Context,
@@ -450,6 +635,31 @@ class DownloadService : Service() {
         fun cancel(context: Context) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 action = ACTION_CANCEL
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /** Pause the currently running download, if any. */
+        fun pause(context: Context) {
+            val intent = Intent(context, DownloadService::class.java).apply {
+                action = ACTION_PAUSE
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /** Resume a paused download with its stored parameters. */
+        fun resume(context: Context, url: String) {
+            val intent = Intent(context, DownloadService::class.java).apply {
+                action = ACTION_RESUME
+                putExtra(EXTRA_URL, url)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

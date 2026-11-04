@@ -29,6 +29,8 @@ interface DownloadListener {
     fun onDownloadedFiles(files: List<File>) {}
     /** Files yt-dlp skipped because they already exist (resume runs). */
     fun onSkippedFiles(files: List<File>) {}
+    /** Full non-progress log (capped), delivered just before onFinished. */
+    fun onLog(log: String) {}
 }
 
 /**
@@ -107,6 +109,12 @@ class YtDlpRunner(
                 // yt-dlp, Python tracebacks, and linker errors are signal.
                 val tail = ArrayDeque<String>()
                 val skipped = mutableListOf<File>()
+                // Full non-progress log for the copy-log button: the
+                // 8-line tail is what the row shows, but debugging
+                // (pasted to Boba) wants the whole run. Progress lines
+                // are excluded, or they would flush the real content.
+                // Capped so one chatty download cannot grow memory.
+                val logLines = ArrayDeque<String>()
                 // Playlist position, from yt-dlp's own
                 // "[download] Downloading item N of M" lines. Without
                 // it, a playlist looks like one download that keeps
@@ -142,6 +150,8 @@ class YtDlpRunner(
                         if (!PROGRESS_REGEX.containsMatchIn(raw)) {
                             tail.addLast(raw)
                             while (tail.size > 8) tail.removeFirst()
+                            logLines.addLast(raw)
+                            while (logLines.size > 500) logLines.removeFirst()
                         }
                         // [ExtractAudio] Destination lines REPLACE the
                         // pending destination instead of emitting it:
@@ -189,6 +199,9 @@ class YtDlpRunner(
                 }
                 if (skipped.isNotEmpty()) {
                     listener.onSkippedFiles(skipped)
+                }
+                if (logLines.isNotEmpty()) {
+                    listener.onLog(logLines.joinToString("\n"))
                 }
                 val detail = if (exitCode == 0) "" else tail.joinToString("\n")
                 listener.onFinished(exitCode, detail)

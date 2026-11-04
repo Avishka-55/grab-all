@@ -14,7 +14,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 object DownloadProgressBus {
 
-    enum class Status { DOWNLOADING, COMPLETE, FAILED }
+    enum class Status { DOWNLOADING, COMPLETE, FAILED, PAUSED }
 
     data class State(
         /** Queue id — currently the download URL. */

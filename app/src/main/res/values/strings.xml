@@ -19,4 +19,8 @@
     <string name="audio_only">Audio only</string>
     <string name="queue_cancel">Cancel</string>
     <string name="queue_cancelled">Cancelled</string>
+    <string name="queue_pause">Pause</string>
+    <string name="queue_resume">Resume</string>
+    <string name="queue_paused">Paused</string>
+    <string name="queue_copy_log">Copy log</string>
 </resources>

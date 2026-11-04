@@ -1,5 +1,8 @@
 package com.graball
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.widget.ArrayAdapter
@@ -29,7 +32,11 @@ class MainActivity : AppCompatActivity() {
     private val rowStatus = mutableMapOf<String, TextView>()
     private val rowDetail = mutableMapOf<String, TextView>()
     private val rowCancel = mutableMapOf<String, Button>()
+    private val rowPause = mutableMapOf<String, Button>()
+    private val rowCopyLog = mutableMapOf<String, Button>()
     private val cancelledUrls = mutableSetOf<String>()
+    /** URLs currently paused (their rows show Resume, not Pause). */
+    private val pausedRows = mutableSetOf<String>()
     // What each row is downloading ("Audio only · First 20", "720p"),
     // so a finished row still answers "was that audio or video?".
     private val rowMode = mutableMapOf<String, String>()
@@ -259,17 +266,68 @@ class MainActivity : AppCompatActivity() {
                 status.text = getString(R.string.queue_cancelled)
                 detail.visibility = android.view.View.GONE
                 visibility = android.view.View.GONE
+                // A paused row's Resume button must die with it, or
+                // it would offer to resume a cancelled download.
+                rowPause[url]?.visibility = android.view.View.GONE
+                rowCopyLog[url]?.visibility = android.view.View.GONE
                 DownloadService.cancel(this@MainActivity)
+            }
+        }
+        val pause = Button(this).apply {
+            text = getString(R.string.queue_pause)
+            textSize = 12f
+            visibility = if (showCancel) {
+                android.view.View.VISIBLE
+            } else {
+                android.view.View.GONE
+            }
+            setOnClickListener {
+                // The label is the state: Pause stops the running
+                // download (kept .part, resumable), Resume restarts
+                // it with the same settings via the service.
+                if (pausedRows.contains(url)) {
+                    DownloadService.resume(this@MainActivity, url)
+                } else {
+                    DownloadService.pause(this@MainActivity)
+                }
+            }
+        }
+        val copyLog = Button(this).apply {
+            text = getString(R.string.queue_copy_log)
+            textSize = 12f
+            visibility = android.view.View.GONE
+            setOnClickListener {
+                val log = DownloadService.getLog(url)
+                if (log.isNullOrBlank()) {
+                    Toast.makeText(
+                        this@MainActivity, "No log to copy",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE)
+                        as ClipboardManager
+                    clipboard.setPrimaryClip(
+                        ClipData.newPlainText("GrabAll log", log)
+                    )
+                    Toast.makeText(
+                        this@MainActivity, "Log copied",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         }
         row.addView(title)
         row.addView(status)
         row.addView(detail)
         row.addView(cancel)
+        row.addView(pause)
+        row.addView(copyLog)
         queueContainer.addView(row)
         rowStatus[url] = status
         rowDetail[url] = detail
         rowCancel[url] = cancel
+        rowPause[url] = pause
+        rowCopyLog[url] = copyLog
     }
 
     private fun updateRow(state: DownloadProgressBus.State) {
@@ -279,11 +337,22 @@ class MainActivity : AppCompatActivity() {
         }
         val detailView = rowDetail[state.id]
         val cancelView = rowCancel[state.id]
+        val pauseView = rowPause[state.id]
+        val copyView = rowCopyLog[state.id]
         if (cancelledUrls.contains(state.id)) {
             statusView.text = getString(R.string.queue_cancelled)
             detailView?.visibility = android.view.View.GONE
             cancelView?.visibility = android.view.View.GONE
+            pauseView?.visibility = android.view.View.GONE
+            copyView?.visibility = android.view.View.GONE
             return
+        }
+        // Pause is not terminal: it is not history, and the row
+        // stays live for Resume. Only COMPLETE/FAILED are recorded.
+        if (state.status == DownloadProgressBus.Status.PAUSED) {
+            pausedRows.add(state.id)
+        } else {
+            pausedRows.remove(state.id)
         }
         // Terminal states are history: record once, here, where every
         // row update already flows through.
@@ -311,15 +380,39 @@ class MainActivity : AppCompatActivity() {
                 getString(R.string.queue_done) + modeSuffix
             }
             DownloadProgressBus.Status.FAILED -> getString(R.string.queue_failed)
+            DownloadProgressBus.Status.PAUSED -> getString(R.string.queue_paused)
         }
         cancelView?.visibility = if (
-            state.status == DownloadProgressBus.Status.DOWNLOADING
+            state.status == DownloadProgressBus.Status.DOWNLOADING ||
+            state.status == DownloadProgressBus.Status.PAUSED
         ) {
             android.view.View.VISIBLE
         } else {
             android.view.View.GONE
         }
-        if (state.status == DownloadProgressBus.Status.FAILED &&
+        pauseView?.visibility = if (
+            state.status == DownloadProgressBus.Status.DOWNLOADING ||
+            state.status == DownloadProgressBus.Status.PAUSED
+        ) {
+            android.view.View.VISIBLE
+        } else {
+            android.view.View.GONE
+        }
+        if (state.status == DownloadProgressBus.Status.PAUSED) {
+            pauseView?.text = getString(R.string.queue_resume)
+        } else {
+            pauseView?.text = getString(R.string.queue_pause)
+        }
+        copyView?.visibility = if (
+            state.status == DownloadProgressBus.Status.FAILED ||
+            state.status == DownloadProgressBus.Status.PAUSED
+        ) {
+            android.view.View.VISIBLE
+        } else {
+            android.view.View.GONE
+        }
+        if ((state.status == DownloadProgressBus.Status.FAILED ||
+            state.status == DownloadProgressBus.Status.PAUSED) &&
             !state.detail.isNullOrBlank() && detailView != null
         ) {
             detailView.text = state.detail
