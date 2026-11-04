@@ -1,7 +1,13 @@
 <resources>
-    <!-- NoActionBar: the header is in-content (gradient banner), so
-         the system bar would only duplicate the title. -->
-    <style name="Theme.GrabAll" parent="Theme.AppCompat.DayNight.NoActionBar">
+    <!-- TEMPORARILY back to DarkActionBar while diagnosing the
+         v0.5.0 launch crash: the NoActionBar switch was the only
+         change touching activity startup (super.onCreate), and
+         v0.5.1's in-activity catcher never fired, so the crash
+         happens before MainActivity code runs. If v0.5.2 opens,
+         the theme was it; if it still closes, GrabAllApp's
+         earlier handler will have saved the trace for the dialog.
+         The gradient header stays as the design's banner. -->
+    <style name="Theme.GrabAll" parent="Theme.AppCompat.DayNight.DarkActionBar">
         <item name="android:windowBackground">@color/graball_bg</item>
     </style>
 </resources>

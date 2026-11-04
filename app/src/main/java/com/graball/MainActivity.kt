@@ -73,56 +73,43 @@ class MainActivity : AppCompatActivity() {
         }
 
     /**
-     * v0.5.1 diagnosis: the v0.5.0 redesign crashes on launch on
-     * avishka's phone, and static review of the shipped code found
-     * no cause (tag content verified identical to local, no stale
-     * view references). So instead of guessing: any uncaught crash
-     * is written to filesDir/last_crash.txt, and on the NEXT launch
-     * the trace is shown in a dialog BEFORE anything else runs, so
-     * the exact failing line comes back. The file is deleted when
-     * the dialog is dismissed, so it only reappears after a new crash.
+     * Shows the trace GrabAllApp saved after the last crash, if any.
+     * Runs first in onCreate, before setContentView, so it appears
+     * even when the crash is in layout inflation. The file is
+     * deleted when the dialog is dismissed, so it only reappears
+     * after a new crash.
      */
-    private fun installCrashCatcher() {
+    private fun showLastCrashIfAny() {
         val traceFile = File(filesDir, "last_crash.txt")
-        if (traceFile.exists()) {
-            val trace = try {
-                traceFile.readText()
-            } catch (_: Exception) {
-                ""
-            }
-            if (trace.isNotBlank()) {
-                val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
-                    .setTitle("GrabAll crashed last time — please screenshot this")
-                    .setMessage(trace.take(4000))
-                    .setPositiveButton("Copy") { _, _ ->
-                        val clip = ClipData.newPlainText("crash", trace)
-                        (getSystemService(Context.CLIPBOARD_SERVICE)
-                            as? ClipboardManager)?.setPrimaryClip(clip)
-                        Toast.makeText(this, "Crash copied", Toast.LENGTH_SHORT).show()
-                    }
-                    .setNegativeButton("Dismiss") { _, _ -> }
-                    .create()
-                dialog.setOnDismissListener { traceFile.delete() }
-                dialog.show()
-            }
+        if (!traceFile.exists()) {
+            return
         }
-        val prev = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { t, e ->
-            try {
-                val sw = java.io.StringWriter()
-                e.printStackTrace(java.io.PrintWriter(sw))
-                traceFile.writeText(e.toString() + "\n" + sw.toString().take(8000))
-            } catch (_: Exception) {
-            }
-            prev?.uncaughtException(t, e)
+        val trace = try {
+            traceFile.readText()
+        } catch (_: Exception) {
+            ""
         }
+        if (trace.isBlank()) {
+            return
+        }
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("GrabAll crashed last time — please screenshot this")
+            .setMessage(trace.take(4000))
+            .setPositiveButton("Copy") { _, _ ->
+                val clip = ClipData.newPlainText("crash", trace)
+                (getSystemService(Context.CLIPBOARD_SERVICE)
+                    as? ClipboardManager)?.setPrimaryClip(clip)
+                Toast.makeText(this, "Crash copied", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Dismiss") { _, _ -> }
+            .create()
+        dialog.setOnDismissListener { traceFile.delete() }
+        dialog.show()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Installed before setContentView so even an inflation
-        // crash is captured with its stack trace.
-        installCrashCatcher()
+        showLastCrashIfAny()
         setContentView(R.layout.activity_main)
         queueContainer = findViewById(R.id.queueContainer)
         cookiesStatus = findViewById(R.id.cookiesStatus)
