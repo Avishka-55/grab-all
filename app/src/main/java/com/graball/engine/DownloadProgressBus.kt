@@ -23,7 +23,9 @@ object DownloadProgressBus {
         val percent: Float?,
         val status: Status,
         /** Human-readable failure reason; only set when status is FAILED. */
-        val detail: String? = null
+        val detail: String? = null,
+        /** Playlist position ("Item 5 of 20"); only while DOWNLOADING. */
+        val item: String? = null
     )
 
     private val listeners = CopyOnWriteArrayList<(State) -> Unit>()

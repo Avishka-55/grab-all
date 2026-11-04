@@ -29,6 +29,9 @@ class MainActivity : AppCompatActivity() {
     private val rowDetail = mutableMapOf<String, TextView>()
     private val rowCancel = mutableMapOf<String, Button>()
     private val cancelledUrls = mutableSetOf<String>()
+    // What each row is downloading ("Audio only · First 20", "720p"),
+    // so a finished row still answers "was that audio or video?".
+    private val rowMode = mutableMapOf<String, String>()
 
     private val progressListener: (DownloadProgressBus.State) -> Unit = { state ->
         updateRow(state)
@@ -118,6 +121,27 @@ class MainActivity : AppCompatActivity() {
                 else -> null
             }
             cancelledUrls.remove(url)
+            rowMode[url] = buildString {
+                if (audioOnlyCheck.isChecked) {
+                    append("Audio only")
+                } else {
+                    append(
+                        when (qualitySpinner.selectedItemPosition) {
+                            1 -> "1080p"
+                            2 -> "720p"
+                            3 -> "480p"
+                            4 -> "360p"
+                            else -> "Best"
+                        }
+                    )
+                }
+                when (playlistMode) {
+                    "20" -> append(" · First 20")
+                    "30" -> append(" · First 30")
+                    "50" -> append(" · First 50")
+                    "all" -> append(" · All videos")
+                }
+            }
             DownloadService.startDownload(
                 this, url, template,
                 audioOnlyCheck.isChecked, maxHeight, playlistMode
@@ -216,10 +240,16 @@ class MainActivity : AppCompatActivity() {
         statusView.text = when (state.status) {
             DownloadProgressBus.Status.DOWNLOADING -> {
                 val pct = state.percent?.toInt()
-                if (pct != null) getString(R.string.queue_downloading, pct)
+                val base = if (pct != null) getString(R.string.queue_downloading, pct)
                 else getString(R.string.queue_downloading_unknown)
+                val itemSuffix = state.item?.let { " · $it" } ?: ""
+                val modeSuffix = rowMode[state.id]?.let { " · $it" } ?: ""
+                base + itemSuffix + modeSuffix
             }
-            DownloadProgressBus.Status.COMPLETE -> getString(R.string.queue_done)
+            DownloadProgressBus.Status.COMPLETE -> {
+                val modeSuffix = rowMode[state.id]?.let { " · $it" } ?: ""
+                getString(R.string.queue_done) + modeSuffix
+            }
             DownloadProgressBus.Status.FAILED -> getString(R.string.queue_failed)
         }
         cancelView?.visibility = if (

@@ -9,7 +9,9 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.widget.Toast
 import java.io.File
+import java.util.Collections
 
 /**
  * Foreground service that runs one yt-dlp download at a time.
@@ -31,6 +33,18 @@ class DownloadService : Service() {
 
     /** Final files from the runner, published on successful finish. */
     private var downloadedFiles: List<File> = emptyList()
+
+    /**
+     * URLs with a download currently running. A second tap on Download
+     * for the same URL (or a re-tap after reopening the app, when the
+     * queue rows are gone) must NOT start a second yt-dlp: the service
+     * holds a single runner var, so the first process would be
+     * orphaned — still downloading and publishing in the background
+     * while the row follows the second one, which looks exactly like
+     * "after finishing it starts again".
+     */
+    private val activeUrls =
+        Collections.synchronizedSet(mutableSetOf<String>())
 
     override fun onCreate() {
         super.onCreate()
@@ -65,6 +79,13 @@ class DownloadService : Service() {
         val playlistMode =
             safeIntent.getStringExtra(EXTRA_PLAYLIST_MODE) ?: "single"
 
+        // Guard after all early returns, so a rejected intent never
+        // leaves the URL stuck in the set.
+        if (!activeUrls.add(url)) {
+            Toast.makeText(this, "Already downloading this", Toast.LENGTH_SHORT).show()
+            return START_NOT_STICKY
+        }
+
         startForeground(NOTIFICATION_ID, buildNotification("Preparing download…", null))
         Thread {
             try {
@@ -76,6 +97,7 @@ class DownloadService : Service() {
                             RuntimeExtractor.lastError ?: "Runtime setup failed"
                         )
                     )
+                    activeUrls.remove(url)
                     stopSelf()
                 } else {
                     // Repair cookies files saved by older imports, which
@@ -113,15 +135,17 @@ class DownloadService : Service() {
                         object : DownloadListener {
                             override fun onProgress(progress: DownloadProgress) {
                                 val pct = progress.percent
+                                val itemSuffix = progress.item?.let { " · $it" } ?: ""
                                 val text = if (pct != null) {
-                                    "Downloading… %.1f%%".format(pct)
+                                    "Downloading… %.1f%%".format(pct) + itemSuffix
                                 } else {
-                                    "Downloading…"
+                                    "Downloading…" + itemSuffix
                                 }
                                 this@DownloadService.updateNotification(text, pct?.toInt())
                                 DownloadProgressBus.post(
                                     DownloadProgressBus.State(
-                                        url, pct, DownloadProgressBus.Status.DOWNLOADING
+                                        url, pct, DownloadProgressBus.Status.DOWNLOADING,
+                                        item = progress.item
                                     )
                                 )
                             }
@@ -131,6 +155,7 @@ class DownloadService : Service() {
                             }
 
                             override fun onFinished(exitCode: Int, detail: String) {
+                                activeUrls.remove(url)
                                 if (exitCode == 0) {
                                     // The runner's Destination/Merger log
                                     // lines go STALE when --remux-video
@@ -215,6 +240,7 @@ class DownloadService : Service() {
                             }
 
                             override fun onError(message: String) {
+                                activeUrls.remove(url)
                                 this@DownloadService.updateNotification(
                                     "Download error: $message", null
                                 )
@@ -229,6 +255,7 @@ class DownloadService : Service() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Download service failed", e)
+                activeUrls.remove(url)
                 updateNotification("Download error: " + (e.message ?: "unknown"), null)
                 DownloadProgressBus.post(
                     DownloadProgressBus.State(

@@ -7,13 +7,16 @@ import java.io.InputStreamReader
 
 /**
  * Progress parsed from yt-dlp's stdout. Percent is null for lines that are
- * not download-progress lines (status messages, warnings, etc.).
+ * not download-progress lines (status messages, warnings, etc.). [item]
+ * is yt-dlp's playlist position ("Item 5 of 20") when the current
+ * download is one entry of a playlist, else null.
  */
 data class DownloadProgress(
     val percent: Float?,
     val speed: String?,
     val eta: String?,
-    val rawLine: String
+    val rawLine: String,
+    val item: String? = null
 )
 
 interface DownloadListener {
@@ -101,11 +104,26 @@ class YtDlpRunner(
                 // run fails. Progress lines are noise; error lines from
                 // yt-dlp, Python tracebacks, and linker errors are signal.
                 val tail = ArrayDeque<String>()
+                // Playlist position, from yt-dlp's own
+                // "[download] Downloading item N of M" lines. Without
+                // it, a playlist looks like one download that keeps
+                // restarting: each song's percent runs 0→100 and the
+                // row gives no hint which song is playing.
+                var currentItem: String? = null
                 BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         val raw = line ?: break
-                        listener.onProgress(parseProgress(raw))
+                        ITEM_REGEX.find(raw)?.let { match ->
+                            currentItem = "Item " + match.groupValues[1] +
+                                " of " + match.groupValues[2]
+                            listener.onProgress(
+                                DownloadProgress(
+                                    null, null, null, raw, currentItem
+                                )
+                            )
+                        }
+                        listener.onProgress(parseProgress(raw, currentItem))
                         if (!PROGRESS_REGEX.containsMatchIn(raw)) {
                             tail.addLast(raw)
                             while (tail.size > 8) tail.removeFirst()
@@ -183,13 +201,13 @@ class YtDlpRunner(
         return cmd
     }
 
-    private fun parseProgress(raw: String): DownloadProgress {
+    private fun parseProgress(raw: String, item: String?): DownloadProgress {
         // Typical line: [download]  42.3% of 12.34MiB at  1.23MiB/s ETA 00:07
         val percent = PROGRESS_REGEX
             .find(raw)?.groupValues?.get(1)?.toFloatOrNull()
         val speed = Regex("""at\s+(\S+/s)""").find(raw)?.groupValues?.get(1)
         val eta = Regex("""ETA\s+(\S+)""").find(raw)?.groupValues?.get(1)
-        return DownloadProgress(percent, speed, eta, raw)
+        return DownloadProgress(percent, speed, eta, raw, item)
     }
 
     companion object {
@@ -197,6 +215,8 @@ class YtDlpRunner(
 
         /** Matches yt-dlp progress lines, which are noise for error tails. */
         private val PROGRESS_REGEX = Regex("""\[download\]\s+(\d+(?:\.\d+)?)%""")
+        private val ITEM_REGEX =
+            Regex("""\[download\] Downloading item (\d+) of (\d+)""")
 
         /** "[download] Destination: /path" and "[ExtractAudio] Destination:". */
         private val DESTINATION_REGEX =
