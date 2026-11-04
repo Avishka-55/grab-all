@@ -11,6 +11,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.MediaStore
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -74,6 +75,7 @@ class PlayerActivity : AppCompatActivity() {
                 loadFiles()
             } else {
                 emptyView.text = getString(R.string.player_need_permission)
+                emptyView.visibility = View.VISIBLE
             }
         }
 
@@ -173,14 +175,48 @@ class PlayerActivity : AppCompatActivity() {
 
     @Suppress("DEPRECATION")
     private fun loadFiles() {
-        val dir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            "GrabAll"
-        )
-        files = dir.listFiles()
-            ?.filter { it.isFile && isAudio(it.name) }
-            ?.sortedByDescending { it.lastModified() }
-            ?: emptyList()
+        // v0.7.1: scan the whole phone for music via MediaStore, not
+        // just Downloads/GrabAll — his mp3/m4a files live in other
+        // folders too, and v0.7.0's single-folder listing showed
+        // nothing for them. Fall back to the direct folder listing
+        // if the MediaStore query comes up empty.
+        val found = mutableListOf<File>()
+        try {
+            val projection = arrayOf(
+                MediaStore.Audio.Media.DATA,
+                MediaStore.Audio.Media.DISPLAY_NAME
+            )
+            val selection = MediaStore.Audio.Media.IS_MUSIC + "!=0"
+            val sort = MediaStore.Audio.Media.DATE_MODIFIED + " DESC"
+            contentResolver.query(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                projection, selection, null, sort
+            )?.use { cursor ->
+                val dataCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
+                while (cursor.moveToNext()) {
+                    val path = if (dataCol >= 0) cursor.getString(dataCol) else null
+                    if (!path.isNullOrEmpty()) {
+                        val f = File(path)
+                        if (f.isFile && isAudio(f.name)) {
+                            found.add(f)
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        files = if (found.isNotEmpty()) {
+            found.distinctBy { it.absolutePath }
+        } else {
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "GrabAll"
+            )
+            dir.listFiles()
+                ?.filter { it.isFile && isAudio(it.name) }
+                ?.sortedByDescending { it.lastModified() }
+                ?: emptyList()
+        }
         if (files.isEmpty()) {
             emptyView.text = getString(R.string.player_empty)
         }
