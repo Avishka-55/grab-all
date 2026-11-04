@@ -62,6 +62,24 @@ object DownloadHistory {
         }
     }
 
+    /** Drop every entry for [url] (the Clear button on a row). */
+    fun remove(context: Context, url: String) {
+        try {
+            val file = historyFile(context)
+            if (!file.exists()) return
+            val kept = file.readLines().filter { line ->
+                val parts = line.split("\t")
+                parts.size < 4 || parts[3] != url
+            }
+            if (kept.isEmpty()) {
+                file.delete()
+            } else {
+                file.writeText(kept.joinToString("\n") + "\n")
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     fun load(context: Context): List<Entry> {
         val file = historyFile(context)
         if (!file.exists()) {

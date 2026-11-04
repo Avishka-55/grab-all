@@ -149,7 +149,12 @@ class BrowseActivity : AppCompatActivity() {
             refreshPanelLink()
         }
         if (savedInstanceState == null) {
-            webView.loadUrl("https://www.youtube.com")
+            // The Music tab passes m.youtube.com/music; everything
+            // else opens plain YouTube.
+            webView.loadUrl(
+                intent.getStringExtra("start_url")
+                    ?: "https://www.youtube.com"
+            )
         }
     }
 

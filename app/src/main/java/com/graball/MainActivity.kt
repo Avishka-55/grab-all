@@ -79,7 +79,11 @@ class MainActivity : AppCompatActivity() {
         }
         mainTabs[2].setOnClickListener {
             selectTab(mainTabs[2])
-            soonToast("Music")
+            startActivity(
+                Intent(this, BrowseActivity::class.java).putExtra(
+                    "start_url", "https://m.youtube.com/music"
+                )
+            )
         }
         mainTabs[3].setOnClickListener {
             selectTab(mainTabs[3])

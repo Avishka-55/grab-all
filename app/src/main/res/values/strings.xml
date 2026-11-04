@@ -21,11 +21,13 @@
     <string name="queue_resume">Resume</string>
     <string name="queue_paused">Paused</string>
     <string name="queue_copy_log">Copy log</string>
+    <string name="queue_retry">Retry</string>
+    <string name="queue_clear">Clear</string>
     <string name="grab">Grab</string>
     <string name="refresh_link">Refresh link</string>
     <string name="browse_close">✕</string>
     <string name="link_not_detected">Link not detected — open a video or playlist, then tap Refresh link</string>
-    <string name="search_to_download">Search to download</string>
+    <string name="search_to_download">Paste a link</string>
     <string name="quick_sites">Quick Grab Sites</string>
     <string name="site_active">Active</string>
     <string name="site_soon">Soon</string>

@@ -338,7 +338,9 @@
                         android:layout_marginTop="8dp"
                         android:text="YouTube"
                         android:textColor="@color/graball_text"
-                        android:textSize="14sp" />
+                        android:textSize="14sp"
+                        android:lines="2"
+                        android:gravity="center" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -377,7 +379,9 @@
                         android:layout_marginTop="8dp"
                         android:text="TikTok"
                         android:textColor="@color/graball_text"
-                        android:textSize="14sp" />
+                        android:textSize="14sp"
+                        android:lines="2"
+                        android:gravity="center" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -416,7 +420,9 @@
                         android:layout_marginTop="8dp"
                         android:text="Instagram"
                         android:textColor="@color/graball_text"
-                        android:textSize="14sp" />
+                        android:textSize="14sp"
+                        android:lines="2"
+                        android:gravity="center" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -462,7 +468,9 @@
                         android:layout_marginTop="8dp"
                         android:text="Facebook"
                         android:textColor="@color/graball_text"
-                        android:textSize="14sp" />
+                        android:textSize="14sp"
+                        android:lines="2"
+                        android:gravity="center" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -501,7 +509,9 @@
                         android:layout_marginTop="8dp"
                         android:text="WhatsApp Status"
                         android:textColor="@color/graball_text"
-                        android:textSize="14sp" />
+                        android:textSize="14sp"
+                        android:lines="2"
+                        android:gravity="center" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -541,7 +551,9 @@
                         android:layout_marginTop="8dp"
                         android:text="@string/tab_more"
                         android:textColor="@color/graball_text"
-                        android:textSize="14sp" />
+                        android:textSize="14sp"
+                        android:lines="2"
+                        android:gravity="center" />
 
                     <TextView
                         android:layout_width="wrap_content"

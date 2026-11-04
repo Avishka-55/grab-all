@@ -30,6 +30,9 @@ class DownloadsActivity : AppCompatActivity() {
     private val rowCancel = mutableMapOf<String, Button>()
     private val rowPause = mutableMapOf<String, Button>()
     private val rowCopyLog = mutableMapOf<String, Button>()
+    private val rowRetry = mutableMapOf<String, Button>()
+    private val rowClear = mutableMapOf<String, Button>()
+    private val rowViews = mutableMapOf<String, LinearLayout>()
     private val cancelledUrls = mutableSetOf<String>()
     /** URLs currently paused (their rows show Resume, not Pause). */
     private val pausedRows = mutableSetOf<String>()
@@ -67,6 +70,14 @@ class DownloadsActivity : AppCompatActivity() {
                 getString(R.string.queue_failed)
             }) + modeSuffix
             addRow(entry.url, statusText, entry.detail, showCancel = false)
+            // Finished history rows get their dismiss/retry buttons
+            // up front, not only after a live update arrives.
+            if (entry.status == "Failed") {
+                rowRetry[entry.url]?.visibility = android.view.View.VISIBLE
+                rowClear[entry.url]?.visibility = android.view.View.VISIBLE
+            } else {
+                rowClear[entry.url]?.visibility = android.view.View.VISIBLE
+            }
         }
     }
 
@@ -141,9 +152,22 @@ class DownloadsActivity : AppCompatActivity() {
             detail.text = detailText
             detail.visibility = android.view.View.VISIBLE
         }
+        // One horizontal button row: Cancel/Pause used to stack
+        // full-width with no gap between them, which looked broken.
+        // Buttons share the row equally, with a gap on each side.
+        val buttonsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        fun buttonParams() = LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ).apply {
+            leftMargin = dp(4)
+            rightMargin = dp(4)
+        }
         val cancel = Button(this).apply {
             text = getString(R.string.queue_cancel)
             textSize = 12f
+            layoutParams = buttonParams()
             setBackgroundResource(R.drawable.btn_small)
             setTextColor(Color.WHITE)
             visibility = if (showCancel) {
@@ -169,6 +193,7 @@ class DownloadsActivity : AppCompatActivity() {
         val pause = Button(this).apply {
             text = getString(R.string.queue_pause)
             textSize = 12f
+            layoutParams = buttonParams()
             setBackgroundResource(R.drawable.btn_small)
             setTextColor(Color.WHITE)
             visibility = if (showCancel) {
@@ -190,6 +215,7 @@ class DownloadsActivity : AppCompatActivity() {
         val copyLog = Button(this).apply {
             text = getString(R.string.queue_copy_log)
             textSize = 12f
+            layoutParams = buttonParams()
             setBackgroundResource(R.drawable.btn_small)
             setTextColor(Color.WHITE)
             visibility = android.view.View.GONE
@@ -213,18 +239,68 @@ class DownloadsActivity : AppCompatActivity() {
                 }
             }
         }
+        // Retry restarts a failed download with the exact settings
+        // it started with (same quality, audio mode, playlist size,
+        // staging dir) — the service kept them per URL, so a retry
+        // also resumes from the .part file instead of starting over.
+        // If the app was restarted since, the settings are gone and
+        // the service says to start again from the link.
+        val retry = Button(this).apply {
+            text = getString(R.string.queue_retry)
+            textSize = 12f
+            layoutParams = buttonParams()
+            setBackgroundResource(R.drawable.btn_small)
+            setTextColor(Color.WHITE)
+            visibility = android.view.View.GONE
+            setOnClickListener {
+                DownloadService.resume(this@DownloadsActivity, url)
+            }
+        }
+        // Clear dismisses a finished row for good: the row, its
+        // history entry, and its mode label all go, so it never
+        // comes back on the next launch.
+        val clear = Button(this).apply {
+            text = getString(R.string.queue_clear)
+            textSize = 12f
+            layoutParams = buttonParams()
+            setBackgroundResource(R.drawable.btn_small)
+            setTextColor(Color.WHITE)
+            visibility = android.view.View.GONE
+            setOnClickListener {
+                queueContainer.removeView(rowViews[url])
+                rowStatus.remove(url)
+                rowDetail.remove(url)
+                rowCancel.remove(url)
+                rowPause.remove(url)
+                rowCopyLog.remove(url)
+                rowRetry.remove(url)
+                rowClear.remove(url)
+                rowViews.remove(url)
+                rowMode.remove(url)
+                cancelledUrls.remove(url)
+                pausedRows.remove(url)
+                DownloadProgressBus.modes.remove(url)
+                DownloadHistory.remove(this@DownloadsActivity, url)
+            }
+        }
+        buttonsRow.addView(cancel)
+        buttonsRow.addView(pause)
+        buttonsRow.addView(copyLog)
+        buttonsRow.addView(retry)
+        buttonsRow.addView(clear)
         row.addView(title)
         row.addView(status)
         row.addView(detail)
-        row.addView(cancel)
-        row.addView(pause)
-        row.addView(copyLog)
+        row.addView(buttonsRow)
         queueContainer.addView(row)
         rowStatus[url] = status
         rowDetail[url] = detail
         rowCancel[url] = cancel
         rowPause[url] = pause
         rowCopyLog[url] = copyLog
+        rowRetry[url] = retry
+        rowClear[url] = clear
+        rowViews[url] = row
     }
 
     private fun updateRow(state: DownloadProgressBus.State) {
@@ -236,6 +312,8 @@ class DownloadsActivity : AppCompatActivity() {
         val cancelView = rowCancel[state.id]
         val pauseView = rowPause[state.id]
         val copyView = rowCopyLog[state.id]
+        val retryView = rowRetry[state.id]
+        val clearView = rowClear[state.id]
         // A DOWNLOADING tick means a NEW download for this URL: clear
         // any cancelled flag left by an earlier run of the same URL,
         // or the row would stay stuck on "Cancelled" forever.
@@ -251,6 +329,8 @@ class DownloadsActivity : AppCompatActivity() {
             cancelView?.visibility = android.view.View.GONE
             pauseView?.visibility = android.view.View.GONE
             copyView?.visibility = android.view.View.GONE
+            retryView?.visibility = android.view.View.GONE
+            clearView?.visibility = android.view.View.VISIBLE
             return
         }
         // Pause is not terminal: it is not history, and the row
@@ -312,6 +392,21 @@ class DownloadsActivity : AppCompatActivity() {
         copyView?.visibility = if (
             state.status == DownloadProgressBus.Status.FAILED ||
             state.status == DownloadProgressBus.Status.PAUSED
+        ) {
+            android.view.View.VISIBLE
+        } else {
+            android.view.View.GONE
+        }
+        retryView?.visibility = if (
+            state.status == DownloadProgressBus.Status.FAILED
+        ) {
+            android.view.View.VISIBLE
+        } else {
+            android.view.View.GONE
+        }
+        clearView?.visibility = if (
+            state.status == DownloadProgressBus.Status.COMPLETE ||
+            state.status == DownloadProgressBus.Status.FAILED
         ) {
             android.view.View.VISIBLE
         } else {
