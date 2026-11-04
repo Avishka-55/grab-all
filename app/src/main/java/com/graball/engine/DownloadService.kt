@@ -31,8 +31,29 @@ class DownloadService : Service() {
     @Volatile
     private var runner: YtDlpRunner? = null
 
-    /** Final files from the runner, published on successful finish. */
+    /** Final files from the runner, used as a fallback at finish time. */
     private var downloadedFiles: List<File> = emptyList()
+
+    /**
+     * Paths already published to Downloads for the current download.
+     * Each song of an audio playlist is published the moment it
+     * finishes (see onDownloadedFiles below), so a cancelled playlist
+     * keeps its finished songs instead of losing everything — and the
+     * end-of-run scan must not publish the same file twice.
+     */
+    private val publishedPaths = mutableSetOf<String>()
+
+    /** Publish one file unless it was already published this run. */
+    private fun publishFile(file: File): Boolean {
+        if (publishedPaths.contains(file.absolutePath)) {
+            return true
+        }
+        val ok = MediaStorePublisher.publish(this, file, file.name) != null
+        if (ok) {
+            publishedPaths.add(file.absolutePath)
+        }
+        return ok
+    }
 
     /**
      * URLs with a download currently running. A second tap on Download
@@ -85,6 +106,7 @@ class DownloadService : Service() {
             Toast.makeText(this, "Already downloading this", Toast.LENGTH_SHORT).show()
             return START_NOT_STICKY
         }
+        publishedPaths.clear()
 
         startForeground(NOTIFICATION_ID, buildNotification("Preparing download…", null))
         Thread {
@@ -151,7 +173,19 @@ class DownloadService : Service() {
                             }
 
                             override fun onDownloadedFiles(files: List<File>) {
-                                downloadedFiles = files
+                                if (audioOnly) {
+                                    // Audio downloads have no merge or
+                                    // remux step, so a destination the
+                                    // runner reports mid-run IS a
+                                    // finished song: publish it now so
+                                    // it shows up in Downloads at once.
+                                    // Video downloads keep the old
+                                    // behavior (publish only the final
+                                    // merged file at the end).
+                                    files.forEach { publishFile(it) }
+                                } else {
+                                    downloadedFiles = files
+                                }
                             }
 
                             override fun onFinished(exitCode: Int, detail: String) {
@@ -187,15 +221,10 @@ class DownloadService : Service() {
                                     } else {
                                         downloadedFiles.filter { it.exists() }
                                     }
-                                    var published = 0
                                     candidates.forEach { file ->
-                                        if (MediaStorePublisher.publish(
-                                                this@DownloadService, file, file.name
-                                            ) != null
-                                        ) {
-                                            published++
-                                        }
+                                        publishFile(file)
                                     }
+                                    val published = publishedPaths.size
                                     // Drop the whole staging dir, so a
                                     // later download of the same video can
                                     // never "skip" off a leftover.
@@ -226,6 +255,14 @@ class DownloadService : Service() {
                                         )
                                     }
                                 } else {
+                                    // Failed or cancelled: finished
+                                    // songs are already in Downloads
+                                    // (published mid-run), so dropping
+                                    // staging only removes partials and
+                                    // unpublished leftovers.
+                                    val outDir = File(outputTemplate).parentFile
+                                    outDir?.listFiles()?.forEach { it.delete() }
+                                    outDir?.delete()
                                     this@DownloadService.updateNotification(
                                         "Download failed (exit $exitCode)", null
                                     )

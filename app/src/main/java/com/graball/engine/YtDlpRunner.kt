@@ -110,6 +110,18 @@ class YtDlpRunner(
                 // restarting: each song's percent runs 0→100 and the
                 // row gives no hint which song is playing.
                 var currentItem: String? = null
+                // The last destination seen, emitted as finished when
+                // the NEXT destination appears (yt-dlp prints
+                // Destination when it starts a file, so a file is
+                // certainly done once the next one starts). The
+                // service publishes these immediately for audio-only
+                // downloads, where a destination IS the final file —
+                // so each song appears in Downloads as it finishes
+                // instead of only when the whole playlist ends. For
+                // merged video downloads the service ignores these
+                // mid-run emissions (they are parts, not finals) and
+                // publishes only the final file at the end.
+                var lastDestination: File? = null
                 BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
@@ -129,7 +141,12 @@ class YtDlpRunner(
                             while (tail.size > 8) tail.removeFirst()
                         }
                         DESTINATION_REGEX.find(raw)?.groupValues?.get(1)?.let {
-                            destinations += File(it.trim())
+                            val dest = File(it.trim())
+                            lastDestination?.let { prev ->
+                                listener.onDownloadedFiles(listOf(prev))
+                            }
+                            lastDestination = dest
+                            destinations += dest
                         }
                         MERGER_REGEX.find(raw)?.groupValues?.get(1)?.let {
                             merged = File(it.trim())
