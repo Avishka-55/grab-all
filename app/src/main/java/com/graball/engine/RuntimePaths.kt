@@ -2,6 +2,7 @@ package com.graball.engine
 
 import android.content.Context
 import java.io.File
+import java.security.MessageDigest
 
 /**
  * Central layout for GrabAll's embedded native runtime.
@@ -55,4 +56,19 @@ object RuntimePaths {
     /** Staging dir for finished downloads before the MediaStore publish. */
     fun stagingDir(context: Context): File =
         File(context.filesDir, "staging")
+
+    /**
+     * Stable staging dir for one URL (first 16 hex chars of its SHA-1).
+     * Resume depends on it: a re-tap after a network failure must land
+     * in the SAME dir as the failed run, so yt-dlp finds the .part file
+     * and continues instead of starting over. (The old per-download
+     * timestamp dir made every retry start from zero.)
+     */
+    fun stagingDirFor(context: Context, url: String): File {
+        val digest = MessageDigest.getInstance("SHA-1")
+            .digest(url.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+            .substring(0, 16)
+        return File(stagingDir(context), digest)
+    }
 }

@@ -13,6 +13,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.graball.engine.CookieImporter
+import com.graball.engine.DownloadHistory
 import com.graball.engine.DownloadProgressBus
 import com.graball.engine.DownloadService
 import com.graball.engine.RuntimePaths
@@ -95,13 +96,10 @@ class MainActivity : AppCompatActivity() {
                 ).show()
                 return@setOnClickListener
             }
-            // A fresh staging subdir per download: a shared staging
-            // dir lets yt-dlp "skip" a re-download off a leftover file
-            // and lets the service mistake a stale path for a success.
-            val staging = File(
-                RuntimePaths.stagingDir(this),
-                System.currentTimeMillis().toString()
-            )
+            // A STABLE staging subdir per URL (not per tap): a re-tap
+            // after a network failure must land in the same dir, so
+            // yt-dlp finds the kept .part file and resumes.
+            val staging = RuntimePaths.stagingDirFor(this, url)
             if (!staging.exists()) {
                 staging.mkdirs()
             }
@@ -155,6 +153,42 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.importButton).setOnClickListener {
             importLauncher.launch("*/*")
         }
+        // Past downloads survive restarts now: reload them as rows
+        // (no cancel button — they are finished, not running).
+        DownloadHistory.load(this).forEach { entry ->
+            rowMode[entry.url] = entry.mode
+            val modeSuffix =
+                if (entry.mode.isNotBlank()) " · " + entry.mode else ""
+            val statusText = (if (entry.status == "Done") {
+                getString(R.string.queue_done)
+            } else {
+                getString(R.string.queue_failed)
+            }) + modeSuffix
+            addRow(entry.url, statusText, entry.detail, showCancel = false)
+        }
+        handleShareIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleShareIntent(intent)
+    }
+
+    /**
+     * Shared links land here from the YouTube app, Chrome, etc.
+     * (ACTION_SEND, text/plain). Prefill the link field — the user
+     * still picks quality/audio/playlist and taps Download, so a
+     * share can never start a download by surprise.
+     */
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) {
+            return
+        }
+        val shared = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        val url = Regex("https?://\\S+").find(shared)?.value
+            ?.trimEnd('.', ',', ';', '!', '?', ')', ']') ?: return
+        findViewById<EditText>(R.id.linkInput).setText(url)
+        Toast.makeText(this, "Link ready — tap Download", Toast.LENGTH_SHORT).show()
     }
 
     override fun onResume() {
@@ -175,7 +209,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Add a queue row for [url], or refresh it if one already exists. */
-    private fun addRow(url: String, statusText: String) {
+    private fun addRow(
+        url: String,
+        statusText: String,
+        detailText: String? = null,
+        showCancel: Boolean = true
+    ) {
         if (rowStatus.containsKey(url)) {
             rowStatus[url]?.text = statusText
             rowDetail[url]?.visibility = android.view.View.GONE
@@ -200,9 +239,18 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             visibility = android.view.View.GONE
         }
+        if (!detailText.isNullOrBlank()) {
+            detail.text = detailText
+            detail.visibility = android.view.View.VISIBLE
+        }
         val cancel = Button(this).apply {
             text = getString(R.string.queue_cancel)
             textSize = 12f
+            visibility = if (showCancel) {
+                android.view.View.VISIBLE
+            } else {
+                android.view.View.GONE
+            }
             setOnClickListener {
                 // The service kills the running yt-dlp; the bus will
                 // still report FAILED for it, but this row stays on
@@ -236,6 +284,18 @@ class MainActivity : AppCompatActivity() {
             detailView?.visibility = android.view.View.GONE
             cancelView?.visibility = android.view.View.GONE
             return
+        }
+        // Terminal states are history: record once, here, where every
+        // row update already flows through.
+        if (state.status == DownloadProgressBus.Status.COMPLETE) {
+            DownloadHistory.record(
+                this, state.id, rowMode[state.id] ?: "", "Done", null
+            )
+        } else if (state.status == DownloadProgressBus.Status.FAILED) {
+            DownloadHistory.record(
+                this, state.id, rowMode[state.id] ?: "", "Failed",
+                state.detail
+            )
         }
         statusView.text = when (state.status) {
             DownloadProgressBus.Status.DOWNLOADING -> {

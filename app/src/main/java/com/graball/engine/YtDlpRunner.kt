@@ -27,6 +27,8 @@ interface DownloadListener {
     fun onError(message: String)
     /** Final output files, delivered just before onFinished when known. */
     fun onDownloadedFiles(files: List<File>) {}
+    /** Files yt-dlp skipped because they already exist (resume runs). */
+    fun onSkippedFiles(files: List<File>) {}
 }
 
 /**
@@ -104,6 +106,7 @@ class YtDlpRunner(
                 // run fails. Progress lines are noise; error lines from
                 // yt-dlp, Python tracebacks, and linker errors are signal.
                 val tail = ArrayDeque<String>()
+                val skipped = mutableListOf<File>()
                 // Playlist position, from yt-dlp's own
                 // "[download] Downloading item N of M" lines. Without
                 // it, a playlist looks like one download that keeps
@@ -140,16 +143,39 @@ class YtDlpRunner(
                             tail.addLast(raw)
                             while (tail.size > 8) tail.removeFirst()
                         }
-                        DESTINATION_REGEX.find(raw)?.groupValues?.get(1)?.let {
-                            val dest = File(it.trim())
-                            lastDestination?.let { prev ->
-                                listener.onDownloadedFiles(listOf(prev))
-                            }
+                        // [ExtractAudio] Destination lines REPLACE the
+                        // pending destination instead of emitting it:
+                        // the original file is deleted after conversion,
+                        // so publishing it would save a file yt-dlp is
+                        // about to remove (and duplicate the mp3 that
+                        // follows). The mp3 becomes pending, and is
+                        // emitted when the next song starts — by then
+                        // its conversion is done.
+                        val extractDest =
+                            EXTRACT_AUDIO_REGEX.find(raw)?.groupValues?.get(1)
+                        if (extractDest != null) {
+                            val dest = File(extractDest.trim())
                             lastDestination = dest
                             destinations += dest
+                        } else {
+                            DESTINATION_REGEX.find(raw)?.groupValues?.get(1)?.let {
+                                val dest = File(it.trim())
+                                lastDestination?.let { prev ->
+                                    listener.onDownloadedFiles(listOf(prev))
+                                }
+                                lastDestination = dest
+                                destinations += dest
+                            }
                         }
                         MERGER_REGEX.find(raw)?.groupValues?.get(1)?.let {
                             merged = File(it.trim())
+                        }
+                        // A resume run skips files that already exist
+                        // complete in the stable staging dir. The
+                        // service must know them so the end-of-run
+                        // scan does not publish them a second time.
+                        SKIPPED_REGEX.find(raw)?.groupValues?.get(1)?.let {
+                            skipped += File(it.trim())
                         }
                     }
                 }
@@ -160,6 +186,9 @@ class YtDlpRunner(
                 val finalFiles = merged?.let { listOf(it) } ?: destinations
                 if (finalFiles.isNotEmpty()) {
                     listener.onDownloadedFiles(finalFiles)
+                }
+                if (skipped.isNotEmpty()) {
+                    listener.onSkippedFiles(skipped)
                 }
                 val detail = if (exitCode == 0) "" else tail.joinToString("\n")
                 listener.onFinished(exitCode, detail)
@@ -202,6 +231,13 @@ class YtDlpRunner(
             pythonBinary.absolutePath,
             ytDlpScript.absolutePath,
             "--newline",
+            // Resume resilience: a network switch kills the socket, so
+            // let yt-dlp itself retry (from the .part file, in the same
+            // staging dir) instead of failing at the first drop, and
+            // time out stalled sockets so a dead connection is noticed.
+            "--retries", "30",
+            "--retry-sleep", "linear=1:10",
+            "--socket-timeout", "30",
             "-o", outputTemplate
         )
         if (ffmpegDir != null) {
@@ -239,8 +275,16 @@ class YtDlpRunner(
         private val DESTINATION_REGEX =
             Regex("""\[(?:download|ExtractAudio)\] Destination: (.+)$""")
 
+        /** "[ExtractAudio] Destination: /path" on its own. */
+        private val EXTRACT_AUDIO_REGEX =
+            Regex("""\[ExtractAudio\] Destination: (.+)$""")
+
         /** `[Merger] Merging formats into "/path"`. */
         private val MERGER_REGEX =
             Regex("""\[Merger\] Merging formats into "(.+)"""")
+
+        /** "[download] /path has already been downloaded" (resume skip). */
+        private val SKIPPED_REGEX =
+            Regex("""\[download\] (.+) has already been downloaded""")
     }
 }

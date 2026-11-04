@@ -56,6 +56,13 @@ class DownloadService : Service() {
     }
 
     /**
+     * Basenames yt-dlp skipped this run (already complete from an
+     * earlier run). The end-of-run scan must not publish them again,
+     * or a resumed playlist would duplicate its finished songs.
+     */
+    private val skippedNames = mutableSetOf<String>()
+
+    /**
      * URLs with a download currently running. A second tap on Download
      * for the same URL (or a re-tap after reopening the app, when the
      * queue rows are gone) must NOT start a second yt-dlp: the service
@@ -107,6 +114,7 @@ class DownloadService : Service() {
             return START_NOT_STICKY
         }
         publishedPaths.clear()
+        skippedNames.clear()
 
         startForeground(NOTIFICATION_ID, buildNotification("Preparing download…", null))
         Thread {
@@ -188,6 +196,10 @@ class DownloadService : Service() {
                                 }
                             }
 
+                            override fun onSkippedFiles(files: List<File>) {
+                                files.forEach { skippedNames.add(it.name) }
+                            }
+
                             override fun onFinished(exitCode: Int, detail: String) {
                                 activeUrls.remove(url)
                                 if (exitCode == 0) {
@@ -214,12 +226,16 @@ class DownloadService : Service() {
                                     val scanned = outDir?.listFiles()
                                         ?.filter { it.isFile && it.length() > 0 &&
                                             !it.name.endsWith(".part") &&
-                                            !it.name.endsWith(".ytdl") }
+                                            !it.name.endsWith(".ytdl") &&
+                                            !skippedNames.contains(it.name) }
                                         ?: emptyList()
                                     val candidates = if (scanned.isNotEmpty()) {
                                         scanned
                                     } else {
-                                        downloadedFiles.filter { it.exists() }
+                                        downloadedFiles.filter {
+                                            it.exists() &&
+                                                !skippedNames.contains(it.name)
+                                        }
                                     }
                                     candidates.forEach { file ->
                                         publishFile(file)
@@ -230,7 +246,13 @@ class DownloadService : Service() {
                                     // never "skip" off a leftover.
                                     outDir?.listFiles()?.forEach { it.delete() }
                                     outDir?.delete()
-                                    if (published > 0) {
+                                    // A run that only skipped files is
+                                    // still a success: everything is
+                                    // already in Downloads from the
+                                    // earlier run.
+                                    if (published > 0 ||
+                                        skippedNames.isNotEmpty()
+                                    ) {
                                         this@DownloadService.updateNotification(
                                             "Download complete", null
                                         )
@@ -257,12 +279,26 @@ class DownloadService : Service() {
                                 } else {
                                     // Failed or cancelled: finished
                                     // songs are already in Downloads
-                                    // (published mid-run), so dropping
-                                    // staging only removes partials and
-                                    // unpublished leftovers.
+                                    // (published mid-run), so drop only
+                                    // the unpublished leftovers — but
+                                    // KEEP .part/.ytdl files and the
+                                    // staging originals of songs
+                                    // already published. They are what
+                                    // a re-tap resumes from (the .part
+                                    // for the interrupted song, the
+                                    // complete files yt-dlp will skip),
+                                    // and keeping them avoids both a
+                                    // restart-from-zero and duplicates.
                                     val outDir = File(outputTemplate).parentFile
-                                    outDir?.listFiles()?.forEach { it.delete() }
-                                    outDir?.delete()
+                                    outDir?.listFiles()
+                                        ?.filter { file ->
+                                            !file.name.endsWith(".part") &&
+                                                !file.name.endsWith(".ytdl") &&
+                                                !publishedPaths.contains(
+                                                    file.absolutePath
+                                                )
+                                        }
+                                        ?.forEach { it.delete() }
                                     this@DownloadService.updateNotification(
                                         "Download failed (exit $exitCode)", null
                                     )
@@ -337,7 +373,7 @@ class DownloadService : Service() {
         private const val NOTIFICATION_ID = 1
 
         /** Bump when the bundled native assets change, to force re-extraction. */
-        private const val RUNTIME_VERSION = "python3.13-ytdlp2026.10.26-v3"
+        private const val RUNTIME_VERSION = "python3.13-ytdlp2026.10.26-v4"
 
         private const val EXTRA_URL = "com.graball.engine.extra.URL"
         private const val EXTRA_OUTPUT = "com.graball.engine.extra.OUTPUT"
@@ -375,13 +411,17 @@ class DownloadService : Service() {
          * decode stalls. So prefer avc1 (H.264) at or below the chosen
          * height, fall back to anything at that height, then to best.
          * Remux to mp4 so the container is always player-friendly
-         * (stream copy, no transcode). Audio-only takes the m4a stream
-         * directly — no MP3 step, since the bundled ffmpeg has no
-         * libmp3lame.
+         * (stream copy, no transcode). Audio-only takes the best audio
+         * stream and converts it to real MP3 via the bundled ffmpeg
+         * (built with libmp3lame) — the old m4a output confused him,
+         * since he calls the files mp3.
          */
         private fun formatArgs(audioOnly: Boolean, maxHeight: Int?): List<String> {
             if (audioOnly) {
-                return listOf("-f", "bestaudio[ext=m4a]/bestaudio")
+                return listOf(
+                    "-f", "bestaudio",
+                    "--extract-audio", "--audio-format", "mp3"
+                )
             }
             val cap = if (maxHeight != null) "[height<=$maxHeight]" else ""
             val format = "bestvideo$cap[vcodec^=avc1]+bestaudio/" +

@@ -144,10 +144,7 @@ class BrowseActivity : AppCompatActivity() {
             ).show()
             return
         }
-        val staging = File(
-            RuntimePaths.stagingDir(this),
-            System.currentTimeMillis().toString()
-        )
+        val staging = RuntimePaths.stagingDirFor(this, url)
         if (!staging.exists()) {
             staging.mkdirs()
         }
