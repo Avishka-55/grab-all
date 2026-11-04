@@ -95,15 +95,29 @@ class StatusActivity : AppCompatActivity() {
     @Suppress("DEPRECATION")
     private fun loadStatuses() {
         val ext = Environment.getExternalStorageDirectory()
+        // WhatsApp moves its storage between these locations across
+        // versions, and the old folder often stays behind EMPTY — so
+        // never stop at the first existing dir (v0.6.2 bug: it did,
+        // and reported "no statuses" while the real folder had files).
+        // Scan every candidate and merge, newest first, one row per name.
         val candidates = listOf(
             File(ext, "WhatsApp/Media/.Statuses"),
-            File(ext, "Android/media/com.whatsapp/WhatsApp/Media/.Statuses")
+            File(ext, "Android/media/com.whatsapp/WhatsApp/Media/.Statuses"),
+            File(ext, "WhatsApp Business/Media/.Statuses"),
+            File(ext, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses")
         )
-        val found = candidates.firstOrNull { it.isDirectory }?.listFiles()
-            ?.filter { it.isFile && isStatusFile(it.name) }
-            ?.sortedByDescending { it.lastModified() }
-            ?: emptyList()
-        files = found
+        val byName = mutableMapOf<String, File>()
+        for (dir in candidates) {
+            if (!dir.isDirectory) continue
+            for (file in dir.listFiles() ?: emptyArray()) {
+                if (!file.isFile || !isStatusFile(file.name)) continue
+                val prev = byName[file.name]
+                if (prev == null || file.lastModified() > prev.lastModified()) {
+                    byName[file.name] = file
+                }
+            }
+        }
+        files = byName.values.sortedByDescending { it.lastModified() }
         if (files.isEmpty()) {
             emptyView.text = getString(R.string.status_empty)
         }
