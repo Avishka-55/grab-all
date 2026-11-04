@@ -87,6 +87,10 @@ object MediaStorePublisher {
 
     private fun mimeFor(displayName: String): String {
         return when (displayName.substringAfterLast('.', "").lowercase()) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
             "mp3" -> "audio/mpeg"
             "m4a" -> "audio/mp4"
             "webm" -> "video/webm"

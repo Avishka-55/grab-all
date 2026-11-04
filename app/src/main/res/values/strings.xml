@@ -31,6 +31,15 @@
     <string name="quick_sites">Quick Grab Sites</string>
     <string name="site_active">Active</string>
     <string name="site_soon">Soon</string>
+    <string name="site_browse">Browse</string>
+    <string name="status_title">WhatsApp Status</string>
+    <string name="status_hint">Statuses WhatsApp saved on this phone — even ones never opened. Tap Save to keep one in Downloads before it expires.</string>
+    <string name="status_save">Save</string>
+    <string name="status_saved_btn">Saved ✓</string>
+    <string name="status_saved">Saved to Downloads</string>
+    <string name="status_save_failed">Save failed</string>
+    <string name="status_need_permission">Storage permission is needed to read WhatsApp statuses</string>
+    <string name="status_empty">No statuses found — open WhatsApp once so it syncs, then come back</string>
     <string name="tab_search">Search</string>
     <string name="tab_youtube">YouTube</string>
     <string name="tab_music">Music</string>

@@ -298,8 +298,10 @@
             </LinearLayout>
 
             <!-- Quick Grab Sites: a tap opens that site in the
-                 in-app browser. Only YouTube is live; the rest are
-                 marked Soon until their support is proven. -->
+                 in-app browser. YouTube downloads from the browser;
+                 TikTok, Instagram and Facebook open for browsing
+                 (their downloads are not proven yet). WhatsApp opens
+                 the status saver, which is real since v0.6.2. -->
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -387,12 +389,12 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_soon"
+                        android:background="@drawable/pill_browse"
                         android:paddingStart="8dp"
                         android:paddingTop="4dp"
                         android:paddingEnd="8dp"
                         android:paddingBottom="4dp"
-                        android:text="@string/site_soon"
+                        android:text="@string/site_browse"
                         android:textColor="@color/graball_text"
                         android:textSize="11sp" />
                 </LinearLayout>
@@ -428,12 +430,12 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_soon"
+                        android:background="@drawable/pill_browse"
                         android:paddingStart="8dp"
                         android:paddingTop="4dp"
                         android:paddingEnd="8dp"
                         android:paddingBottom="4dp"
-                        android:text="@string/site_soon"
+                        android:text="@string/site_browse"
                         android:textColor="@color/graball_text"
                         android:textSize="11sp" />
                 </LinearLayout>
@@ -476,12 +478,12 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_soon"
+                        android:background="@drawable/pill_browse"
                         android:paddingStart="8dp"
                         android:paddingTop="4dp"
                         android:paddingEnd="8dp"
                         android:paddingBottom="4dp"
-                        android:text="@string/site_soon"
+                        android:text="@string/site_browse"
                         android:textColor="@color/graball_text"
                         android:textSize="11sp" />
                 </LinearLayout>
@@ -517,12 +519,12 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_soon"
+                        android:background="@drawable/pill_active"
                         android:paddingStart="8dp"
                         android:paddingTop="4dp"
                         android:paddingEnd="8dp"
                         android:paddingBottom="4dp"
-                        android:text="@string/site_soon"
+                        android:text="@string/site_active"
                         android:textColor="@color/graball_text"
                         android:textSize="11sp" />
                 </LinearLayout>

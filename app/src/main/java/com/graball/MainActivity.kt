@@ -93,16 +93,28 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, BrowseActivity::class.java))
         }
         findViewById<LinearLayout>(R.id.siteTiktok).setOnClickListener {
-            soonToast("TikTok")
+            startActivity(
+                Intent(this, BrowseActivity::class.java).putExtra(
+                    "start_url", "https://www.tiktok.com"
+                )
+            )
         }
         findViewById<LinearLayout>(R.id.siteInstagram).setOnClickListener {
-            soonToast("Instagram")
+            startActivity(
+                Intent(this, BrowseActivity::class.java).putExtra(
+                    "start_url", "https://www.instagram.com"
+                )
+            )
         }
         findViewById<LinearLayout>(R.id.siteFacebook).setOnClickListener {
-            soonToast("Facebook")
+            startActivity(
+                Intent(this, BrowseActivity::class.java).putExtra(
+                    "start_url", "https://www.facebook.com"
+                )
+            )
         }
         findViewById<LinearLayout>(R.id.siteWhatsapp).setOnClickListener {
-            soonToast("WhatsApp Status")
+            startActivity(Intent(this, StatusActivity::class.java))
         }
         findViewById<LinearLayout>(R.id.siteMore).setOnClickListener {
             soonToast("More sites")
