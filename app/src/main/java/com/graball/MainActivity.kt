@@ -406,19 +406,21 @@ class MainActivity : AppCompatActivity() {
         val title = TextView(this).apply {
             text = url
             textSize = 14f
-            textColor = Color.WHITE
+            setTextColor(Color.WHITE)
             ellipsize = android.text.TextUtils.TruncateAt.END
             maxLines = 1
         }
         val status = TextView(this).apply {
             text = statusText
             textSize = 13f
-            textColor = Color.WHITE
+            setTextColor(Color.WHITE)
         }
         val detail = TextView(this).apply {
             textSize = 12f
-            textColor = ContextCompat.getColor(
-                this@MainActivity, R.color.graball_subtext
+            setTextColor(
+                ContextCompat.getColor(
+                    this@MainActivity, R.color.graball_subtext
+                )
             )
             visibility = android.view.View.GONE
         }
