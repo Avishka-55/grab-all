@@ -103,10 +103,13 @@ class StatusActivity : AppCompatActivity() {
         roots.add(Environment.getExternalStorageDirectory())
         for (dir in getExternalFilesDirs(null)) {
             if (dir == null) continue
-            var root: File? = dir
-            repeat(4) { root = root?.parentFile }
-            if (root != null && root !in roots) {
-                roots.add(root)
+            // dir = <volume>/Android/data/com.graball/files, so the
+            // 4th parent is the volume root. Sequence form, no mutable
+            // var: a var captured by a closure loses Kotlin smart-cast
+            // (this exact mistake failed the first v0.6.4 build).
+            val volumeRoot = generateSequence(dir) { it.parentFile }.elementAtOrNull(4)
+            if (volumeRoot != null && volumeRoot !in roots) {
+                roots.add(volumeRoot)
             }
         }
         val relativePaths = listOf(
