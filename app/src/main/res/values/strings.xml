@@ -14,4 +14,7 @@
     <string name="queue_downloading_unknown">Downloading…</string>
     <string name="queue_done">Done ✓</string>
     <string name="queue_failed">Failed</string>
+    <string name="audio_only">Audio only</string>
+    <string name="queue_cancel">Cancel</string>
+    <string name="queue_cancelled">Cancelled</string>
 </resources>

@@ -2,9 +2,12 @@ package com.graball
 
 import android.content.Intent
 import android.os.Bundle
+import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -17,8 +20,12 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var queueContainer: LinearLayout
     private lateinit var cookiesStatus: TextView
+    private lateinit var qualitySpinner: Spinner
+    private lateinit var audioOnlyCheck: CheckBox
     private val rowStatus = mutableMapOf<String, TextView>()
     private val rowDetail = mutableMapOf<String, TextView>()
+    private val rowCancel = mutableMapOf<String, Button>()
+    private val cancelledUrls = mutableSetOf<String>()
 
     private val progressListener: (DownloadProgressBus.State) -> Unit = { state ->
         updateRow(state)
@@ -29,6 +36,15 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         queueContainer = findViewById(R.id.queueContainer)
         cookiesStatus = findViewById(R.id.cookiesStatus)
+        qualitySpinner = findViewById(R.id.qualitySpinner)
+        qualitySpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            listOf("Best", "1080p", "720p", "480p", "360p")
+        ).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        audioOnlyCheck = findViewById(R.id.audioOnlyCheck)
         val linkInput = findViewById<EditText>(R.id.linkInput)
         findViewById<Button>(R.id.downloadButton).setOnClickListener {
             val url = linkInput.text.toString().trim()
@@ -42,7 +58,18 @@ class MainActivity : AppCompatActivity() {
             }
             // yt-dlp resolves the title/extension at download time.
             val template = File(staging, "%(title)s.%(ext)s").absolutePath
-            DownloadService.startDownload(this, url, template)
+            val maxHeight = when (qualitySpinner.selectedItemPosition) {
+                1 -> 1080
+                2 -> 720
+                3 -> 480
+                4 -> 360
+                else -> null
+            }
+            cancelledUrls.remove(url)
+            DownloadService.startDownload(
+                this, url, template,
+                audioOnlyCheck.isChecked, maxHeight
+            )
             addRow(url, getString(R.string.queue_queued))
             Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
         }
@@ -73,6 +100,7 @@ class MainActivity : AppCompatActivity() {
         if (rowStatus.containsKey(url)) {
             rowStatus[url]?.text = statusText
             rowDetail[url]?.visibility = android.view.View.GONE
+            rowCancel[url]?.visibility = android.view.View.VISIBLE
             return
         }
         val row = LinearLayout(this).apply {
@@ -93,12 +121,28 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             visibility = android.view.View.GONE
         }
+        val cancel = Button(this).apply {
+            text = getString(R.string.queue_cancel)
+            textSize = 12f
+            setOnClickListener {
+                // The service kills the running yt-dlp; the bus will
+                // still report FAILED for it, but this row stays on
+                // "Cancelled" because the URL is in cancelledUrls.
+                cancelledUrls.add(url)
+                status.text = getString(R.string.queue_cancelled)
+                detail.visibility = android.view.View.GONE
+                visibility = android.view.View.GONE
+                DownloadService.cancel(this@MainActivity)
+            }
+        }
         row.addView(title)
         row.addView(status)
         row.addView(detail)
+        row.addView(cancel)
         queueContainer.addView(row)
         rowStatus[url] = status
         rowDetail[url] = detail
+        rowCancel[url] = cancel
     }
 
     private fun updateRow(state: DownloadProgressBus.State) {
@@ -107,6 +151,13 @@ class MainActivity : AppCompatActivity() {
             rowStatus[state.id]!!
         }
         val detailView = rowDetail[state.id]
+        val cancelView = rowCancel[state.id]
+        if (cancelledUrls.contains(state.id)) {
+            statusView.text = getString(R.string.queue_cancelled)
+            detailView?.visibility = android.view.View.GONE
+            cancelView?.visibility = android.view.View.GONE
+            return
+        }
         statusView.text = when (state.status) {
             DownloadProgressBus.Status.DOWNLOADING -> {
                 val pct = state.percent?.toInt()
@@ -115,6 +166,13 @@ class MainActivity : AppCompatActivity() {
             }
             DownloadProgressBus.Status.COMPLETE -> getString(R.string.queue_done)
             DownloadProgressBus.Status.FAILED -> getString(R.string.queue_failed)
+        }
+        cancelView?.visibility = if (
+            state.status == DownloadProgressBus.Status.DOWNLOADING
+        ) {
+            android.view.View.VISIBLE
+        } else {
+            android.view.View.GONE
         }
         if (state.status == DownloadProgressBus.Status.FAILED &&
             !state.detail.isNullOrBlank() && detailView != null

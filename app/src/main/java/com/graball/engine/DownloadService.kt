@@ -55,6 +55,13 @@ class DownloadService : Service() {
         val url = safeIntent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
         val outputTemplate = safeIntent.getStringExtra(EXTRA_OUTPUT)
             ?: return START_NOT_STICKY
+        val audioOnly = safeIntent.getBooleanExtra(EXTRA_AUDIO_ONLY, false)
+        val maxHeight =
+            if (safeIntent.hasExtra(EXTRA_MAX_HEIGHT)) {
+                safeIntent.getIntExtra(EXTRA_MAX_HEIGHT, 0).takeIf { it > 0 }
+            } else {
+                null
+            }
 
         startForeground(NOTIFICATION_ID, buildNotification("Preparing download…", null))
         Thread {
@@ -97,7 +104,8 @@ class DownloadService : Service() {
                         cookiesFile = cookies
                     )
                     runner = newRunner
-                    newRunner.download(url, outputTemplate, emptyList(),
+                    newRunner.download(
+                        url, outputTemplate, formatArgs(audioOnly, maxHeight),
                         object : DownloadListener {
                             override fun onProgress(progress: DownloadProgress) {
                                 val pct = progress.percent
@@ -216,18 +224,49 @@ class DownloadService : Service() {
 
         private const val EXTRA_URL = "com.graball.engine.extra.URL"
         private const val EXTRA_OUTPUT = "com.graball.engine.extra.OUTPUT"
+        private const val EXTRA_AUDIO_ONLY = "com.graball.engine.extra.AUDIO_ONLY"
+        private const val EXTRA_MAX_HEIGHT = "com.graball.engine.extra.MAX_HEIGHT"
         private const val ACTION_CANCEL = "com.graball.engine.action.CANCEL"
 
-        fun startDownload(context: Context, url: String, outputTemplate: String) {
+        fun startDownload(
+            context: Context,
+            url: String,
+            outputTemplate: String,
+            audioOnly: Boolean = false,
+            maxHeight: Int? = null
+        ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 putExtra(EXTRA_URL, url)
                 putExtra(EXTRA_OUTPUT, outputTemplate)
+                putExtra(EXTRA_AUDIO_ONLY, audioOnly)
+                if (maxHeight != null) putExtra(EXTRA_MAX_HEIGHT, maxHeight)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
             }
+        }
+
+        /**
+         * H.264-first formats. YouTube's plain "best" is often AV1, which
+         * his old phone cannot decode in hardware: the system player
+         * refuses it ("Codec not supported: AV1") and VLC's software
+         * decode stalls. So prefer avc1 (H.264) at or below the chosen
+         * height, fall back to anything at that height, then to best.
+         * Remux to mp4 so the container is always player-friendly
+         * (stream copy, no transcode). Audio-only takes the m4a stream
+         * directly — no MP3 step, since the bundled ffmpeg has no
+         * libmp3lame.
+         */
+        private fun formatArgs(audioOnly: Boolean, maxHeight: Int?): List<String> {
+            if (audioOnly) {
+                return listOf("-f", "bestaudio[ext=m4a]/bestaudio")
+            }
+            val cap = if (maxHeight != null) "[height<=$maxHeight]" else ""
+            val format = "bestvideo$cap[vcodec^=avc1]+bestaudio/" +
+                "best$cap[vcodec^=avc1]/best$cap/best"
+            return listOf("-f", format, "--remux-video", "mp4")
         }
 
         fun cancel(context: Context) {
