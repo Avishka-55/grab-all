@@ -1,3 +1,12 @@
 <resources>
-    <style name="Theme.GrabAll" parent="Theme.AppCompat.DayNight.DarkActionBar" />
+    <!-- v0.5.5 test: full option-4 look restored, EXCEPT the
+         windowBackground line. windowBackground is the only theme
+         difference left between dying v0.5.2 (DarkActionBar +
+         windowBackground) and living v0.5.4 (DarkActionBar, none),
+         and the system touches it before any app code runs — which
+         fits the no-toast, no-popup deaths exactly. If v0.5.5
+         opens, windowBackground was the killer and the look stays
+         (the gradient header carries the design anyway). -->
+    <style name="Theme.GrabAll" parent="Theme.AppCompat.DayNight.NoActionBar">
+    </style>
 </resources>
