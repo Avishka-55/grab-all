@@ -93,6 +93,22 @@ jobs:
           # from FFmpeg's GitHub mirror instead.
           curl -fsSL --retry 3 --retry-all-errors -o ffmpeg.tar.gz https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.tar.gz
           tar xf ffmpeg.tar.gz
+          # libmp3lame first: the app's audio-only mode now produces real
+          # MP3 (yt-dlp --extract-audio --audio-format mp3), and the
+          # stock ffmpeg build has no MP3 encoder. Static, PIC (it is
+          # linked into ffmpeg's PIE binary), frontend off (we only
+          # need the library, not lame's CLI).
+          curl -fsSL --retry 3 --retry-all-errors -o lame.tar.gz https://sourceforge.net/projects/lame/files/lame/3.100/lame-3.100.tar.gz
+          tar xf lame.tar.gz
+          cd lame-3.100
+          CC="$NDK_BIN/armv7a-linux-androideabi21-clang" \
+            CFLAGS="-O2 -fPIC" \
+            ./configure --host=arm-linux-androideabi \
+            --disable-shared --enable-static --disable-frontend \
+            --prefix="$PWD/../lame-install" 2>&1 | tail -5
+          make -j"$(nproc)" 2>&1 | tail -3
+          make install 2>&1 | tail -3
+          cd ..
           cd FFmpeg-n7.1
           ./configure \
             --target-os=android --arch=arm --cpu=armv7-a \
@@ -103,15 +119,18 @@ jobs:
             --nm="$NDK_BIN/llvm-nm" --strip="$NDK_BIN/llvm-strip" \
             --sysroot="$SYSROOT" \
             --prefix="$PWD/../ffmpeg-install" \
+            --enable-libmp3lame \
+            --extra-cflags="-I$PWD/../lame-install/include" \
+            --extra-ldflags="-L$PWD/../lame-install/lib" \
             --disable-doc --disable-ffplay --disable-ffprobe \
             --disable-avdevice --disable-network --disable-swscale \
             --disable-vulkan \
             --disable-everything \
             --enable-swresample \
-            --enable-demuxer=mp4,mov,matroska,webm \
-            --enable-muxer=mp4,matroska,webm \
+            --enable-demuxer=mp4,mov,matroska,webm,mp3 \
+            --enable-muxer=mp4,matroska,webm,mp3 \
             --enable-decoder=h264,aac,opus,vorbis,mp3 \
-            --enable-encoder=aac \
+            --enable-encoder=aac,libmp3lame \
             --enable-parser=h264,aac,opus,vorbis,mpegaudio \
             --enable-bsf=aac_adtstoasc,h264_mp4toannexb \
             --enable-protocol=file,pipe \
@@ -121,7 +140,10 @@ jobs:
           # Verify WITHOUT executing: this is an ARM binary, running it
           # on the x86 runner fails with "Exec format error" (run 5's
           # lesson — the build itself was fine, only my check was wrong).
+          # The libmp3lame string check is fatal: without it the app's
+          # MP3 mode would fail on the phone with no encoder.
           test -s ../ffmpeg-install/bin/ffmpeg && file ../ffmpeg-install/bin/ffmpeg
+          strings ../ffmpeg-install/bin/ffmpeg | grep -q libmp3lame
           mkdir -p ../ffmpeg-pkg/bin
           cp ../ffmpeg-install/bin/ffmpeg ../ffmpeg-pkg/bin/ffmpeg
           cd ..
