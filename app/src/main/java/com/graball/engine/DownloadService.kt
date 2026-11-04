@@ -128,25 +128,74 @@ class DownloadService : Service() {
 
                             override fun onFinished(exitCode: Int, detail: String) {
                                 if (exitCode == 0) {
-                                    downloadedFiles.forEach { file ->
-                                        if (file.exists() &&
-                                            MediaStorePublisher.publish(
+                                    // The runner's Destination/Merger log
+                                    // lines go STALE when --remux-video
+                                    // runs: yt-dlp deletes the merged file
+                                    // after remuxing, so the recorded path
+                                    // no longer exists — and yt-dlp can
+                                    // also exit 0 having produced nothing
+                                    // (an "already downloaded" skip off a
+                                    // leftover in shared staging). The old
+                                    // code published whatever path it was
+                                    // given, skipped missing files
+                                    // silently, and still reported Done —
+                                    // exactly the v0.2.7 "Done but no file"
+                                    // bug: audio-only worked (no remux),
+                                    // a capped resolution could pick a
+                                    // webm combo, remux to mp4, and leave
+                                    // nothing publishable behind. So the
+                                    // truth is the output directory
+                                    // itself, and Done requires at least
+                                    // one file actually published.
+                                    val outDir = File(outputTemplate).parentFile
+                                    val scanned = outDir?.listFiles()
+                                        ?.filter { it.isFile && it.length() > 0 &&
+                                            !it.name.endsWith(".part") &&
+                                            !it.name.endsWith(".ytdl") }
+                                        ?: emptyList()
+                                    val candidates = if (scanned.isNotEmpty()) {
+                                        scanned
+                                    } else {
+                                        downloadedFiles.filter { it.exists() }
+                                    }
+                                    var published = 0
+                                    candidates.forEach { file ->
+                                        if (MediaStorePublisher.publish(
                                                 this@DownloadService, file, file.name
                                             ) != null
                                         ) {
-                                            // Published copy is in Downloads;
-                                            // drop the staging copy.
-                                            file.delete()
+                                            published++
                                         }
                                     }
-                                    this@DownloadService.updateNotification(
-                                        "Download complete", null
-                                    )
-                                    DownloadProgressBus.post(
-                                        DownloadProgressBus.State(
-                                            url, 100f, DownloadProgressBus.Status.COMPLETE
+                                    // Drop the whole staging dir, so a
+                                    // later download of the same video can
+                                    // never "skip" off a leftover.
+                                    outDir?.listFiles()?.forEach { it.delete() }
+                                    outDir?.delete()
+                                    if (published > 0) {
+                                        this@DownloadService.updateNotification(
+                                            "Download complete", null
                                         )
-                                    )
+                                        DownloadProgressBus.post(
+                                            DownloadProgressBus.State(
+                                                url, 100f,
+                                                DownloadProgressBus.Status.COMPLETE
+                                            )
+                                        )
+                                    } else {
+                                        this@DownloadService.updateNotification(
+                                            "Download failed (no file produced)", null
+                                        )
+                                        DownloadProgressBus.post(
+                                            DownloadProgressBus.State(
+                                                url, null,
+                                                DownloadProgressBus.Status.FAILED,
+                                                "Download finished but no file " +
+                                                    "was produced. Try again, " +
+                                                    "or pick a different quality."
+                                            )
+                                        )
+                                    }
                                 } else {
                                     this@DownloadService.updateNotification(
                                         "Download failed (exit $exitCode)", null

@@ -52,7 +52,13 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Paste a video link first", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            val staging = RuntimePaths.stagingDir(this)
+            // A fresh staging subdir per download: a shared staging
+            // dir lets yt-dlp "skip" a re-download off a leftover file
+            // and lets the service mistake a stale path for a success.
+            val staging = File(
+                RuntimePaths.stagingDir(this),
+                System.currentTimeMillis().toString()
+            )
             if (!staging.exists()) {
                 staging.mkdirs()
             }
