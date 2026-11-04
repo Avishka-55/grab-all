@@ -94,26 +94,38 @@ class StatusActivity : AppCompatActivity() {
 
     @Suppress("DEPRECATION")
     private fun loadStatuses() {
-        val ext = Environment.getExternalStorageDirectory()
-        // WhatsApp moves its storage between these locations across
-        // versions, and the old folder often stays behind EMPTY — so
-        // never stop at the first existing dir (v0.6.2 bug: it did,
-        // and reported "no statuses" while the real folder had files).
-        // Scan every candidate and merge, newest first, one row per name.
-        val candidates = listOf(
-            File(ext, "WhatsApp/Media/.Statuses"),
-            File(ext, "Android/media/com.whatsapp/WhatsApp/Media/.Statuses"),
-            File(ext, "WhatsApp Business/Media/.Statuses"),
-            File(ext, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses")
+        // Statuses can live on internal storage OR a memory card, and
+        // WhatsApp moves its folder between locations across versions
+        // (the old one often stays behind empty). So: every storage
+        // volume Android reports for this app, times every known
+        // relative path, merged newest-first, one row per name.
+        val roots = mutableListOf<File>()
+        roots.add(Environment.getExternalStorageDirectory())
+        for (dir in getExternalFilesDirs(null)) {
+            if (dir == null) continue
+            var root: File? = dir
+            repeat(4) { root = root?.parentFile }
+            if (root != null && root !in roots) {
+                roots.add(root)
+            }
+        }
+        val relativePaths = listOf(
+            "WhatsApp/Media/.Statuses",
+            "Android/media/com.whatsapp/WhatsApp/Media/.Statuses",
+            "WhatsApp Business/Media/.Statuses",
+            "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses"
         )
         val byName = mutableMapOf<String, File>()
-        for (dir in candidates) {
-            if (!dir.isDirectory) continue
-            for (file in dir.listFiles() ?: emptyArray()) {
-                if (!file.isFile || !isStatusFile(file.name)) continue
-                val prev = byName[file.name]
-                if (prev == null || file.lastModified() > prev.lastModified()) {
-                    byName[file.name] = file
+        for (root in roots) {
+            for (rel in relativePaths) {
+                val dir = File(root, rel)
+                if (!dir.isDirectory) continue
+                for (file in dir.listFiles() ?: emptyArray()) {
+                    if (!file.isFile || !isStatusFile(file.name)) continue
+                    val prev = byName[file.name]
+                    if (prev == null || file.lastModified() > prev.lastModified()) {
+                        byName[file.name] = file
+                    }
                 }
             }
         }
