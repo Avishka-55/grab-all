@@ -17,8 +17,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.graball.engine.CookieImporter
 import com.graball.engine.DownloadHistory
+import com.graball.engine.DownloadPrefs
 import com.graball.engine.DownloadProgressBus
 import com.graball.engine.DownloadService
+import com.graball.engine.LinkDetector
+import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
 import java.io.File
 
@@ -29,6 +32,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var qualitySpinner: Spinner
     private lateinit var audioOnlyCheck: CheckBox
     private lateinit var playlistSpinner: Spinner
+    private lateinit var linkInput: EditText
+    private lateinit var grabPanel: LinearLayout
+    private lateinit var grabType: TextView
+    private lateinit var playlistRow: LinearLayout
+    /** What the open Grab panel holds; video panels force single. */
+    private var grabbedKind: LinkKind = LinkKind.VIDEO
     private val rowStatus = mutableMapOf<String, TextView>()
     private val rowDetail = mutableMapOf<String, TextView>()
     private val rowCancel = mutableMapOf<String, Button>()
@@ -82,18 +91,54 @@ class MainActivity : AppCompatActivity() {
             setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         }
         val linkInput = findViewById<EditText>(R.id.linkInput)
+        this.linkInput = linkInput
+        grabPanel = findViewById(R.id.grabPanel)
+        grabType = findViewById(R.id.grabType)
+        playlistRow = findViewById(R.id.playlistRow)
+        findViewById<Button>(R.id.grabButton).setOnClickListener {
+            var url = linkInput.text.toString().trim()
+            if (url.isEmpty()) {
+                // Empty box + a link on the clipboard: Grab pulls it
+                // in first, so the button is one tap, not two.
+                val clip = (getSystemService(Context.CLIPBOARD_SERVICE)
+                    as? ClipboardManager)?.primaryClip
+                    ?.getItemAt(0)?.coerceToText(this)?.toString() ?: ""
+                val found = Regex("https?://\\S+").find(clip)?.value
+                    ?.trimEnd('.', ',', ';', '!', '?', ')', ']')
+                if (found != null) {
+                    url = found
+                    linkInput.setText(url)
+                }
+            }
+            if (url.isEmpty()) {
+                Toast.makeText(this, "Paste a video link first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val kind = LinkDetector.detect(url)
+            if (kind == LinkKind.UNKNOWN) {
+                Toast.makeText(this, "That doesn't look like a link", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            showGrabPanel(url, kind)
+        }
         findViewById<Button>(R.id.downloadButton).setOnClickListener {
             val url = linkInput.text.toString().trim()
             if (url.isEmpty()) {
                 Toast.makeText(this, "Paste a video link first", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            val playlistMode = when (playlistSpinner.selectedItemPosition) {
-                1 -> "20"
-                2 -> "30"
-                3 -> "50"
-                4 -> "all"
-                else -> "single"
+            // The panel decides the mode: a video panel is always
+            // single, whatever the (hidden) playlist spinner holds.
+            val playlistMode = if (grabbedKind == LinkKind.PLAYLIST) {
+                when (playlistSpinner.selectedItemPosition) {
+                    1 -> "20"
+                    2 -> "30"
+                    3 -> "50"
+                    4 -> "all"
+                    else -> "single"
+                }
+            } else {
+                "single"
             }
             if (playlistMode == "single" && url.contains("playlist?list=")) {
                 Toast.makeText(
@@ -147,6 +192,22 @@ class MainActivity : AppCompatActivity() {
                     "all" -> append(" · All videos")
                 }
             }
+            // Remember these choices for the next panel — but a
+            // video download must not overwrite the playlist choice
+            // (see DownloadPrefs).
+            val saved = DownloadPrefs.load(this)
+            DownloadPrefs.save(
+                this,
+                DownloadPrefs.Choices(
+                    qualitySpinner.selectedItemPosition,
+                    audioOnlyCheck.isChecked,
+                    if (grabbedKind == LinkKind.PLAYLIST) {
+                        playlistSpinner.selectedItemPosition
+                    } else {
+                        saved.playlistPos
+                    }
+                )
+            )
             DownloadService.startDownload(
                 this, url, template,
                 audioOnlyCheck.isChecked, maxHeight, playlistMode
@@ -182,10 +243,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Show the Grab panel for a link: the header says what was
+     * detected (video or playlist, plus a short preview), the
+     * playlist count only appears for playlists, and the spinners
+     * open on the user's last-used choices.
+     */
+    private fun showGrabPanel(url: String, kind: LinkKind) {
+        grabbedKind = kind
+        grabType.text = (if (kind == LinkKind.PLAYLIST) "Playlist" else "Video") +
+            " · " + LinkDetector.preview(url)
+        playlistRow.visibility = if (kind == LinkKind.PLAYLIST) {
+            android.view.View.VISIBLE
+        } else {
+            android.view.View.GONE
+        }
+        val prefs = DownloadPrefs.load(this)
+        qualitySpinner.setSelection(prefs.qualityPos)
+        audioOnlyCheck.isChecked = prefs.audioOnly
+        if (kind == LinkKind.PLAYLIST) {
+            playlistSpinner.setSelection(prefs.playlistPos)
+        }
+        grabPanel.visibility = android.view.View.VISIBLE
+    }
+
+    /**
      * Shared links land here from the YouTube app, Chrome, etc.
-     * (ACTION_SEND, text/plain). Prefill the link field — the user
-     * still picks quality/audio/playlist and taps Download, so a
-     * share can never start a download by surprise.
+     * (ACTION_SEND, text/plain). Prefill the link field and open
+     * the Grab panel straight away — the user still picks options
+     * and taps Download, so a share can never start a download by
+     * surprise.
      */
     private fun handleShareIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_SEND) {
@@ -195,7 +281,10 @@ class MainActivity : AppCompatActivity() {
         val url = Regex("https?://\\S+").find(shared)?.value
             ?.trimEnd('.', ',', ';', '!', '?', ')', ']') ?: return
         findViewById<EditText>(R.id.linkInput).setText(url)
-        Toast.makeText(this, "Link ready — tap Download", Toast.LENGTH_SHORT).show()
+        val kind = LinkDetector.detect(url)
+        if (kind != LinkKind.UNKNOWN) {
+            showGrabPanel(url, kind)
+        }
     }
 
     override fun onResume() {

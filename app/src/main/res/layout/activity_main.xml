@@ -25,66 +25,91 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <EditText
-        android:id="@+id/linkInput"
+    <!-- Link + Grab: the panel below only appears after Grab, with
+         options that fit what the link actually is (video vs list). -->
+    <LinearLayout
+        android:id="@+id/linkRow"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginTop="24dp"
-        android:hint="@string/paste_hint"
-        android:inputType="textUri"
+        android:orientation="horizontal"
         app:layout_constraintTop_toBottomOf="@id/subtitle"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
-
-    <LinearLayout
-        android:id="@+id/optionsRow"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:orientation="horizontal"
-        app:layout_constraintTop_toBottomOf="@id/linkInput"
-        app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <Spinner
-            android:id="@+id/qualitySpinner"
+        <EditText
+            android:id="@+id/linkInput"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_weight="1" />
+            android:layout_weight="1"
+            android:hint="@string/paste_hint"
+            android:inputType="textUri" />
 
-        <CheckBox
-            android:id="@+id/audioOnlyCheck"
+        <Button
+            android:id="@+id/grabButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/audio_only" />
+            android:text="@string/grab" />
     </LinearLayout>
 
     <LinearLayout
-        android:id="@+id/playlistRow"
+        android:id="@+id/grabPanel"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:orientation="horizontal"
-        app:layout_constraintTop_toBottomOf="@id/optionsRow"
+        android:orientation="vertical"
+        android:visibility="gone"
+        app:layout_constraintTop_toBottomOf="@id/linkRow"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <Spinner
-            android:id="@+id/playlistSpinner"
-            android:layout_width="0dp"
+        <TextView
+            android:id="@+id/grabType"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1" />
-    </LinearLayout>
+            android:textSize="13sp" />
 
-    <Button
-        android:id="@+id/downloadButton"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text="@string/download"
-        app:layout_constraintTop_toBottomOf="@id/playlistRow"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
+        <LinearLayout
+            android:id="@+id/optionsRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal">
+
+            <Spinner
+                android:id="@+id/qualitySpinner"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1" />
+
+            <CheckBox
+                android:id="@+id/audioOnlyCheck"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/audio_only" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/playlistRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal">
+
+            <Spinner
+                android:id="@+id/playlistSpinner"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/downloadButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/download" />
+    </LinearLayout>
 
     <Button
         android:id="@+id/browseButton"
@@ -92,7 +117,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
         android:text="@string/browse_youtube"
-        app:layout_constraintTop_toBottomOf="@id/downloadButton"
+        app:layout_constraintTop_toBottomOf="@id/grabPanel"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 

@@ -10,10 +10,15 @@ import android.webkit.WebViewClient
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.LinearLayout
 import android.widget.Spinner
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.graball.engine.DownloadPrefs
 import com.graball.engine.DownloadService
+import com.graball.engine.LinkDetector
+import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
 import java.io.File
 
@@ -34,7 +39,15 @@ class BrowseActivity : AppCompatActivity() {
     private lateinit var qualitySpinner: Spinner
     private lateinit var audioOnlyCheck: CheckBox
     private lateinit var playlistSpinner: Spinner
+    private lateinit var panel: LinearLayout
+    private lateinit var fab: Button
+    private lateinit var linkPreview: TextView
+    private lateinit var optionsRow: LinearLayout
+    private lateinit var playlistRow: LinearLayout
+    private lateinit var downloadButton: Button
     private var currentUrl: String? = null
+    /** What the open panel holds; UNKNOWN means "not detected". */
+    private var panelKind: LinkKind = LinkKind.UNKNOWN
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,6 +61,7 @@ class BrowseActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 currentUrl = url
+                updateFabState()
             }
 
             // YouTube is a single-page app: tapping a video changes the
@@ -63,6 +77,7 @@ class BrowseActivity : AppCompatActivity() {
                 isReload: Boolean
             ) {
                 currentUrl = url
+                updateFabState()
             }
 
             override fun shouldOverrideUrlLoading(
@@ -104,8 +119,96 @@ class BrowseActivity : AppCompatActivity() {
         findViewById<Button>(R.id.browseReload).setOnClickListener {
             webView.reload()
         }
+        panel = findViewById(R.id.browsePanel)
+        fab = findViewById(R.id.browseFab)
+        linkPreview = findViewById(R.id.browseLinkPreview)
+        optionsRow = findViewById(R.id.browseOptionsRow)
+        playlistRow = findViewById(R.id.browsePlaylistRow)
+        downloadButton = findViewById(R.id.browseDownload)
+        fab.setOnClickListener {
+            if (panel.visibility == android.view.View.VISIBLE) {
+                hidePanel()
+            } else {
+                showPanel()
+            }
+        }
+        findViewById<Button>(R.id.browseClose).setOnClickListener {
+            hidePanel()
+        }
+        findViewById<Button>(R.id.browseRefreshLink).setOnClickListener {
+            refreshPanelLink()
+        }
         if (savedInstanceState == null) {
             webView.loadUrl("https://www.youtube.com")
+        }
+    }
+
+    /** Bright when the open page is downloadable, dim when it is not. */
+    private fun updateFabState() {
+        val url = webView.url ?: currentUrl ?: return
+        fab.alpha =
+            if (LinkDetector.detect(url, strictYouTube = true) != LinkKind.UNKNOWN) {
+                1.0f
+            } else {
+                0.5f
+            }
+    }
+
+    private fun showPanel() {
+        refreshPanelLink()
+        panel.visibility = android.view.View.VISIBLE
+        fab.visibility = android.view.View.GONE
+    }
+
+    private fun hidePanel() {
+        panel.visibility = android.view.View.GONE
+        fab.visibility = android.view.View.VISIBLE
+    }
+
+    /**
+     * Re-read the live address and reshape the panel around it:
+     * video → quality + audio only; playlist → those plus the
+     * count; anything else → "link not detected" with just Refresh
+     * and Reload, so the user navigates and refreshes instead of
+     * downloading the wrong page.
+     */
+    private fun refreshPanelLink() {
+        // Prefer the WebView's live address: the cached one can lag a
+        // pushState navigation even with doUpdateVisitedHistory.
+        val url = webView.url ?: currentUrl
+        val kind = if (url == null) {
+            LinkKind.UNKNOWN
+        } else {
+            LinkDetector.detect(url, strictYouTube = true)
+        }
+        panelKind = kind
+        when (kind) {
+            LinkKind.UNKNOWN -> {
+                linkPreview.text = getString(R.string.link_not_detected)
+                optionsRow.visibility = android.view.View.GONE
+                playlistRow.visibility = android.view.View.GONE
+                downloadButton.visibility = android.view.View.GONE
+            }
+            LinkKind.VIDEO -> {
+                linkPreview.text = "Video · " + LinkDetector.preview(url!!)
+                optionsRow.visibility = android.view.View.VISIBLE
+                playlistRow.visibility = android.view.View.GONE
+                downloadButton.visibility = android.view.View.VISIBLE
+            }
+            LinkKind.PLAYLIST -> {
+                linkPreview.text = "Playlist · " + LinkDetector.preview(url!!)
+                optionsRow.visibility = android.view.View.VISIBLE
+                playlistRow.visibility = android.view.View.VISIBLE
+                downloadButton.visibility = android.view.View.VISIBLE
+            }
+        }
+        if (kind != LinkKind.UNKNOWN) {
+            val prefs = DownloadPrefs.load(this)
+            qualitySpinner.setSelection(prefs.qualityPos)
+            audioOnlyCheck.isChecked = prefs.audioOnly
+            if (kind == LinkKind.PLAYLIST) {
+                playlistSpinner.setSelection(prefs.playlistPos)
+            }
         }
     }
 
@@ -118,10 +221,17 @@ class BrowseActivity : AppCompatActivity() {
     }
 
     private fun downloadCurrentPage() {
-        // Prefer the WebView's live address: the cached one can lag a
-        // pushState navigation even with doUpdateVisitedHistory.
+        // Re-detect from the LIVE address at tap time (not the
+        // panel's kind): the user may have navigated after opening
+        // the panel without tapping Refresh link. Spinner values are
+        // left exactly as the user set them — no re-restore here.
         val url = webView.url ?: currentUrl
-        if (url == null || !isDownloadablePage(url)) {
+        val kind = if (url == null) {
+            LinkKind.UNKNOWN
+        } else {
+            LinkDetector.detect(url, strictYouTube = true)
+        }
+        if (kind == LinkKind.UNKNOWN) {
             Toast.makeText(
                 this,
                 "Open a YouTube video or playlist first",
@@ -129,14 +239,18 @@ class BrowseActivity : AppCompatActivity() {
             ).show()
             return
         }
-        val mode = when (playlistSpinner.selectedItemPosition) {
-            1 -> "20"
-            2 -> "30"
-            3 -> "50"
-            4 -> "all"
-            else -> "single"
+        val mode = if (kind == LinkKind.PLAYLIST) {
+            when (playlistSpinner.selectedItemPosition) {
+                1 -> "20"
+                2 -> "30"
+                3 -> "50"
+                4 -> "all"
+                else -> "single"
+            }
+        } else {
+            "single"
         }
-        if (mode == "single" && url.contains("playlist?list=")) {
+        if (mode == "single" && url!!.contains("playlist?list=")) {
             Toast.makeText(
                 this,
                 "That's a playlist — pick how many videos above",
@@ -161,18 +275,26 @@ class BrowseActivity : AppCompatActivity() {
             4 -> 360
             else -> null
         }
+        // Remember these choices for the next panel — but a video
+        // download must not overwrite the playlist choice.
+        val saved = DownloadPrefs.load(this)
+        DownloadPrefs.save(
+            this,
+            DownloadPrefs.Choices(
+                qualitySpinner.selectedItemPosition,
+                audioOnlyCheck.isChecked,
+                if (kind == LinkKind.PLAYLIST) {
+                    playlistSpinner.selectedItemPosition
+                } else {
+                    saved.playlistPos
+                }
+            )
+        )
         DownloadService.startDownload(
             this, url, template,
             audioOnlyCheck.isChecked, maxHeight, mode
         )
         Toast.makeText(this, "Download started — back on the main screen", Toast.LENGTH_SHORT).show()
         finish()
-    }
-
-    private fun isDownloadablePage(url: String): Boolean {
-        return url.contains("youtube.com/watch") ||
-            url.contains("youtube.com/shorts/") ||
-            url.contains("youtube.com/playlist") ||
-            url.contains("youtu.be/")
     }
 }
