@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.os.Bundle
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -15,6 +16,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.graball.engine.CookieImporter
 import com.graball.engine.DownloadHistory
 import com.graball.engine.DownloadPrefs
@@ -36,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var grabPanel: LinearLayout
     private lateinit var grabType: TextView
     private lateinit var playlistRow: LinearLayout
+    /** Top tabs (Search is this screen); kept to re-select Search on return. */
+    private lateinit var mainTabs: List<TextView>
     /** What the open Grab panel holds; video panels force single. */
     private var grabbedKind: LinkKind = LinkKind.VIDEO
     private val rowStatus = mutableMapOf<String, TextView>()
@@ -95,6 +99,52 @@ class MainActivity : AppCompatActivity() {
         grabPanel = findViewById(R.id.grabPanel)
         grabType = findViewById(R.id.grabType)
         playlistRow = findViewById(R.id.playlistRow)
+        // Option 4 chrome: tabs, site cards, bottom nav. Search is
+        // this screen; YouTube opens the in-app browser; everything
+        // else is structure that toasts "coming soon" until it is real.
+        mainTabs = listOf(
+            findViewById(R.id.tabSearch),
+            findViewById(R.id.tabYouTube),
+            findViewById(R.id.tabMusic),
+            findViewById(R.id.tabMore)
+        )
+        selectTab(mainTabs[0])
+        mainTabs[1].setOnClickListener {
+            selectTab(mainTabs[1])
+            startActivity(Intent(this, BrowseActivity::class.java))
+        }
+        mainTabs[2].setOnClickListener {
+            selectTab(mainTabs[2])
+            soonToast("Music")
+        }
+        mainTabs[3].setOnClickListener {
+            selectTab(mainTabs[3])
+            soonToast("More sites")
+        }
+        findViewById<LinearLayout>(R.id.siteYoutube).setOnClickListener {
+            startActivity(Intent(this, BrowseActivity::class.java))
+        }
+        findViewById<LinearLayout>(R.id.siteTiktok).setOnClickListener {
+            soonToast("TikTok")
+        }
+        findViewById<LinearLayout>(R.id.siteInstagram).setOnClickListener {
+            soonToast("Instagram")
+        }
+        findViewById<LinearLayout>(R.id.siteFacebook).setOnClickListener {
+            soonToast("Facebook")
+        }
+        findViewById<LinearLayout>(R.id.siteWhatsapp).setOnClickListener {
+            soonToast("WhatsApp Status")
+        }
+        findViewById<LinearLayout>(R.id.siteMore).setOnClickListener {
+            soonToast("More sites")
+        }
+        findViewById<LinearLayout>(R.id.navPlay).setOnClickListener {
+            Toast.makeText(this, getString(R.string.player_soon), Toast.LENGTH_SHORT).show()
+        }
+        findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
+            Toast.makeText(this, getString(R.string.settings_soon), Toast.LENGTH_SHORT).show()
+        }
         findViewById<Button>(R.id.grabButton).setOnClickListener {
             var url = linkInput.text.toString().trim()
             if (url.isEmpty()) {
@@ -289,6 +339,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Back from the browser: this screen is Search again, so the
+        // tab highlight returns with it.
+        if (::mainTabs.isInitialized) {
+            selectTab(mainTabs[0])
+        }
         // Visible proof of whether the cookies import worked, so a failed
         // download never leaves the user guessing about the session.
         cookiesStatus.text = if (RuntimePaths.cookiesFile(this).exists()) {
@@ -305,6 +360,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Add a queue row for [url], or refresh it if one already exists. */
+    /** Highlight one top tab; the rest go dim. */
+    private fun selectTab(selected: TextView) {
+        mainTabs.forEach {
+            it.setBackgroundResource(android.R.color.transparent)
+            it.setTextColor(ContextCompat.getColor(this, R.color.graball_tab_text))
+            it.setTypeface(null, android.graphics.Typeface.NORMAL)
+        }
+        selected.setBackgroundResource(R.drawable.tab_selected)
+        selected.setTextColor(Color.BLACK)
+        selected.setTypeface(null, android.graphics.Typeface.BOLD)
+    }
+
+    private fun soonToast(name: String) {
+        Toast.makeText(this, getString(R.string.soon_toast, name), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun dp(v: Int): Int {
+        return (v * resources.displayMetrics.density).toInt()
+    }
+
     private fun addRow(
         url: String,
         statusText: String,
@@ -319,20 +394,32 @@ class MainActivity : AppCompatActivity() {
         }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, 12, 0, 12)
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setBackgroundResource(R.drawable.card_bg)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(12)
+            }
         }
         val title = TextView(this).apply {
             text = url
             textSize = 14f
+            textColor = Color.WHITE
             ellipsize = android.text.TextUtils.TruncateAt.END
             maxLines = 1
         }
         val status = TextView(this).apply {
             text = statusText
             textSize = 13f
+            textColor = Color.WHITE
         }
         val detail = TextView(this).apply {
             textSize = 12f
+            textColor = ContextCompat.getColor(
+                this@MainActivity, R.color.graball_subtext
+            )
             visibility = android.view.View.GONE
         }
         if (!detailText.isNullOrBlank()) {
@@ -342,6 +429,8 @@ class MainActivity : AppCompatActivity() {
         val cancel = Button(this).apply {
             text = getString(R.string.queue_cancel)
             textSize = 12f
+            setBackgroundResource(R.drawable.btn_small)
+            setTextColor(Color.WHITE)
             visibility = if (showCancel) {
                 android.view.View.VISIBLE
             } else {
@@ -365,6 +454,8 @@ class MainActivity : AppCompatActivity() {
         val pause = Button(this).apply {
             text = getString(R.string.queue_pause)
             textSize = 12f
+            setBackgroundResource(R.drawable.btn_small)
+            setTextColor(Color.WHITE)
             visibility = if (showCancel) {
                 android.view.View.VISIBLE
             } else {
@@ -384,6 +475,8 @@ class MainActivity : AppCompatActivity() {
         val copyLog = Button(this).apply {
             text = getString(R.string.queue_copy_log)
             textSize = 12f
+            setBackgroundResource(R.drawable.btn_small)
+            setTextColor(Color.WHITE)
             visibility = android.view.View.GONE
             setOnClickListener {
                 val log = DownloadService.getLog(url)
