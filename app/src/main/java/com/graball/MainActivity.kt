@@ -18,6 +18,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.graball.engine.DownloadPrefs
 import com.graball.engine.DownloadService
+import com.graball.engine.DownloadProgressBus
 import com.graball.engine.LinkDetector
 import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
@@ -191,8 +192,7 @@ class MainActivity : AppCompatActivity() {
                 4 -> 360
                 else -> null
             }
-            cancelledUrls.remove(url)
-            rowMode[url] = buildString {
+            DownloadProgressBus.modes[url] = buildString {
                 if (audioOnlyCheck.isChecked) {
                     append("Audio only")
                 } else {

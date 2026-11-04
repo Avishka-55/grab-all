@@ -18,6 +18,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.graball.engine.DownloadPrefs
+import com.graball.engine.DownloadProgressBus
 import com.graball.engine.DownloadService
 import com.graball.engine.LinkDetector
 import com.graball.engine.LinkKind
@@ -305,6 +306,27 @@ class BrowseActivity : AppCompatActivity() {
                 }
             )
         )
+        DownloadProgressBus.modes[url] = buildString {
+            if (audioOnlyCheck.isChecked) {
+                append("Audio only")
+            } else {
+                append(
+                    when (qualitySpinner.selectedItemPosition) {
+                        1 -> "1080p"
+                        2 -> "720p"
+                        3 -> "480p"
+                        4 -> "360p"
+                        else -> "Best"
+                    }
+                )
+            }
+            when (mode) {
+                "20" -> append(" · First 20")
+                "30" -> append(" · First 30")
+                "50" -> append(" · First 50")
+                "all" -> append(" · All videos")
+            }
+        }
         DownloadService.startDownload(
             this, url, template,
             audioOnlyCheck.isChecked, maxHeight, mode

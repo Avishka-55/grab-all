@@ -236,6 +236,15 @@ class DownloadsActivity : AppCompatActivity() {
         val cancelView = rowCancel[state.id]
         val pauseView = rowPause[state.id]
         val copyView = rowCopyLog[state.id]
+        // A DOWNLOADING tick means a NEW download for this URL: clear
+        // any cancelled flag left by an earlier run of the same URL,
+        // or the row would stay stuck on "Cancelled" forever.
+        if (state.status == DownloadProgressBus.Status.DOWNLOADING) {
+            cancelledUrls.remove(state.id)
+        }
+        // Mode label: history rows carry their own; live rows read
+        // the label whoever started the download recorded on the bus.
+        val mode = rowMode[state.id] ?: DownloadProgressBus.modes[state.id]
         if (cancelledUrls.contains(state.id)) {
             statusView.text = getString(R.string.queue_cancelled)
             detailView?.visibility = android.view.View.GONE
@@ -255,11 +264,11 @@ class DownloadsActivity : AppCompatActivity() {
         // row update already flows through.
         if (state.status == DownloadProgressBus.Status.COMPLETE) {
             DownloadHistory.record(
-                this, state.id, rowMode[state.id] ?: "", "Done", null
+                this, state.id, mode ?: "", "Done", null
             )
         } else if (state.status == DownloadProgressBus.Status.FAILED) {
             DownloadHistory.record(
-                this, state.id, rowMode[state.id] ?: "", "Failed",
+                this, state.id, mode ?: "", "Failed",
                 state.detail
             )
         }
@@ -269,11 +278,11 @@ class DownloadsActivity : AppCompatActivity() {
                 val base = if (pct != null) getString(R.string.queue_downloading, pct)
                 else getString(R.string.queue_downloading_unknown)
                 val itemSuffix = state.item?.let { " · $it" } ?: ""
-                val modeSuffix = rowMode[state.id]?.let { " · $it" } ?: ""
+                val modeSuffix = mode?.let { " · $it" } ?: ""
                 base + itemSuffix + modeSuffix
             }
             DownloadProgressBus.Status.COMPLETE -> {
-                val modeSuffix = rowMode[state.id]?.let { " · $it" } ?: ""
+                val modeSuffix = mode?.let { " · $it" } ?: ""
                 getString(R.string.queue_done) + modeSuffix
             }
             DownloadProgressBus.Status.FAILED -> getString(R.string.queue_failed)

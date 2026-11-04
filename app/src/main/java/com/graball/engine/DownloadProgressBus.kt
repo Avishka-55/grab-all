@@ -5,12 +5,17 @@ import android.os.Looper
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * Tiny in-process progress bus from DownloadService to MainActivity's queue.
+ * Tiny in-process progress bus from DownloadService to the Downloads
+ * screen's queue.
  *
  * The service posts states from its worker thread; listeners always run on
  * the main thread. No history is kept: an activity that (re)creates only
  * sees states posted after it subscribes. Unsubscribe in onPause to avoid
  * leaking the activity.
+ *
+ * Modes is the exception to "no history": whoever starts a download
+ * records its mode label ("720p", "Audio only · First 20") here, so
+ * the Downloads screen can label a row whose start it never saw.
  */
 object DownloadProgressBus {
 
@@ -27,6 +32,9 @@ object DownloadProgressBus {
         /** Playlist position ("Item 5 of 20"); only while DOWNLOADING. */
         val item: String? = null
     )
+
+    /** Mode label per URL, set at download start (see above). */
+    val modes = mutableMapOf<String, String>()
 
     private val listeners = CopyOnWriteArrayList<(State) -> Unit>()
     private val mainHandler = Handler(Looper.getMainLooper())
