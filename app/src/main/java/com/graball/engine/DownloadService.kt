@@ -30,12 +30,52 @@ import java.util.Collections
  */
 class DownloadService : Service() {
 
-    @Volatile
-    private var runner: YtDlpRunner? = null
+    /**
+     * Everything one download owns. The old code kept a single
+     * runner/published/skipped set for the whole service, so a second
+     * download overwrote the first — and Cancel (which carried no URL)
+     * killed whichever download started last, not the row tapped.
+     * That is exactly the reported bug: cancelling the top video
+     * failed the other one with "read interrupted". Each URL now has
+     * its own session, and cancel/pause address it by URL.
+     */
+    private class Session(
+        val url: String,
+        val outputTemplate: String,
+        val audioOnly: Boolean
+    ) {
+        var runner: YtDlpRunner? = null
 
-    /** URL of the download currently running, if any. */
-    @Volatile
-    private var currentUrl: String? = null
+        /** Final files from the runner, used as a fallback at finish time. */
+        var downloadedFiles: List<File> = emptyList()
+
+        /**
+         * Paths already published to Downloads for this download.
+         * Each song of an audio playlist is published the moment it
+         * finishes (see onDownloadedFiles below), so a cancelled playlist
+         * keeps its finished songs instead of losing everything — and the
+         * end-of-run scan must not publish the same file twice.
+         */
+        val publishedPaths = mutableSetOf<String>()
+
+        /**
+         * Basenames yt-dlp skipped this run (already complete from an
+         * earlier run). The end-of-run scan must not publish them again,
+         * or a resumed playlist would duplicate its finished songs.
+         */
+        val skippedNames = mutableSetOf<String>()
+    }
+
+    /** Sessions by URL. Guarded by the map itself (synchronizedMap). */
+    private val sessions =
+        Collections.synchronizedMap(mutableMapOf<String, Session>())
+
+    /** Stop the service only when the last session has ended. */
+    private fun stopIfIdle() {
+        if (sessions.isEmpty()) {
+            stopSelf()
+        }
+    }
 
     /**
      * URLs paused by the user (or by a network switch). A pause kills
@@ -58,45 +98,25 @@ class DownloadService : Service() {
     /** Default network the current download started on, if known. */
     private var startNetwork: Network? = null
 
-    /** Final files from the runner, used as a fallback at finish time. */
-    private var downloadedFiles: List<File> = emptyList()
-
-    /**
-     * Paths already published to Downloads for the current download.
-     * Each song of an audio playlist is published the moment it
-     * finishes (see onDownloadedFiles below), so a cancelled playlist
-     * keeps its finished songs instead of losing everything — and the
-     * end-of-run scan must not publish the same file twice.
-     */
-    private val publishedPaths = mutableSetOf<String>()
-
     /** Publish one file unless it was already published this run. */
-    private fun publishFile(file: File): Boolean {
-        if (publishedPaths.contains(file.absolutePath)) {
+    private fun publishFile(session: Session, file: File): Boolean {
+        if (session.publishedPaths.contains(file.absolutePath)) {
             return true
         }
         val ok = MediaStorePublisher.publish(this, file, file.name) != null
         if (ok) {
-            publishedPaths.add(file.absolutePath)
+            session.publishedPaths.add(file.absolutePath)
         }
         return ok
     }
 
     /**
-     * Basenames yt-dlp skipped this run (already complete from an
-     * earlier run). The end-of-run scan must not publish them again,
-     * or a resumed playlist would duplicate its finished songs.
-     */
-    private val skippedNames = mutableSetOf<String>()
-
-    /**
      * URLs with a download currently running. A second tap on Download
      * for the same URL (or a re-tap after reopening the app, when the
-     * queue rows are gone) must NOT start a second yt-dlp: the service
-     * holds a single runner var, so the first process would be
-     * orphaned — still downloading and publishing in the background
-     * while the row follows the second one, which looks exactly like
-     * "after finishing it starts again".
+     * queue rows are gone) must NOT start a second yt-dlp for that
+     * URL: two runners for one URL would fight over the same staging
+     * dir and the row would follow only the second one, which looks
+     * exactly like "after finishing it starts again".
      */
     private val activeUrls =
         Collections.synchronizedSet(mutableSetOf<String>())
@@ -166,11 +186,15 @@ class DownloadService : Service() {
     }
 
     private fun autoPause(reason: String) {
-        val url = currentUrl ?: return
-        if (runner == null) return
-        pausedUrls.add(url)
-        pauseReasons[url] = reason
-        runner?.cancel()
+        // A switch kills every download's socket, so pause all of
+        // them — each keeps its own .part and resumes separately.
+        val snapshot = sessions.values.toList()
+        if (snapshot.isEmpty()) return
+        snapshot.forEach { session ->
+            pausedUrls.add(session.url)
+            pauseReasons[session.url] = reason
+            session.runner?.cancel()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -178,15 +202,22 @@ class DownloadService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val safeIntent = intent ?: return START_NOT_STICKY
         if (safeIntent.action == ACTION_CANCEL) {
-            runner?.cancel()
+            // Addressed by URL: cancelling one row must never kill
+            // another download that started later.
+            val url = safeIntent.getStringExtra(EXTRA_URL)
+            if (url != null) {
+                sessions[url]?.runner?.cancel()
+            }
             return START_NOT_STICKY
         }
         if (safeIntent.action == ACTION_PAUSE) {
-            val url = currentUrl ?: return START_NOT_STICKY
-            if (runner == null) return START_NOT_STICKY
+            val url = safeIntent.getStringExtra(EXTRA_URL)
+                ?: return START_NOT_STICKY
+            val session = sessions[url] ?: return START_NOT_STICKY
+            if (session.runner == null) return START_NOT_STICKY
             pausedUrls.add(url)
             pauseReasons[url] = null
-            runner?.cancel()
+            session.runner?.cancel()
             return START_NOT_STICKY
         }
         if (safeIntent.action == ACTION_RESUME) {
@@ -226,14 +257,13 @@ class DownloadService : Service() {
             Toast.makeText(this, "Already downloading this", Toast.LENGTH_SHORT).show()
             return START_NOT_STICKY
         }
-        publishedPaths.clear()
-        skippedNames.clear()
         // A fresh start clears any stale pause mark, so a later real
         // failure is never misreported as a pause.
         pausedUrls.remove(url)
         pauseReasons.remove(url)
         logsByUrl.remove(url)
-        currentUrl = url
+        val session = Session(url, outputTemplate, audioOnly)
+        sessions[url] = session
         paramsByUrl[url] = DownloadParams(
             outputTemplate, audioOnly, maxHeight, playlistMode
         )
@@ -258,7 +288,8 @@ class DownloadService : Service() {
                         )
                     )
                     activeUrls.remove(url)
-                    stopSelf()
+                    sessions.remove(url)
+                    stopIfIdle()
                 } else {
                     // Repair cookies files saved by older imports, which
                     // dropped the "# Netscape HTTP Cookie File" header
@@ -287,7 +318,7 @@ class DownloadService : Service() {
                         quickJsBinary = RuntimePaths.quickJsBinary(this),
                         cookiesFile = cookies
                     )
-                    runner = newRunner
+                    session.runner = newRunner
                     newRunner.download(
                         url, outputTemplate,
                         formatArgs(audioOnly, maxHeight) +
@@ -320,14 +351,14 @@ class DownloadService : Service() {
                                     // Video downloads keep the old
                                     // behavior (publish only the final
                                     // merged file at the end).
-                                    files.forEach { publishFile(it) }
+                                    files.forEach { publishFile(session, it) }
                                 } else {
-                                    downloadedFiles = files
+                                    session.downloadedFiles = files
                                 }
                             }
 
                             override fun onSkippedFiles(files: List<File>) {
-                                files.forEach { skippedNames.add(it.name) }
+                                files.forEach { session.skippedNames.add(it.name) }
                             }
 
                             override fun onLog(log: String) {
@@ -336,7 +367,7 @@ class DownloadService : Service() {
 
                             override fun onFinished(exitCode: Int, detail: String) {
                                 activeUrls.remove(url)
-                                currentUrl = null
+                                sessions.remove(url)
                                 if (pausedUrls.contains(url)) {
                                     // Pause, not failure: the user (or
                                     // a network switch) stopped it
@@ -356,7 +387,7 @@ class DownloadService : Service() {
                                             reason
                                         )
                                     )
-                                    this@DownloadService.stopSelf()
+                                    this@DownloadService.stopIfIdle()
                                     return
                                 }
                                 if (exitCode == 0) {
@@ -384,20 +415,20 @@ class DownloadService : Service() {
                                         ?.filter { it.isFile && it.length() > 0 &&
                                             !it.name.endsWith(".part") &&
                                             !it.name.endsWith(".ytdl") &&
-                                            !skippedNames.contains(it.name) }
+                                            !session.skippedNames.contains(it.name) }
                                         ?: emptyList()
                                     val candidates = if (scanned.isNotEmpty()) {
                                         scanned
                                     } else {
-                                        downloadedFiles.filter {
+                                        session.downloadedFiles.filter {
                                             it.exists() &&
-                                                !skippedNames.contains(it.name)
+                                                !session.skippedNames.contains(it.name)
                                         }
                                     }
                                     candidates.forEach { file ->
-                                        publishFile(file)
+                                        publishFile(session, file)
                                     }
-                                    val published = publishedPaths.size
+                                    val published = session.publishedPaths.size
                                     // Drop the whole staging dir, so a
                                     // later download of the same video can
                                     // never "skip" off a leftover.
@@ -408,7 +439,7 @@ class DownloadService : Service() {
                                     // already in Downloads from the
                                     // earlier run.
                                     if (published > 0 ||
-                                        skippedNames.isNotEmpty()
+                                        session.skippedNames.isNotEmpty()
                                     ) {
                                         this@DownloadService.updateNotification(
                                             "Download complete", null
@@ -451,7 +482,7 @@ class DownloadService : Service() {
                                         ?.filter { file ->
                                             !file.name.endsWith(".part") &&
                                                 !file.name.endsWith(".ytdl") &&
-                                                !publishedPaths.contains(
+                                                !session.publishedPaths.contains(
                                                     file.absolutePath
                                                 )
                                         }
@@ -466,12 +497,12 @@ class DownloadService : Service() {
                                         )
                                     )
                                 }
-                                this@DownloadService.stopSelf()
+                                this@DownloadService.stopIfIdle()
                             }
 
                             override fun onError(message: String) {
                                 activeUrls.remove(url)
-                                currentUrl = null
+                                sessions.remove(url)
                                 this@DownloadService.updateNotification(
                                     "Download error: $message", null
                                 )
@@ -480,14 +511,14 @@ class DownloadService : Service() {
                                         url, null, DownloadProgressBus.Status.FAILED, message
                                     )
                                 )
-                                this@DownloadService.stopSelf()
+                                this@DownloadService.stopIfIdle()
                             }
                         })
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Download service failed", e)
                 activeUrls.remove(url)
-                currentUrl = null
+                sessions.remove(url)
                 updateNotification("Download error: " + (e.message ?: "unknown"), null)
                 DownloadProgressBus.post(
                     DownloadProgressBus.State(
@@ -495,7 +526,7 @@ class DownloadService : Service() {
                         e.message ?: "unknown error"
                     )
                 )
-                stopSelf()
+                stopIfIdle()
             }
         }.start()
         return START_NOT_STICKY
@@ -632,9 +663,11 @@ class DownloadService : Service() {
             }
         }
 
-        fun cancel(context: Context) {
+        /** Cancel one download, addressed by its URL. */
+        fun cancel(context: Context, url: String) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 action = ACTION_CANCEL
+                putExtra(EXTRA_URL, url)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -643,10 +676,11 @@ class DownloadService : Service() {
             }
         }
 
-        /** Pause the currently running download, if any. */
-        fun pause(context: Context) {
+        /** Pause one download, addressed by its URL. */
+        fun pause(context: Context, url: String) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 action = ACTION_PAUSE
+                putExtra(EXTRA_URL, url)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

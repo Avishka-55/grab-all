@@ -95,6 +95,20 @@ class YtDlpRunner(
             return
         }
         Thread {
+            // Declared outside the try so the exception path can
+            // still deliver it: a download killed mid-read (cancel,
+            // process death) exits through catch, and the old code
+            // only delivered the log on the normal path — so exactly
+            // the failed downloads a user most wants to copy from
+            // reported "No log to copy".
+            val logLines = ArrayDeque<String>()
+            var logDelivered = false
+            fun deliverLog() {
+                if (!logDelivered && logLines.isNotEmpty()) {
+                    logDelivered = true
+                    listener.onLog(logLines.joinToString("\n"))
+                }
+            }
             try {
                 val command = buildCommand(url, outputTemplate, extraArgs)
                 Log.d(TAG, "Running: " + command.joinToString(" "))
@@ -114,7 +128,6 @@ class YtDlpRunner(
                 // (pasted to Boba) wants the whole run. Progress lines
                 // are excluded, or they would flush the real content.
                 // Capped so one chatty download cannot grow memory.
-                val logLines = ArrayDeque<String>()
                 // Playlist position, from yt-dlp's own
                 // "[download] Downloading item N of M" lines. Without
                 // it, a playlist looks like one download that keeps
@@ -200,13 +213,14 @@ class YtDlpRunner(
                 if (skipped.isNotEmpty()) {
                     listener.onSkippedFiles(skipped)
                 }
-                if (logLines.isNotEmpty()) {
-                    listener.onLog(logLines.joinToString("\n"))
-                }
+                deliverLog()
                 val detail = if (exitCode == 0) "" else tail.joinToString("\n")
                 listener.onFinished(exitCode, detail)
             } catch (e: Exception) {
                 Log.e(TAG, "Download failed", e)
+                // Deliver the log even on the killed/interrupted path,
+                // before reporting the error, or Copy log finds nothing.
+                deliverLog()
                 listener.onError(e.message ?: "Unknown error")
             }
         }.start()

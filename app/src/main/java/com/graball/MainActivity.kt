@@ -348,9 +348,9 @@ class MainActivity : AppCompatActivity() {
                 android.view.View.GONE
             }
             setOnClickListener {
-                // The service kills the running yt-dlp; the bus will
-                // still report FAILED for it, but this row stays on
-                // "Cancelled" because the URL is in cancelledUrls.
+                // The service kills only this row's yt-dlp; the bus
+                // will still report FAILED for it, but this row stays
+                // on "Cancelled" because the URL is in cancelledUrls.
                 cancelledUrls.add(url)
                 status.text = getString(R.string.queue_cancelled)
                 detail.visibility = android.view.View.GONE
@@ -359,7 +359,7 @@ class MainActivity : AppCompatActivity() {
                 // it would offer to resume a cancelled download.
                 rowPause[url]?.visibility = android.view.View.GONE
                 rowCopyLog[url]?.visibility = android.view.View.GONE
-                DownloadService.cancel(this@MainActivity)
+                DownloadService.cancel(this@MainActivity, url)
             }
         }
         val pause = Button(this).apply {
@@ -377,7 +377,7 @@ class MainActivity : AppCompatActivity() {
                 if (pausedRows.contains(url)) {
                     DownloadService.resume(this@MainActivity, url)
                 } else {
-                    DownloadService.pause(this@MainActivity)
+                    DownloadService.pause(this@MainActivity, url)
                 }
             }
         }
