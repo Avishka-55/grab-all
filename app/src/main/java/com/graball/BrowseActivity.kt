@@ -1,6 +1,7 @@
 package com.graball
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.webkit.CookieManager
@@ -11,6 +12,7 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -31,7 +33,7 @@ import java.io.File
  * touch another app's screen), so it lives here, in GrabAll's own
  * browser view. Watching works fine in a WebView; only Google SIGN-IN
  * is refused inside one, which is why the session still comes from
- * the cookies import on the main screen, not from logging in here.
+ * the cookies import in Settings, not from logging in here.
  */
 class BrowseActivity : AppCompatActivity() {
 
@@ -45,6 +47,7 @@ class BrowseActivity : AppCompatActivity() {
     private lateinit var optionsRow: LinearLayout
     private lateinit var playlistRow: LinearLayout
     private lateinit var downloadButton: Button
+    private lateinit var loading: ProgressBar
     private var currentUrl: String? = null
     /** What the open panel holds; UNKNOWN means "not detected". */
     private var panelKind: LinkKind = LinkKind.UNKNOWN
@@ -53,13 +56,19 @@ class BrowseActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_browse)
         webView = findViewById(R.id.browseWebView)
+        loading = findViewById(R.id.browseLoading)
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(webView, true)
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                loading.visibility = android.view.View.VISIBLE
+            }
+
             override fun onPageFinished(view: WebView, url: String) {
+                loading.visibility = android.view.View.GONE
                 currentUrl = url
                 updateFabState()
             }

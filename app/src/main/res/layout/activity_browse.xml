@@ -1,17 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Browser: the download bar is gone. A small Grab button floats
-     over the page (bright when the open page is downloadable, dim
-     when it is not); tapping it opens the panel, which grabs the
-     live address itself. The panel hides again on Close, so the
-     button never fights YouTube's own bottom bar for long. -->
+<!-- Browser: a Grab button floats over the page (bright when the
+     open page is downloadable, dim when it is not); tapping it opens
+     the panel, which grabs the live address itself. v0.5.9: the
+     floating button and panel buttons wear the new look (orange
+     primary, dark card panel) instead of the stock grey buttons, and
+     a spinner shows while a page is loading. -->
 <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="@color/graball_bg">
 
     <WebView
         android:id="@+id/browseWebView"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
+
+    <ProgressBar
+        android:id="@+id/browseLoading"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_centerInParent="true"
+        android:indeterminateTint="@color/graball_orange"
+        android:visibility="visible" />
 
     <Button
         android:id="@+id/browseFab"
@@ -21,14 +31,20 @@
         android:layout_alignParentEnd="true"
         android:layout_margin="16dp"
         android:alpha="0.5"
-        android:text="@string/grab" />
+        android:background="@drawable/btn_orange"
+        android:elevation="4dp"
+        android:paddingStart="20dp"
+        android:paddingEnd="20dp"
+        android:text="@string/grab"
+        android:textColor="@color/graball_text"
+        android:textStyle="bold" />
 
     <LinearLayout
         android:id="@+id/browsePanel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_alignParentBottom="true"
-        android:background="?android:attr/colorBackground"
+        android:background="@drawable/card_bg"
         android:orientation="vertical"
         android:padding="12dp"
         android:visibility="gone">
@@ -43,13 +59,16 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:textColor="@color/graball_text"
                 android:textSize="13sp" />
 
             <Button
                 android:id="@+id/browseClose"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/browse_close" />
+                android:background="@drawable/btn_small"
+                android:text="@string/browse_close"
+                android:textColor="@color/graball_text" />
         </LinearLayout>
 
         <LinearLayout
@@ -69,7 +88,8 @@
                 android:id="@+id/browseAudioOnly"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/audio_only" />
+                android:text="@string/audio_only"
+                android:textColor="@color/graball_text" />
         </LinearLayout>
 
         <LinearLayout
@@ -96,20 +116,29 @@
                 android:id="@+id/browseRefreshLink"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/refresh_link" />
+                android:background="@drawable/btn_small"
+                android:text="@string/refresh_link"
+                android:textColor="@color/graball_text" />
 
             <Button
                 android:id="@+id/browseReload"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/browse_reload" />
+                android:layout_marginStart="8dp"
+                android:background="@drawable/btn_small"
+                android:text="@string/browse_reload"
+                android:textColor="@color/graball_text" />
 
             <Button
                 android:id="@+id/browseDownload"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
                 android:layout_weight="1"
-                android:text="@string/download" />
+                android:background="@drawable/btn_orange"
+                android:text="@string/download"
+                android:textColor="@color/graball_text"
+                android:textStyle="bold" />
         </LinearLayout>
     </LinearLayout>
 

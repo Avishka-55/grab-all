@@ -14,10 +14,8 @@ import android.widget.LinearLayout
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import com.graball.engine.CookieImporter
 import com.graball.engine.DownloadHistory
 import com.graball.engine.DownloadPrefs
 import com.graball.engine.DownloadProgressBus
@@ -30,7 +28,6 @@ import java.io.File
 class MainActivity : AppCompatActivity() {
 
     private lateinit var queueContainer: LinearLayout
-    private lateinit var cookiesStatus: TextView
     private lateinit var qualitySpinner: Spinner
     private lateinit var audioOnlyCheck: CheckBox
     private lateinit var playlistSpinner: Spinner
@@ -58,26 +55,11 @@ class MainActivity : AppCompatActivity() {
         updateRow(state)
     }
 
-    // Cookies import lives on the main screen now: the old login
-    // screen's WebView sign-in is refused by Google (401), so the
-    // import is the session's front door, not a buried fallback.
-    private val importLauncher =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            if (uri != null) {
-                val result = CookieImporter.importCookies(this, uri)
-                Toast.makeText(this, result.message, Toast.LENGTH_SHORT).show()
-                if (result.ok) {
-                    cookiesStatus.text = getString(R.string.cookies_saved)
-                }
-            }
-        }
-
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         queueContainer = findViewById(R.id.queueContainer)
-        cookiesStatus = findViewById(R.id.cookiesStatus)
         qualitySpinner = findViewById(R.id.qualitySpinner)
         qualitySpinner.adapter = ArrayAdapter(
             this,
@@ -144,7 +126,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, getString(R.string.player_soon), Toast.LENGTH_SHORT).show()
         }
         findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
-            Toast.makeText(this, getString(R.string.settings_soon), Toast.LENGTH_SHORT).show()
+            startActivity(Intent(this, SettingsActivity::class.java))
         }
         findViewById<Button>(R.id.grabButton).setOnClickListener {
             var url = linkInput.text.toString().trim()
@@ -266,12 +248,6 @@ class MainActivity : AppCompatActivity() {
             addRow(url, getString(R.string.queue_queued))
             Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
         }
-        findViewById<Button>(R.id.browseButton).setOnClickListener {
-            startActivity(Intent(this, BrowseActivity::class.java))
-        }
-        findViewById<Button>(R.id.importButton).setOnClickListener {
-            importLauncher.launch("*/*")
-        }
         // Past downloads survive restarts now: reload them as rows
         // (no cancel button — they are finished, not running).
         DownloadHistory.load(this).forEach { entry ->
@@ -344,13 +320,6 @@ class MainActivity : AppCompatActivity() {
         // tab highlight returns with it.
         if (::mainTabs.isInitialized) {
             selectTab(mainTabs[0])
-        }
-        // Visible proof of whether the cookies import worked, so a failed
-        // download never leaves the user guessing about the session.
-        cookiesStatus.text = if (RuntimePaths.cookiesFile(this).exists()) {
-            getString(R.string.cookies_saved)
-        } else {
-            getString(R.string.cookies_missing)
         }
         DownloadProgressBus.subscribe(progressListener)
     }
