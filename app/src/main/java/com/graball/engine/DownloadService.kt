@@ -62,6 +62,8 @@ class DownloadService : Service() {
             } else {
                 null
             }
+        val playlistMode =
+            safeIntent.getStringExtra(EXTRA_PLAYLIST_MODE) ?: "single"
 
         startForeground(NOTIFICATION_ID, buildNotification("Preparing download…", null))
         Thread {
@@ -105,7 +107,9 @@ class DownloadService : Service() {
                     )
                     runner = newRunner
                     newRunner.download(
-                        url, outputTemplate, formatArgs(audioOnly, maxHeight),
+                        url, outputTemplate,
+                        formatArgs(audioOnly, maxHeight) +
+                            playlistArgs(playlistMode),
                         object : DownloadListener {
                             override fun onProgress(progress: DownloadProgress) {
                                 val pct = progress.percent
@@ -275,6 +279,7 @@ class DownloadService : Service() {
         private const val EXTRA_OUTPUT = "com.graball.engine.extra.OUTPUT"
         private const val EXTRA_AUDIO_ONLY = "com.graball.engine.extra.AUDIO_ONLY"
         private const val EXTRA_MAX_HEIGHT = "com.graball.engine.extra.MAX_HEIGHT"
+        private const val EXTRA_PLAYLIST_MODE = "com.graball.engine.extra.PLAYLIST_MODE"
         private const val ACTION_CANCEL = "com.graball.engine.action.CANCEL"
 
         fun startDownload(
@@ -282,13 +287,15 @@ class DownloadService : Service() {
             url: String,
             outputTemplate: String,
             audioOnly: Boolean = false,
-            maxHeight: Int? = null
+            maxHeight: Int? = null,
+            playlistMode: String = "single"
         ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 putExtra(EXTRA_URL, url)
                 putExtra(EXTRA_OUTPUT, outputTemplate)
                 putExtra(EXTRA_AUDIO_ONLY, audioOnly)
                 if (maxHeight != null) putExtra(EXTRA_MAX_HEIGHT, maxHeight)
+                putExtra(EXTRA_PLAYLIST_MODE, playlistMode)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -316,6 +323,24 @@ class DownloadService : Service() {
             val format = "bestvideo$cap[vcodec^=avc1]+bestaudio/" +
                 "best$cap[vcodec^=avc1]/best$cap/best"
             return listOf("-f", format, "--remux-video", "mp4")
+        }
+
+        /**
+         * Playlist flags. "single" forces one video even for a URL that
+         * carries a playlist (yt-dlp's default for a watch URL is single
+         * anyway; --no-playlist makes it explicit). A number caps the
+         * playlist; "all" takes everything. Callers pick an indexed
+         * output template for playlist modes so same-title videos in
+         * one playlist don't overwrite each other.
+         */
+        private fun playlistArgs(playlistMode: String): List<String> {
+            return when (playlistMode) {
+                "20", "30", "50" -> listOf(
+                    "--yes-playlist", "--playlist-end", playlistMode
+                )
+                "all" -> listOf("--yes-playlist")
+                else -> listOf("--no-playlist")
+            }
         }
 
         fun cancel(context: Context) {

@@ -8,6 +8,7 @@ import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import com.graball.engine.CookieImporter
 import com.graball.engine.RuntimePaths
 
 /**
@@ -76,52 +77,17 @@ class LoginActivity : AppCompatActivity() {
     }
 
     /**
-     * Import a cookies.txt file picked by the user (the fallback when
-     * WebView sign-in is refused). Accepts Netscape-format files and
-     * space-separated exports (converted to tabs, like the Telegram bot).
-     * Only youtube.com / google.com lines are kept; anything else is
-     * rejected without writing. The "# Netscape HTTP Cookie File"
-     * header is always written first: yt-dlp rejects a headerless file
-     * ("does not look like a Netscape format cookies file"), which is
-     * exactly what the old import produced by dropping every "#" line.
-     * "#HttpOnly_" cookie lines are kept: they are real session cookies
-     * in Netscape format, not comments.
+     * Import a cookies.txt file picked by the user. The WebView sign-in
+     * above is refused by Google (401 in an embedded browser), so this
+     * import — shared with the main screen via CookieImporter — is the
+     * working session route, not a fallback.
      */
     private fun importCookies(uri: android.net.Uri) {
-        val text = try {
-            contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
-        } catch (_: Exception) {
-            null
+        val result = CookieImporter.importCookies(this, uri)
+        Toast.makeText(this, result.message, Toast.LENGTH_SHORT).show()
+        if (result.ok) {
+            finish()
         }
-        if (text.isNullOrBlank()) {
-            Toast.makeText(this, "Couldn't read that file", Toast.LENGTH_LONG).show()
-            return
-        }
-        val kept = text.lines().mapNotNull { line ->
-            val trimmed = line.trim()
-            if (trimmed.isEmpty()) return@mapNotNull null
-            if (trimmed.startsWith("#") && !trimmed.startsWith("#HttpOnly_")) {
-                return@mapNotNull null
-            }
-            val fields = trimmed.split("\t", " ").filter { it.isNotEmpty() }
-            if (fields.size < 7) return@mapNotNull null
-            val domain = fields[0]
-            if (!domain.contains("youtube.com") && !domain.contains("google.com")) {
-                return@mapNotNull null
-            }
-            fields.joinToString("\t")
-        }
-        if (kept.isEmpty()) {
-            Toast.makeText(this, "That file doesn't look like a YouTube cookies file", Toast.LENGTH_LONG).show()
-            return
-        }
-        val file = RuntimePaths.cookiesFile(this)
-        file.parentFile?.mkdirs()
-        file.writeText(
-            "# Netscape HTTP Cookie File\n" + kept.joinToString("\n") + "\n"
-        )
-        Toast.makeText(this, "Cookies imported in app", Toast.LENGTH_SHORT).show()
-        finish()
     }
 
     /**

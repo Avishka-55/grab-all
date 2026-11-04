@@ -10,7 +10,9 @@ import android.widget.LinearLayout
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import com.graball.engine.CookieImporter
 import com.graball.engine.DownloadProgressBus
 import com.graball.engine.DownloadService
 import com.graball.engine.RuntimePaths
@@ -22,6 +24,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cookiesStatus: TextView
     private lateinit var qualitySpinner: Spinner
     private lateinit var audioOnlyCheck: CheckBox
+    private lateinit var playlistSpinner: Spinner
     private val rowStatus = mutableMapOf<String, TextView>()
     private val rowDetail = mutableMapOf<String, TextView>()
     private val rowCancel = mutableMapOf<String, Button>()
@@ -30,6 +33,20 @@ class MainActivity : AppCompatActivity() {
     private val progressListener: (DownloadProgressBus.State) -> Unit = { state ->
         updateRow(state)
     }
+
+    // Cookies import lives on the main screen now: the old login
+    // screen's WebView sign-in is refused by Google (401), so the
+    // import is the session's front door, not a buried fallback.
+    private val importLauncher =
+        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            if (uri != null) {
+                val result = CookieImporter.importCookies(this, uri)
+                Toast.makeText(this, result.message, Toast.LENGTH_SHORT).show()
+                if (result.ok) {
+                    cookiesStatus.text = getString(R.string.cookies_saved)
+                }
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,11 +62,34 @@ class MainActivity : AppCompatActivity() {
             setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         }
         audioOnlyCheck = findViewById(R.id.audioOnlyCheck)
+        playlistSpinner = findViewById(R.id.playlistSpinner)
+        playlistSpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            listOf("Single video", "First 20", "First 30", "First 50", "All videos")
+        ).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
         val linkInput = findViewById<EditText>(R.id.linkInput)
         findViewById<Button>(R.id.downloadButton).setOnClickListener {
             val url = linkInput.text.toString().trim()
             if (url.isEmpty()) {
                 Toast.makeText(this, "Paste a video link first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val playlistMode = when (playlistSpinner.selectedItemPosition) {
+                1 -> "20"
+                2 -> "30"
+                3 -> "50"
+                4 -> "all"
+                else -> "single"
+            }
+            if (playlistMode == "single" && url.contains("playlist?list=")) {
+                Toast.makeText(
+                    this,
+                    "That's a playlist — pick how many videos above",
+                    Toast.LENGTH_SHORT
+                ).show()
                 return@setOnClickListener
             }
             // A fresh staging subdir per download: a shared staging
@@ -62,8 +102,14 @@ class MainActivity : AppCompatActivity() {
             if (!staging.exists()) {
                 staging.mkdirs()
             }
-            // yt-dlp resolves the title/extension at download time.
-            val template = File(staging, "%(title)s.%(ext)s").absolutePath
+            // Playlist downloads share one folder, so index the file
+            // names — same-title videos would otherwise overwrite.
+            val fileName = if (playlistMode == "single") {
+                "%(title)s.%(ext)s"
+            } else {
+                "%(playlist_index)s - %(title)s.%(ext)s"
+            }
+            val template = File(staging, fileName).absolutePath
             val maxHeight = when (qualitySpinner.selectedItemPosition) {
                 1 -> 1080
                 2 -> 720
@@ -74,13 +120,16 @@ class MainActivity : AppCompatActivity() {
             cancelledUrls.remove(url)
             DownloadService.startDownload(
                 this, url, template,
-                audioOnlyCheck.isChecked, maxHeight
+                audioOnlyCheck.isChecked, maxHeight, playlistMode
             )
             addRow(url, getString(R.string.queue_queued))
             Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
         }
-        findViewById<Button>(R.id.loginButton).setOnClickListener {
-            startActivity(Intent(this, LoginActivity::class.java))
+        findViewById<Button>(R.id.browseButton).setOnClickListener {
+            startActivity(Intent(this, BrowseActivity::class.java))
+        }
+        findViewById<Button>(R.id.importButton).setOnClickListener {
+            importLauncher.launch("*/*")
         }
     }
 
