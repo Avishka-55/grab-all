@@ -51,7 +51,14 @@ class DownloadsActivity : AppCompatActivity() {
         findViewById<LinearLayout>(R.id.navGrab).setOnClickListener {
             navigateHome()
         }
-        findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
+                findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
+            startActivity(
+                Intent(this, PlayerActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+            )
+        }
+findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
             startActivity(
                 Intent(this, SettingsActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
