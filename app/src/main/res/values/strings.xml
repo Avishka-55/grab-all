@@ -8,6 +8,7 @@
     <string name="done_save_login">Done — save login</string>
     <string name="import_cookies">Import cookies file</string>
     <string name="browse_youtube">Browse YouTube</string>
+    <string name="browse_reload">↻</string>
     <string name="login_youtube">Log in to YouTube</string>
     <string name="queue_header">Downloads</string>
     <string name="queue_queued">Queued…</string>

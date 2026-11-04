@@ -50,6 +50,21 @@ class BrowseActivity : AppCompatActivity() {
                 currentUrl = url
             }
 
+            // YouTube is a single-page app: tapping a video changes the
+            // address via pushState WITHOUT a full page load, so
+            // onPageFinished never fires for it — and the old code kept
+            // thinking the user was still on the home page ("Open a
+            // YouTube video first" even while a video was open). This
+            // callback fires for pushState navigations too, so it is
+            // the reliable place to track the address.
+            override fun doUpdateVisitedHistory(
+                view: WebView,
+                url: String,
+                isReload: Boolean
+            ) {
+                currentUrl = url
+            }
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: WebResourceRequest
@@ -86,6 +101,9 @@ class BrowseActivity : AppCompatActivity() {
         findViewById<Button>(R.id.browseDownload).setOnClickListener {
             downloadCurrentPage()
         }
+        findViewById<Button>(R.id.browseReload).setOnClickListener {
+            webView.reload()
+        }
         if (savedInstanceState == null) {
             webView.loadUrl("https://www.youtube.com")
         }
@@ -100,7 +118,9 @@ class BrowseActivity : AppCompatActivity() {
     }
 
     private fun downloadCurrentPage() {
-        val url = currentUrl ?: webView.url
+        // Prefer the WebView's live address: the cached one can lag a
+        // pushState navigation even with doUpdateVisitedHistory.
+        val url = webView.url ?: currentUrl
         if (url == null || !isDownloadablePage(url)) {
             Toast.makeText(
                 this,

@@ -47,6 +47,12 @@
                 android:layout_weight="1" />
 
             <Button
+                android:id="@+id/browseReload"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/browse_reload" />
+
+            <Button
                 android:id="@+id/browseDownload"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
