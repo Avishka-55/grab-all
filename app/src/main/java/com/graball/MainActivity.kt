@@ -110,7 +110,10 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showLastCrashIfAny()
+        Toast.makeText(this, "Step 2: activity", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Step 3: before layout", Toast.LENGTH_SHORT).show()
         setContentView(R.layout.activity_main)
+        Toast.makeText(this, "Step 4: layout done", Toast.LENGTH_SHORT).show()
         queueContainer = findViewById(R.id.queueContainer)
         cookiesStatus = findViewById(R.id.cookiesStatus)
         qualitySpinner = findViewById(R.id.qualitySpinner)
@@ -321,6 +324,7 @@ class MainActivity : AppCompatActivity() {
             addRow(entry.url, statusText, entry.detail, showCancel = false)
         }
         handleShareIntent(intent)
+        Toast.makeText(this, "Step 5: setup done", Toast.LENGTH_SHORT).show()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -388,6 +392,7 @@ class MainActivity : AppCompatActivity() {
             getString(R.string.cookies_missing)
         }
         DownloadProgressBus.subscribe(progressListener)
+        Toast.makeText(this, "Step 6: resumed", Toast.LENGTH_SHORT).show()
     }
 
     override fun onPause() {

@@ -16,6 +16,10 @@ class GrabAllApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Step 1 of the startup trace (v0.5.3): a Toast is rendered
+        // by the system even if this process dies right after, so
+        // the last toast avishka sees names the exact step that died.
+        android.widget.Toast.makeText(this, "Step 1: app start", android.widget.Toast.LENGTH_SHORT).show()
         val traceFile = File(filesDir, "last_crash.txt")
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
