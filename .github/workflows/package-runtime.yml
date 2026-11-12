@@ -1,7 +1,11 @@
 name: Package runtime
 
-# Builds the four native runtime zips RuntimeExtractor expects in
-# assets/runtime/ (python, yt-dlp, QuickJS, ffmpeg) for armeabi-v7a.
+# Builds the native runtime zips RuntimeExtractor expects in
+# assets/runtime/ for the universal app: both armeabi-v7a (32-bit) and
+# arm64-v8a (64-bit). yt-dlp is pure Python, so it is built once and
+# shared. Python is split into a shared zip (arch-independent stdlib
+# .py files) plus a per-arch zip (native .so files + interpreter);
+# the dead libpython3.13.a static library is excluded from both.
 # Manual trigger only: `gh workflow run package-runtime.yml`.
 # Each job uploads its zip (or probe files) as an artifact; jobs are
 # independent, so one failing does not block the others.
@@ -71,14 +75,49 @@ jobs:
           cd ..
           python3 - <<'EOF'
           import zipfile
-          with zipfile.ZipFile('qjs.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+          with zipfile.ZipFile('qjs32.zip', 'w', zipfile.ZIP_DEFLATED) as z:
               z.write('qjs-pkg/bin/qjs', 'bin/qjs')
           EOF
-          ls -la qjs.zip
+          ls -la qjs32.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: qjs-zip
-          path: qjs.zip
+          name: qjs-zip-32
+          path: qjs32.zip
+
+  qjs64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cross-compile QuickJS for arm64-v8a
+        run: |
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          curl -fsSL --retry 3 -o quickjs.tar.xz https://bellard.org/quickjs/quickjs-2024-01-13.tar.xz
+          tar xf quickjs.tar.xz
+          # Host build first: its runnable qjsc generates repl.c/qjscalc.c.
+          # The cross Makefile would try to RUN the ARM qjsc on this x86
+          # runner, which fails, so the target binary is compiled with one
+          # direct clang invocation instead. bionic bundles pthread into
+          # libc, so no -lpthread on the target link.
+          cp -r quickjs-2024-01-13 quickjs-host
+          (cd quickjs-host && make qjs -j"$(nproc)")
+          cp quickjs-host/repl.c quickjs-host/qjscalc.c quickjs-2024-01-13/
+          cd quickjs-2024-01-13
+          "$NDK_BIN/aarch64-linux-android21-clang" -O2 -fwrapv \
+            -D_GNU_SOURCE -DCONFIG_VERSION='"2024-01-13"' -DCONFIG_BIGNUM \
+            -o qjs qjs.c repl.c qjscalc.c quickjs.c libregexp.c libunicode.c \
+            cutils.c quickjs-libc.c libbf.c -lm -ldl
+          mkdir -p ../qjs-pkg/bin
+          cp qjs ../qjs-pkg/bin/qjs
+          cd ..
+          python3 - <<'EOF'
+          import zipfile
+          with zipfile.ZipFile('qjs64.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              z.write('qjs-pkg/bin/qjs', 'bin/qjs')
+          EOF
+          ls -la qjs64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qjs-zip-64
+          path: qjs64.zip
 
   ffmpeg:
     runs-on: ubuntu-latest
@@ -149,14 +188,91 @@ jobs:
           cd ..
           python3 - <<'EOF'
           import zipfile
-          with zipfile.ZipFile('ffmpeg.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+          with zipfile.ZipFile('ffmpeg32.zip', 'w', zipfile.ZIP_DEFLATED) as z:
               z.write('ffmpeg-pkg/bin/ffmpeg', 'bin/ffmpeg')
           EOF
-          ls -la ffmpeg.zip
+          ls -la ffmpeg32.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-zip
-          path: ffmpeg.zip
+          name: ffmpeg-zip-32
+          path: ffmpeg32.zip
+
+  ffmpeg64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cross-compile ffmpeg for arm64-v8a
+        run: |
+          set -o pipefail
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          SYSROOT="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          # ffmpeg.org's TLS fails from these runners (exit 35, twice in a
+          # row after two good downloads), so fetch the same release
+          # from FFmpeg's GitHub mirror instead.
+          curl -fsSL --retry 3 --retry-all-errors -o ffmpeg.tar.gz https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.tar.gz
+          tar xf ffmpeg.tar.gz
+          # libmp3lame first: the app's audio-only mode now produces real
+          # MP3 (yt-dlp --extract-audio --audio-format mp3), and the
+          # stock ffmpeg build has no MP3 encoder. Static, PIC (it is
+          # linked into ffmpeg's PIE binary), frontend off (we only
+          # need the library, not lame's CLI).
+          curl -fsSL --retry 3 --retry-all-errors -o lame.tar.gz https://sourceforge.net/projects/lame/files/lame/3.100/lame-3.100.tar.gz
+          tar xf lame.tar.gz
+          cd lame-3.100
+          CC="$NDK_BIN/aarch64-linux-android21-clang" \
+            CFLAGS="-O2 -fPIC" \
+            ./configure --host=aarch64-linux-android \
+            --disable-shared --enable-static --disable-frontend \
+            --prefix="$PWD/../lame-install" 2>&1 | tail -5
+          make -j"$(nproc)" 2>&1 | tail -3
+          make install 2>&1 | tail -3
+          cd ..
+          cd FFmpeg-n7.1
+          ./configure \
+            --target-os=android --arch=aarch64 --cpu=armv8-a \
+            --enable-cross-compile \
+            --cross-prefix="$NDK_BIN/aarch64-linux-android-" \
+            --cc="$NDK_BIN/aarch64-linux-android21-clang" \
+            --ar="$NDK_BIN/llvm-ar" --ranlib="$NDK_BIN/llvm-ranlib" \
+            --nm="$NDK_BIN/llvm-nm" --strip="$NDK_BIN/llvm-strip" \
+            --sysroot="$SYSROOT" \
+            --prefix="$PWD/../ffmpeg-install" \
+            --enable-libmp3lame \
+            --extra-cflags="-I$PWD/../lame-install/include" \
+            --extra-ldflags="-L$PWD/../lame-install/lib" \
+            --disable-doc --disable-ffplay --disable-ffprobe \
+            --disable-avdevice --disable-network --disable-swscale \
+            --disable-vulkan \
+            --disable-everything \
+            --enable-swresample \
+            --enable-demuxer=mp4,mov,matroska,webm,mp3 \
+            --enable-muxer=mp4,matroska,webm,mp3 \
+            --enable-decoder=h264,aac,opus,vorbis,mp3 \
+            --enable-encoder=aac,libmp3lame \
+            --enable-parser=h264,aac,opus,vorbis,mpegaudio \
+            --enable-bsf=aac_adtstoasc,h264_mp4toannexb \
+            --enable-protocol=file,pipe \
+            --enable-filter=aresample,anull 2>&1 | tail -15
+          make -j"$(nproc)" 2>&1 | tail -5
+          make install 2>&1 | tail -3
+          # Verify WITHOUT executing: this is an ARM binary, running it
+          # on the x86 runner fails with "Exec format error".
+          # The libmp3lame string check is fatal: without it the app's
+          # MP3 mode would fail on the phone with no encoder.
+          test -s ../ffmpeg-install/bin/ffmpeg && file ../ffmpeg-install/bin/ffmpeg
+          strings ../ffmpeg-install/bin/ffmpeg | grep -q libmp3lame
+          mkdir -p ../ffmpeg-pkg/bin
+          cp ../ffmpeg-install/bin/ffmpeg ../ffmpeg-pkg/bin/ffmpeg
+          cd ..
+          python3 - <<'EOF'
+          import zipfile
+          with zipfile.ZipFile('ffmpeg64.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              z.write('ffmpeg-pkg/bin/ffmpeg', 'bin/ffmpeg')
+          EOF
+          ls -la ffmpeg64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-zip-64
+          path: ffmpeg64.zip
 
   cpython:
     # Standalone CPython 3.13 for armeabi-v7a. Run 5 proved p4a only
@@ -296,7 +412,7 @@ jobs:
           grep -iE "failed to build|not built" target-build.log | head -20 || true
           file target-install/bin/python3.13
           ls target-install/lib/python3.13/lib-dynload/ | head -40
-      - name: Package python zip
+      - name: Package python zips (shared + 32-bit)
         run: |
           mkdir -p python-pkg/bin python-pkg/lib
           cp target-install/bin/python3.13 python-pkg/bin/python
@@ -305,21 +421,213 @@ jobs:
           find python-pkg -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
           python3 - <<'EOF'
           import zipfile, os
-          with zipfile.ZipFile('python.zip', 'w', zipfile.ZIP_DEFLATED) as z:
-              for root, _, files in os.walk('python-pkg'):
-                  for f in files:
-                      p = os.path.join(root, f)
-                      z.write(p, os.path.relpath(p, 'python-pkg'))
+          # Split the staged tree: shared holds the arch-independent
+          # stdlib .py files; arch holds the native binaries. The dead
+          # libpython3.13.a static library is dropped entirely — the
+          # app runs the shared libpython3.13.so, nothing links the .a.
+          def bucket(rel):
+              if rel.endswith('libpython3.13.a'):
+                  return None
+              if rel.startswith('bin/'):
+                  return 'arch'
+              if rel.endswith('.so'):
+                  return 'arch'
+              if '/lib-dynload/' in rel or '/config-' in rel:
+                  return 'arch'
+              return 'shared'
+          shared, arch = [], []
+          for root, _, files in os.walk('python-pkg'):
+              for f in files:
+                  p = os.path.join(root, f)
+                  rel = os.path.relpath(p, 'python-pkg')
+                  b = bucket(rel)
+                  if b == 'shared':
+                      shared.append((p, rel))
+                  elif b == 'arch':
+                      arch.append((p, rel))
+          with zipfile.ZipFile('python-shared.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for p, rel in shared:
+                  z.write(p, rel)
+          with zipfile.ZipFile('python32.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for p, rel in arch:
+                  z.write(p, rel)
+          print('shared entries:', len(shared), 'arch entries:', len(arch))
           EOF
-          ls -la python.zip
-          python3 -c "import zipfile; n=zipfile.ZipFile('python.zip').namelist(); print('entries:', len(n)); [print('has', m, ':', any(m in x for x in n)) for m in ['_ssl', '_hashlib', '_socket', '_ctypes', '_lzma', 'libpython']]"
+          ls -la python-shared.zip python32.zip
+          python3 -c "import zipfile; s=set(zipfile.ZipFile('python-shared.zip').namelist()); a=set(zipfile.ZipFile('python32.zip').namelist()); print('overlap:', s & a); print('has .a:', any(x.endswith('.a') for x in s | a)); print('arch has bin/python:', 'bin/python' in a, '| arch has libpython:', any('libpython3.13.so' in x for x in a))"
       - uses: actions/upload-artifact@v4
         with:
-          name: python-zip
-          path: python.zip
+          name: python-shared-zip
+          path: python-shared.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-zip-32
+          path: python32.zip
       - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: cpython-logs
+          path: "*.log"
+
+  cpython64:
+    # Standalone CPython 3.13 for arm64-v8a — same recipe as the 32-bit
+    # job, with the aarch64 toolchain throughout. Native deps get their
+    # own cache key/path (deps-install-64) so the armv7 cache is never
+    # restored here. Only the arch zip is packaged: the shared stdlib
+    # zip is arch-independent and comes from the 32-bit job.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install cross-build tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq autoconf automake libtool libtool-bin libltdl-dev
+      - name: Cache native deps
+        uses: actions/cache@v4
+        with:
+          # Separate cache from the 32-bit job: restoring armv7 deps
+          # here would silently link the wrong architecture.
+          path: deps-install-64
+          key: cpython-deps-openssl3.2.0-libffi3.4.2-xz5.4.0-arm64-v3
+      - name: Download sources
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors -o cpython.tar.gz https://github.com/python/cpython/archive/refs/tags/v3.13.0.tar.gz
+          tar xf cpython.tar.gz
+          mv cpython-3.13.0 cpython-host
+          tar xf cpython.tar.gz
+          mv cpython-3.13.0 cpython-target
+          curl -fsSL --retry 3 --retry-all-errors -o openssl.tar.gz https://github.com/openssl/openssl/archive/refs/tags/openssl-3.2.0.tar.gz
+          tar xf openssl.tar.gz
+          curl -fsSL --retry 3 --retry-all-errors -o libffi.tar.gz https://github.com/libffi/libffi/archive/v3.4.2.tar.gz
+          tar xf libffi.tar.gz
+          curl -fsSL --retry 3 --retry-all-errors -o xz.tar.gz https://github.com/tukaani-project/xz/releases/download/v5.4.0/xz-5.4.0.tar.gz || echo "XZ_DOWNLOAD_FAILED" > xz.failed
+          if [ ! -f xz.failed ]; then tar xf xz.tar.gz; fi
+          ls -d cpython-host cpython-target openssl-openssl-3.2.0 libffi-3.4.2 xz-5.4.0 2>/dev/null || true
+      - name: Build host python
+        run: |
+          set -o pipefail
+          cd cpython-host
+          ./configure --prefix="$PWD/../host-install" --disable-test-modules --without-ensurepip 2>&1 | tee ../host-configure.log | tail -3
+          make -j"$(nproc)" 2>&1 | tee ../host-build.log | tail -3
+          make install 2>&1 | tee ../host-install.log | tail -3
+          cd ..
+          ls -la host-install/bin/python3.13
+      - name: Build native deps (static)
+        run: |
+          set -o pipefail
+          # Same NDK-root rule as the 32-bit job: OpenSSL's android
+          # config only accepts a toolchain found by which("clang")
+          # inside $ANDROID_NDK_ROOT/.../prebuilt/.
+          NDK_ROOT="${ANDROID_NDK_ROOT:-$ANDROID_NDK_LATEST_HOME}"
+          export ANDROID_NDK_ROOT="$NDK_ROOT"
+          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="$NDK_BIN:$PATH"
+          mkdir -p deps-install-64
+          if [ ! -f deps-install-64/openssl/.done ]; then
+            cd openssl-openssl-3.2.0
+            ./Configure android-arm64 -D__ANDROID_API__=21 --prefix="$PWD/../deps-install-64/openssl" no-shared no-tests no-asm -fPIC 2>&1 | tee ../openssl-configure.log | tail -3
+            make -j"$(nproc)" build_sw 2>&1 | tee ../openssl-build.log | tail -3
+            make install_sw 2>&1 | tee ../openssl-install.log | tail -3
+            touch "$PWD/../deps-install-64/openssl/.done"
+            cd ..
+          else
+            echo "openssl: restored from cache, skipping"
+          fi
+          if [ ! -f deps-install-64/libffi/.done ]; then
+            cd libffi-3.4.2
+            ./autogen.sh 2>&1 | tee ../libffi-autogen.log | tail -3
+            CC="$NDK_BIN/aarch64-linux-android21-clang" AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
+              ./configure --host=aarch64-linux-android --prefix="$PWD/../deps-install-64/libffi" --disable-shared --enable-static --disable-docs 2>&1 | tee ../libffi-configure.log | tail -3
+            # Build ONLY libffi.la, not plain "make" (same AX_ENABLE_BUILDDIR
+            # reason as the 32-bit job).
+            make libffi.la -j"$(nproc)" 2>&1 | tee ../libffi-build.log | tail -3
+            make install 2>&1 | tee ../libffi-install.log | tail -3
+            touch "$PWD/../deps-install-64/libffi/.done"
+            cd ..
+          else
+            echo "libffi: restored from cache, skipping"
+          fi
+          if [ ! -f xz.failed ] && [ ! -f deps-install-64/xz/.done ]; then
+            cd xz-5.4.0
+            CC="$NDK_BIN/aarch64-linux-android21-clang" AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
+              ./configure --host=aarch64-linux-android --prefix="$PWD/../deps-install-64/xz" --disable-shared --enable-static --disable-doc 2>&1 | tee ../xz-configure.log | tail -3
+            make -j"$(nproc)" 2>&1 | tail -3
+            make install 2>&1 | tail -3
+            touch "$PWD/../deps-install-64/xz/.done"
+            cd ..
+          elif [ -f xz.failed ]; then
+            echo "xz: download failed earlier, continuing without _lzma"
+          else
+            echo "xz: restored from cache, skipping"
+          fi
+      - name: Cross-compile target python
+        run: |
+          set -o pipefail
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          mkdir -p target-build && cd target-build
+          export PKG_CONFIG_LIBDIR="$PWD/../deps-install-64/libffi/lib/pkgconfig:$PWD/../deps-install-64/xz/lib/pkgconfig"
+          CC="$NDK_BIN/aarch64-linux-android21-clang" \
+            AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
+            CFLAGS="-I$PWD/../deps-install-64/openssl/include -I$PWD/../deps-install-64/libffi/include -I$PWD/../deps-install-64/xz/include" \
+            LDFLAGS="-L$PWD/../deps-install-64/openssl/lib -L$PWD/../deps-install-64/openssl/lib64 -L$PWD/../deps-install-64/libffi/lib -L$PWD/../deps-install-64/xz/lib" \
+            ../cpython-target/configure \
+            --host=aarch64-linux-android \
+            --build=x86_64-linux-gnu \
+            --with-build-python="$PWD/../host-install/bin/python3.13" \
+            --prefix="$PWD/../target-install" \
+            --disable-test-modules \
+            --without-ensurepip \
+            --enable-shared \
+            --with-openssl="$PWD/../deps-install-64/openssl" 2>&1 | tee ../target-configure.log | tail -5
+          make -j"$(nproc)" 2>&1 | tee ../target-build.log | tail -5
+          make install 2>&1 | tee ../target-install.log | tail -3
+          cd ..
+          echo "--- modules that failed to build (if any) ---"
+          grep -iE "failed to build|not built" target-build.log | head -20 || true
+          file target-install/bin/python3.13
+          ls target-install/lib/python3.13/lib-dynload/ | head -40
+      - name: Package python zip (64-bit arch only)
+        run: |
+          mkdir -p python-pkg/bin python-pkg/lib
+          cp target-install/bin/python3.13 python-pkg/bin/python
+          cp -r target-install/lib/python3.13 python-pkg/lib/
+          cp target-install/lib/libpython3.13.so* python-pkg/lib/
+          find python-pkg -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+          python3 - <<'EOF'
+          import zipfile, os
+          # Same split as the 32-bit job, but only the arch zip is
+          # produced here — the shared stdlib zip comes from that job.
+          # The dead libpython3.13.a is dropped, same as there.
+          def bucket(rel):
+              if rel.endswith('libpython3.13.a'):
+                  return None
+              if rel.startswith('bin/'):
+                  return 'arch'
+              if rel.endswith('.so'):
+                  return 'arch'
+              if '/lib-dynload/' in rel or '/config-' in rel:
+                  return 'arch'
+              return 'shared'
+          arch = []
+          for root, _, files in os.walk('python-pkg'):
+              for f in files:
+                  p = os.path.join(root, f)
+                  rel = os.path.relpath(p, 'python-pkg')
+                  if bucket(rel) == 'arch':
+                      arch.append((p, rel))
+          with zipfile.ZipFile('python64.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for p, rel in arch:
+                  z.write(p, rel)
+          print('arch entries:', len(arch))
+          EOF
+          ls -la python64.zip
+          python3 -c "import zipfile; a=set(zipfile.ZipFile('python64.zip').namelist()); print('has .a:', any(x.endswith('.a') for x in a)); print('arch has bin/python:', 'bin/python' in a, '| arch has libpython:', any('libpython3.13.so' in x for x in a))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-zip-64
+          path: python64.zip
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpython-logs-64
           path: "*.log"
