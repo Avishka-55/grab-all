@@ -4,6 +4,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -24,6 +26,7 @@ import com.graball.engine.LinkDetector
 import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
 import java.io.File
+import kotlin.math.abs
 
 /**
  * Browse YouTube inside the app, with a Download button for whatever
@@ -140,6 +143,54 @@ class BrowseActivity : AppCompatActivity() {
                 hidePanel()
             } else {
                 showPanel()
+            }
+        }
+        // The Grab button floats over the page, so it has to move
+        // out of the way: drag it anywhere, tap it to open the
+        // panel. A short tap still counts as a click; anything past
+        // the touch slop is a drag, and the button stays inside the
+        // screen. Position is kept as view translation, so it
+        // survives the panel hiding and showing the button.
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        var downRawX = 0f
+        var downRawY = 0f
+        var downFabX = 0f
+        var downFabY = 0f
+        var dragging = false
+        fab.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downRawX = event.rawX
+                    downRawY = event.rawY
+                    downFabX = fab.x
+                    downFabY = fab.y
+                    dragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downRawX
+                    val dy = event.rawY - downRawY
+                    if (!dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
+                        dragging = true
+                    }
+                    if (dragging) {
+                        val parent = fab.parent as android.view.View
+                        fab.x = (downFabX + dx).coerceIn(
+                            0f, (parent.width - fab.width).toFloat()
+                        )
+                        fab.y = (downFabY + dy).coerceIn(
+                            0f, (parent.height - fab.height).toFloat()
+                        )
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (!dragging) {
+                        fab.performClick()
+                    }
+                    true
+                }
+                else -> true
             }
         }
         findViewById<Button>(R.id.browseClose).setOnClickListener {

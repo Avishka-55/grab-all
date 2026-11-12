@@ -366,19 +366,6 @@
                         android:textSize="14sp"
                         android:lines="2"
                         android:gravity="center" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_active"
-                        android:paddingStart="8dp"
-                        android:paddingTop="4dp"
-                        android:paddingEnd="8dp"
-                        android:paddingBottom="4dp"
-                        android:text="@string/site_active"
-                        android:textColor="@color/graball_text"
-                        android:textSize="11sp" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -407,19 +394,6 @@
                         android:textSize="14sp"
                         android:lines="2"
                         android:gravity="center" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_browse"
-                        android:paddingStart="8dp"
-                        android:paddingTop="4dp"
-                        android:paddingEnd="8dp"
-                        android:paddingBottom="4dp"
-                        android:text="@string/site_browse"
-                        android:textColor="@color/graball_text"
-                        android:textSize="11sp" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -448,19 +422,6 @@
                         android:textSize="14sp"
                         android:lines="2"
                         android:gravity="center" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_browse"
-                        android:paddingStart="8dp"
-                        android:paddingTop="4dp"
-                        android:paddingEnd="8dp"
-                        android:paddingBottom="4dp"
-                        android:text="@string/site_browse"
-                        android:textColor="@color/graball_text"
-                        android:textSize="11sp" />
                 </LinearLayout>
             </LinearLayout>
 
@@ -496,19 +457,6 @@
                         android:textSize="14sp"
                         android:lines="2"
                         android:gravity="center" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_browse"
-                        android:paddingStart="8dp"
-                        android:paddingTop="4dp"
-                        android:paddingEnd="8dp"
-                        android:paddingBottom="4dp"
-                        android:text="@string/site_browse"
-                        android:textColor="@color/graball_text"
-                        android:textSize="11sp" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -537,19 +485,6 @@
                         android:textSize="14sp"
                         android:lines="2"
                         android:gravity="center" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_active"
-                        android:paddingStart="8dp"
-                        android:paddingTop="4dp"
-                        android:paddingEnd="8dp"
-                        android:paddingBottom="4dp"
-                        android:text="@string/site_active"
-                        android:textColor="@color/graball_text"
-                        android:textSize="11sp" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -579,19 +514,6 @@
                         android:textSize="14sp"
                         android:lines="2"
                         android:gravity="center" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:background="@drawable/pill_soon"
-                        android:paddingStart="8dp"
-                        android:paddingTop="4dp"
-                        android:paddingEnd="8dp"
-                        android:paddingBottom="4dp"
-                        android:text="@string/site_soon"
-                        android:textColor="@color/graball_text"
-                        android:textSize="11sp" />
                 </LinearLayout>
             </LinearLayout>
         </LinearLayout>

@@ -115,12 +115,21 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     fun pause() {
         try { player?.pause() } catch (_: Exception) { }
+        // Paused, not dead: drop out of the foreground so the
+        // notification becomes swipe-dismissable instead of stuck.
+        stopForeground(false)
         updateNotification()
     }
 
     fun resume() {
         if (requestFocus()) {
             try { player?.start() } catch (_: Exception) { }
+            // Only re-enter the foreground when there is actually a
+            // player to resume — after a Stop there is none, and a
+            // stray "Paused" notification must not come back.
+            if (player != null) {
+                startForeground(NOTIFICATION_ID, buildNotification())
+            }
         }
         updateNotification()
     }
@@ -164,6 +173,9 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     private fun stopPlayback() {
         releasePlayer()
+        // No current track any more, so the player screen shows its
+        // idle "tap a song" line instead of the last song's name.
+        index = -1
         stopForeground(true)
         stopSelf()
     }
@@ -255,7 +267,9 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
             .setContentTitle(file?.name ?: "GrabAll Music")
             .setContentText(if (isPlaying()) "Playing" else "Paused")
             .setContentIntent(openApp)
-            .setOngoing(true)
+            // Ongoing only while playing: a paused notification can
+            // be swiped away, and the Stop action kills the service.
+            .setOngoing(isPlaying())
             .addAction(android.R.drawable.ic_media_previous, "Prev", actionIntent(ACTION_PREV))
             .addAction(
                 if (isPlaying()) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
@@ -263,6 +277,10 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 actionIntent(if (isPlaying()) ACTION_PAUSE else ACTION_RESUME)
             )
             .addAction(android.R.drawable.ic_media_next, "Next", actionIntent(ACTION_NEXT))
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel, "Stop",
+                actionIntent(ACTION_STOP)
+            )
             .build()
     }
 

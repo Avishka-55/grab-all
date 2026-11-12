@@ -42,6 +42,9 @@
     <string name="nav_player">Music</string>
     <string name="player_title">Music</string>
     <string name="player_empty">No audio yet — download a song with Audio only and it\'ll show up here</string>
+    <string name="player_tap_to_play">Tap a song to play</string>
+    <string name="sites_title">Supported sites</string>
+    <string name="sites_more">and %1$d more — %2$d sites in total, powered by yt-dlp</string>
     <string name="player_need_permission">Storage permission is needed to list your downloads</string>
     <string name="status_empty">No statuses found — open WhatsApp once so it syncs, then come back</string>
     <string name="tab_search">Search</string>

@@ -64,8 +64,8 @@ class MainActivity : AppCompatActivity() {
         grabType = findViewById(R.id.grabType)
         playlistRow = findViewById(R.id.playlistRow)
         // Option 4 chrome: tabs, site cards, bottom nav. Search is
-        // this screen; YouTube opens the in-app browser; everything
-        // else is structure that toasts "coming soon" until it is real.
+        // this screen; YouTube opens the in-app browser; More opens
+        // the supported-sites list.
         mainTabs = listOf(
             findViewById(R.id.tabSearch),
             findViewById(R.id.tabYouTube),
@@ -87,7 +87,7 @@ class MainActivity : AppCompatActivity() {
         }
         mainTabs[3].setOnClickListener {
             selectTab(mainTabs[3])
-            soonToast("More sites")
+            startActivity(Intent(this, SitesActivity::class.java))
         }
         findViewById<LinearLayout>(R.id.siteYoutube).setOnClickListener {
             startActivity(Intent(this, BrowseActivity::class.java))
@@ -117,7 +117,7 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, StatusActivity::class.java))
         }
         findViewById<LinearLayout>(R.id.siteMore).setOnClickListener {
-            soonToast("More sites")
+            startActivity(Intent(this, SitesActivity::class.java))
         }
         findViewById<LinearLayout>(R.id.navDownloads).setOnClickListener {
             startActivity(
@@ -333,10 +333,6 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
         selected.setBackgroundResource(R.drawable.tab_selected)
         selected.setTextColor(Color.BLACK)
         selected.setTypeface(null, android.graphics.Typeface.BOLD)
-    }
-
-    private fun soonToast(name: String) {
-        Toast.makeText(this, getString(R.string.soon_toast, name), Toast.LENGTH_SHORT).show()
     }
 
 }

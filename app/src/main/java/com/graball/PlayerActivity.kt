@@ -51,7 +51,10 @@ class PlayerActivity : AppCompatActivity() {
             val svc = service
             if (bound && svc != null) {
                 val current = svc.currentFile()
-                nowPlaying.text = current?.name ?: getString(R.string.player_empty)
+                // Idle line is "tap a song", NOT the empty-list text:
+                // the old shared string told him "No audio yet" even
+                // with a full list on screen, until he tapped one.
+                nowPlaying.text = current?.name ?: getString(R.string.player_tap_to_play)
                 playPause.text = if (svc.isPlaying()) "⏸" else "▶"
                 val dur = svc.duration()
                 if (dur > 0) {
@@ -123,6 +126,7 @@ class PlayerActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.playerPrev).setOnClickListener { sendControl(PlayerService.ACTION_PREV) }
         findViewById<Button>(R.id.playerNext).setOnClickListener { sendControl(PlayerService.ACTION_NEXT) }
+        findViewById<Button>(R.id.playerStop).setOnClickListener { sendControl(PlayerService.ACTION_STOP) }
         playPause.setOnClickListener {
             val svc = service
             if (bound && svc != null) {
@@ -161,6 +165,15 @@ class PlayerActivity : AppCompatActivity() {
             Intent(this, PlayerService::class.java), connection, Context.BIND_AUTO_CREATE
         )
         handler.post(poller)
+        // Re-scan on every return: a song downloaded since this
+        // screen was last open must show up without restarting the
+        // app — the old onCreate-only scan left a stale empty list.
+        if (ContextCompat.checkSelfPermission(
+                this, Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            loadFiles()
+        }
     }
 
     override fun onPause() {
@@ -175,22 +188,23 @@ class PlayerActivity : AppCompatActivity() {
 
     @Suppress("DEPRECATION")
     private fun loadFiles() {
-        // v0.7.1: scan the whole phone for music via MediaStore, not
-        // just Downloads/GrabAll — his mp3/m4a files live in other
-        // folders too, and v0.7.0's single-folder listing showed
-        // nothing for them. Fall back to the direct folder listing
-        // if the MediaStore query comes up empty.
+        // v0.7.4: scan the whole phone for music via MediaStore AND
+        // the Downloads/GrabAll folder, merged — not either/or.
+        // Two fixes in one: the old IS_MUSIC!=0 filter drops audio
+        // files the media scanner never flagged as music (very
+        // common for files in Downloads), and the old MediaStore-
+        // only-or-folder-only choice could come up empty while the
+        // other source had the files.
         val found = mutableListOf<File>()
         try {
             val projection = arrayOf(
                 MediaStore.Audio.Media.DATA,
                 MediaStore.Audio.Media.DISPLAY_NAME
             )
-            val selection = MediaStore.Audio.Media.IS_MUSIC + "!=0"
-            val sort = MediaStore.Audio.Media.DATE_MODIFIED + " DESC"
             contentResolver.query(
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                projection, selection, null, sort
+                projection, null, null,
+                MediaStore.Audio.Media.DATE_MODIFIED + " DESC"
             )?.use { cursor ->
                 val dataCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
                 while (cursor.moveToNext()) {
@@ -205,18 +219,15 @@ class PlayerActivity : AppCompatActivity() {
             }
         } catch (_: Exception) {
         }
-        files = if (found.isNotEmpty()) {
-            found.distinctBy { it.absolutePath }
-        } else {
-            val dir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                "GrabAll"
-            )
-            dir.listFiles()
-                ?.filter { it.isFile && isAudio(it.name) }
-                ?.sortedByDescending { it.lastModified() }
-                ?: emptyList()
-        }
+        val dir = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            "GrabAll"
+        )
+        dir.listFiles()
+            ?.filter { it.isFile && isAudio(it.name) }
+            ?.let { found.addAll(it) }
+        files = found.distinctBy { it.absolutePath }
+            .sortedByDescending { it.lastModified() }
         if (files.isEmpty()) {
             emptyView.text = getString(R.string.player_empty)
         }
@@ -229,21 +240,21 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun playAt(position: Int) {
-        val svc = service
-        if (bound && svc != null) {
-            svc.playList(files, position)
-        } else {
-            startService(
-                Intent(this, PlayerService::class.java).apply {
-                    action = PlayerService.ACTION_PLAY
-                    putStringArrayListExtra(
-                        PlayerService.EXTRA_PATHS,
-                        ArrayList(files.map { it.absolutePath })
-                    )
-                    putExtra(PlayerService.EXTRA_INDEX, position)
-                }
-            )
-        }
+        // Always START the service, never just bind to it: a
+        // bound-only service dies the moment this activity unbinds
+        // (onPause, i.e. every window switch), which is exactly why
+        // music kept stopping when he changed screens. A started
+        // service keeps playing until Stop, whatever the UI does.
+        startService(
+            Intent(this, PlayerService::class.java).apply {
+                action = PlayerService.ACTION_PLAY
+                putStringArrayListExtra(
+                    PlayerService.EXTRA_PATHS,
+                    ArrayList(files.map { it.absolutePath })
+                )
+                putExtra(PlayerService.EXTRA_INDEX, position)
+            }
+        )
     }
 
     private fun sendControl(action: String) {
