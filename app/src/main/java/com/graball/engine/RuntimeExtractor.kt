@@ -13,8 +13,11 @@ import java.util.zip.ZipInputStream
  * First-launch extractor for GrabAll's embedded native runtime.
  *
  * Each native component ships as a zip in assets/runtime/ (produced by the
- * native-asset packaging step, TODO) and is unzipped into filesDir/runtime/
- * on first launch. Extraction is version-gated: a marker file records the
+ * native-asset packaging step) and is unzipped into filesDir/runtime/
+ * on first launch. The native sets come in a 32-bit and a 64-bit variant
+ * (python32/python64, qjs32/qjs64, ffmpeg32/ffmpeg64) plus two shared
+ * zips (python-shared, ytdlp); componentsForAbi() picks the set matching
+ * the device. Extraction is version-gated: a marker file records the
  * bundled version, so reinstalls and updates re-extract exactly once, and
  * normal launches skip the work entirely.
  *
@@ -69,12 +72,33 @@ object RuntimeExtractor {
         val executables: List<String>
     )
 
-    val COMPONENTS = listOf(
-        Component("runtime/python.zip", "python", listOf("bin/python")),
-        Component("runtime/ytdlp.zip", "ytdlp", emptyList()),
-        Component("runtime/qjs.zip", "qjs", listOf("bin/qjs")),
-        Component("runtime/ffmpeg.zip", "ffmpeg", listOf("bin/ffmpeg"))
-    )
+    /** True on 64-bit ARM devices (arm64-v8a); false on 32-bit ARM. */
+    private val IS_64_BIT: Boolean =
+        android.os.Build.SUPPORTED_ABIS.any { it == "arm64-v8a" }
+
+    /**
+     * Components for this device's ABI. The shared stdlib zip and
+     * yt-dlp are arch-independent; the native sets (python, qjs,
+     * ffmpeg) come in a 32-bit and a 64-bit variant. All variants
+     * unzip into the same directories, so nothing downstream of
+     * extraction cares which ABI was picked. The shared zip must
+     * extract before the arch python zip (both land in "python").
+     */
+    private fun componentsForAbi(): List<Component> {
+        val pythonZip =
+            if (IS_64_BIT) "runtime/python64.zip" else "runtime/python32.zip"
+        val qjsZip =
+            if (IS_64_BIT) "runtime/qjs64.zip" else "runtime/qjs32.zip"
+        val ffmpegZip =
+            if (IS_64_BIT) "runtime/ffmpeg64.zip" else "runtime/ffmpeg32.zip"
+        return listOf(
+            Component("runtime/python-shared.zip", "python", emptyList()),
+            Component(pythonZip, "python", listOf("bin/python")),
+            Component("runtime/ytdlp.zip", "ytdlp", emptyList()),
+            Component(qjsZip, "qjs", listOf("bin/qjs")),
+            Component(ffmpegZip, "ffmpeg", listOf("bin/ffmpeg"))
+        )
+    }
 
     /**
      * Extract all components if the bundled [version] differs from the
@@ -93,12 +117,13 @@ object RuntimeExtractor {
             return true
         }
         lastError = null
+        val components = componentsForAbi()
         try {
             if (runtimeDir.exists()) {
                 runtimeDir.deleteRecursively()
             }
             runtimeDir.mkdirs()
-            COMPONENTS.forEachIndexed { index, component ->
+            components.forEachIndexed { index, component ->
                 val dest = File(runtimeDir, component.destDirName)
                 dest.mkdirs()
                 context.assets.open(component.assetZip).use { input ->
@@ -114,7 +139,7 @@ object RuntimeExtractor {
                         Log.w(TAG, "Expected executable missing: " + binary.absolutePath)
                     }
                 }
-                onProgress?.invoke((index + 1).toFloat() / COMPONENTS.size)
+                onProgress?.invoke((index + 1).toFloat() / components.size)
             }
             marker.writeText(version)
             return true

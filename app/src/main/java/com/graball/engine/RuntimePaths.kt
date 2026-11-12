@@ -41,7 +41,7 @@ object RuntimePaths {
     fun ytDlpScript(context: Context): File =
         File(runtimeDir(context), "ytdlp/yt-dlp")
 
-    /** qjs executable, cross-compiled for armeabi-v7a with the NDK. */
+    /** qjs executable, cross-compiled for the device ABI with the NDK. */
     fun quickJsBinary(context: Context): File =
         File(runtimeDir(context), "qjs/bin/qjs")
 
