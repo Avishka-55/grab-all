@@ -9,9 +9,11 @@ import java.io.File
  * was closed — and a re-tap after reopening looked like a fresh start.
  *
  * One line per finished download in filesDir/history.txt, tab
- * separated: timestamp, status (Done/Failed), mode label, url, detail.
- * Newlines/tabs inside fields are flattened so the file stays
- * one-line-per-entry. Capped at 50 entries, oldest dropped first.
+ * separated: timestamp, status (Done/Failed), mode label, url, detail,
+ * published file (relative to Downloads/GrabAll, "" when unknown —
+ * older entries predate the field). Newlines/tabs inside fields are
+ * flattened so the file stays one-line-per-entry. Capped at 50 entries,
+ * oldest dropped first.
  */
 object DownloadHistory {
 
@@ -20,7 +22,9 @@ object DownloadHistory {
         val status: String,
         val mode: String,
         val url: String,
-        val detail: String
+        val detail: String,
+        /** Published file relative to Downloads/GrabAll, "" if unknown. */
+        val file: String = ""
     )
 
     private const val MAX_ENTRIES = 50
@@ -33,7 +37,8 @@ object DownloadHistory {
         url: String,
         mode: String,
         status: String,
-        detail: String?
+        detail: String?,
+        file: String? = null
     ) {
         val clean = { value: String ->
             value.replace('\n', ' ').replace('\t', ' ').take(200)
@@ -43,7 +48,8 @@ object DownloadHistory {
             status,
             clean(mode),
             url,
-            clean(detail ?: "")
+            clean(detail ?: ""),
+            clean(file ?: "")
         ).joinToString("\t")
         try {
             val file = historyFile(context)
@@ -96,7 +102,8 @@ object DownloadHistory {
                         status = parts[1],
                         mode = parts[2],
                         url = parts[3],
-                        detail = if (parts.size > 4) parts[4] else ""
+                        detail = if (parts.size > 4) parts[4] else "",
+                        file = if (parts.size > 5) parts[5] else ""
                     )
                 }
             }

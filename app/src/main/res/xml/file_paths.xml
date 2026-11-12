@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths (v0.7.5): the Downloads screen's Open button
+     hands finished downloads to the device's default player through
+     here. Only the public Downloads folder is exposed. -->
+<paths>
+    <external-path name="downloads" path="Download/" />
+</paths>

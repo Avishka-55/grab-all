@@ -15,6 +15,10 @@
     <string name="queue_done">Done ✓</string>
     <string name="queue_failed">Failed</string>
     <string name="audio_only">Audio only</string>
+    <string name="queue_preparing">Preparing…</string>
+    <string name="queue_open">Open</string>
+    <string name="queue_file_missing">File not found — it may have been moved or deleted</string>
+    <string name="queue_open_failed">No app can open this file</string>
     <string name="queue_cancel">Cancel</string>
     <string name="queue_cancelled">Cancelled</string>
     <string name="queue_pause">Pause</string>

@@ -202,10 +202,13 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
             }
             // Playlist downloads share one folder, so index the file
             // names — same-title videos would otherwise overwrite.
+            // v0.7.5: a playlist lands in its own folder named after
+            // it (Downloads/GrabAll/<Playlist Title>), via the
+            // %(playlist_title)s template dir; singles stay flat.
             val fileName = if (playlistMode == "single") {
                 "%(title)s.%(ext)s"
             } else {
-                "%(playlist_index)s - %(title)s.%(ext)s"
+                "%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s"
             }
             val template = File(staging, fileName).absolutePath
             val maxHeight = when (qualitySpinner.selectedItemPosition) {

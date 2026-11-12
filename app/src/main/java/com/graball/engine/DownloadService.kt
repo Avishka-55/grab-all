@@ -64,6 +64,14 @@ class DownloadService : Service() {
          * or a resumed playlist would duplicate its finished songs.
          */
         val skippedNames = mutableSetOf<String>()
+
+        /**
+         * Published files for this download, relative to
+         * Downloads/GrabAll ("video.mp4", "My Playlist/01 - Song.mp3").
+         * The COMPLETE state carries the latest one, so the Downloads
+         * screen's Open button knows what to open.
+         */
+        val publishedRelPaths = mutableListOf<String>()
     }
 
     /** Sessions by URL. Guarded by the map itself (synchronizedMap). */
@@ -103,9 +111,27 @@ class DownloadService : Service() {
         if (session.publishedPaths.contains(file.absolutePath)) {
             return true
         }
-        val ok = MediaStorePublisher.publish(this, file, file.name) != null
+        // Playlist files live in a subfolder under staging
+        // (see the %(playlist_title)s output template): keep that
+        // folder when publishing, so a playlist lands in
+        // Downloads/GrabAll/<Playlist Title> instead of flat.
+        val stagingDir = File(session.outputTemplate).parentFile
+        val subfolder = try {
+            val parent = file.parentFile?.absolutePath ?: ""
+            val root = stagingDir?.absolutePath ?: ""
+            parent.removePrefix(root).trim('/').takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
+        val uri = MediaStorePublisher.publish(this, file, file.name, subfolder)
+        val ok = uri != null
         if (ok) {
             session.publishedPaths.add(file.absolutePath)
+            // Same sanitizing the publisher applies, so the recorded
+            // path always matches where the file actually landed.
+            val safeFolder = subfolder?.let { MediaStorePublisher.sanitizeSubfolder(it) }
+            val rel = if (safeFolder != null) "$safeFolder/${file.name}" else file.name
+            session.publishedRelPaths.add(rel)
         }
         return ok
     }
@@ -277,6 +303,14 @@ class DownloadService : Service() {
         }
 
         startForeground(NOTIFICATION_ID, buildNotification("Preparing download…", null))
+        // The row is born NOW, not on the first progress tick minutes
+        // later: the Downloads screen shows "Preparing…" at once, and
+        // a screen opened mid-download replays this from the bus.
+        DownloadProgressBus.post(
+            DownloadProgressBus.State(
+                url, null, DownloadProgressBus.Status.PREPARING
+            )
+        )
         Thread {
             try {
                 if (!RuntimeExtractor.extractIfNeeded(this, RUNTIME_VERSION)) {
@@ -410,12 +444,16 @@ class DownloadService : Service() {
                                     // truth is the output directory
                                     // itself, and Done requires at least
                                     // one file actually published.
+                                    // Recursive walk: playlist files live
+                                    // in a %(playlist_title)s subfolder
+                                    // under staging, not flat beside it.
                                     val outDir = File(outputTemplate).parentFile
-                                    val scanned = outDir?.listFiles()
+                                    val scanned = outDir?.walkTopDown()
                                         ?.filter { it.isFile && it.length() > 0 &&
                                             !it.name.endsWith(".part") &&
                                             !it.name.endsWith(".ytdl") &&
                                             !session.skippedNames.contains(it.name) }
+                                        ?.toList()
                                         ?: emptyList()
                                     val candidates = if (scanned.isNotEmpty()) {
                                         scanned
@@ -432,8 +470,7 @@ class DownloadService : Service() {
                                     // Drop the whole staging dir, so a
                                     // later download of the same video can
                                     // never "skip" off a leftover.
-                                    outDir?.listFiles()?.forEach { it.delete() }
-                                    outDir?.delete()
+                                    outDir?.deleteRecursively()
                                     // A run that only skipped files is
                                     // still a success: everything is
                                     // already in Downloads from the
@@ -447,7 +484,8 @@ class DownloadService : Service() {
                                         DownloadProgressBus.post(
                                             DownloadProgressBus.State(
                                                 url, 100f,
-                                                DownloadProgressBus.Status.COMPLETE
+                                                DownloadProgressBus.Status.COMPLETE,
+                                                output = session.publishedRelPaths.lastOrNull()
                                             )
                                         )
                                     } else {
@@ -478,15 +516,29 @@ class DownloadService : Service() {
                                     // and keeping them avoids both a
                                     // restart-from-zero and duplicates.
                                     val outDir = File(outputTemplate).parentFile
-                                    outDir?.listFiles()
+                                    // Recursive: with playlist subfolders,
+                                    // leftovers can sit a level down too.
+                                    // Only delete unpublished, non-resume
+                                    // files; .part/.ytdl and published
+                                    // originals stay for the resume.
+                                    outDir?.walkTopDown()
                                         ?.filter { file ->
-                                            !file.name.endsWith(".part") &&
+                                            file.isFile &&
+                                                !file.name.endsWith(".part") &&
                                                 !file.name.endsWith(".ytdl") &&
                                                 !session.publishedPaths.contains(
                                                     file.absolutePath
                                                 )
                                         }
                                         ?.forEach { it.delete() }
+                                    // Prune subfolders left empty by that.
+                                    outDir?.walkBottomUp()
+                                        ?.filter { it.isDirectory && it != outDir }
+                                        ?.forEach { dir ->
+                                            if (dir.listFiles()?.isEmpty() == true) {
+                                                dir.delete()
+                                            }
+                                        }
                                     this@DownloadService.updateNotification(
                                         "Download failed (exit $exitCode)", null
                                     )

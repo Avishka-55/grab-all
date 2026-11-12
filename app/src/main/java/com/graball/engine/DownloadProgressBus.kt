@@ -9,9 +9,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  * screen's queue.
  *
  * The service posts states from its worker thread; listeners always run on
- * the main thread. No history is kept: an activity that (re)creates only
- * sees states posted after it subscribes. Unsubscribe in onPause to avoid
- * leaking the activity.
+ * the main thread. The latest state per URL is kept (see lastStates), so
+ * an activity that (re)creates can replay them and rebuild its rows.
+ * Unsubscribe in onPause to avoid leaking the activity.
  *
  * Modes is the exception to "no history": whoever starts a download
  * records its mode label ("720p", "Audio only · First 20") here, so
@@ -19,7 +19,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 object DownloadProgressBus {
 
-    enum class Status { DOWNLOADING, COMPLETE, FAILED, PAUSED }
+    enum class Status { PREPARING, DOWNLOADING, COMPLETE, FAILED, PAUSED }
 
     data class State(
         /** Queue id — currently the download URL. */
@@ -30,11 +30,28 @@ object DownloadProgressBus {
         /** Human-readable failure reason; only set when status is FAILED. */
         val detail: String? = null,
         /** Playlist position ("Item 5 of 20"); only while DOWNLOADING. */
-        val item: String? = null
+        val item: String? = null,
+        /**
+         * Latest published file for this row, relative to
+         * Downloads/GrabAll ("video.mp4", "My Playlist/01 - Song.mp3").
+         * Set on COMPLETE; the Downloads screen's Open button uses it.
+         */
+        val output: String? = null
     )
 
     /** Mode label per URL, set at download start (see above). */
     val modes = mutableMapOf<String, String>()
+
+    /**
+     * Latest state per URL. The bus keeps no history of events, but a
+     * Downloads screen that opens mid-download still needs to know a
+     * row exists: on subscribe it replays these, so a download stuck
+     * in "Preparing…" (or already downloading) shows a row at once
+     * instead of only on the next progress tick.
+     */
+    private val lastStates = mutableMapOf<String, State>()
+
+    fun snapshot(): List<State> = lastStates.values.toList()
 
     private val listeners = CopyOnWriteArrayList<(State) -> Unit>()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -48,6 +65,7 @@ object DownloadProgressBus {
     }
 
     fun post(state: State) {
+        lastStates[state.id] = state
         mainHandler.post {
             listeners.forEach { it(state) }
         }

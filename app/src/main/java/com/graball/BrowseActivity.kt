@@ -337,7 +337,9 @@ class BrowseActivity : AppCompatActivity() {
         val fileName = if (mode == "single") {
             "%(title)s.%(ext)s"
         } else {
-            "%(playlist_index)s - %(title)s.%(ext)s"
+            // v0.7.5: a playlist lands in its own folder named after
+            // it (Downloads/GrabAll/<Playlist Title>).
+            "%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s"
         }
         val template = File(staging, fileName).absolutePath
         val maxHeight = when (qualitySpinner.selectedItemPosition) {

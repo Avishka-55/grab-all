@@ -30,13 +30,23 @@ object MediaStorePublisher {
 
     private const val TAG = "MediaStorePublisher"
 
-    /** Copy [stagedFile] to Downloads/GrabAll. Returns its Uri, or null. */
-    fun publish(context: Context, stagedFile: File, displayName: String): Uri? {
+    /**
+     * Copy [stagedFile] to Downloads/GrabAll, or to
+     * Downloads/GrabAll/[subfolder] when one is given (playlist
+     * downloads land in a folder named after the playlist). Returns
+     * its Uri, or null.
+     */
+    fun publish(
+        context: Context,
+        stagedFile: File,
+        displayName: String,
+        subfolder: String? = null
+    ): Uri? {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                publishScoped(context, stagedFile, displayName)
+                publishScoped(context, stagedFile, displayName, subfolder)
             } else {
-                publishLegacy(stagedFile, displayName)
+                publishLegacy(stagedFile, displayName, subfolder)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Publish failed", e)
@@ -48,13 +58,16 @@ object MediaStorePublisher {
     private fun publishScoped(
         context: Context,
         stagedFile: File,
-        displayName: String
+        displayName: String,
+        subfolder: String?
     ): Uri? {
         val resolver = context.contentResolver
+        val relativePath = Environment.DIRECTORY_DOWNLOADS + "/GrabAll" +
+            (subfolder?.let { "/" + sanitizeSubfolder(it) } ?: "")
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, displayName)
             put(MediaStore.Downloads.MIME_TYPE, mimeFor(displayName))
-            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/GrabAll")
+            put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
             put(MediaStore.Downloads.IS_PENDING, 1)
         }
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
@@ -72,11 +85,18 @@ object MediaStorePublisher {
     }
 
     @Suppress("DEPRECATION")
-    private fun publishLegacy(stagedFile: File, displayName: String): Uri? {
-        val dir = File(
+    private fun publishLegacy(
+        stagedFile: File,
+        displayName: String,
+        subfolder: String?
+    ): Uri? {
+        var dir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
             "GrabAll"
         )
+        if (subfolder != null) {
+            dir = File(dir, sanitizeSubfolder(subfolder))
+        }
         if (!dir.exists()) {
             dir.mkdirs()
         }
@@ -85,7 +105,14 @@ object MediaStorePublisher {
         return Uri.fromFile(dest)
     }
 
-    private fun mimeFor(displayName: String): String {
+    /** Strip path separators out of a folder name, so a playlist title
+     * can never escape Downloads/GrabAll. */
+    fun sanitizeSubfolder(name: String): String {
+        return name.replace('/', '-').replace('\\', '-').trim()
+            .takeIf { it.isNotEmpty() } ?: "Playlist"
+    }
+
+    fun mimeFor(displayName: String): String {
         return when (displayName.substringAfterLast('.', "").lowercase()) {
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"
