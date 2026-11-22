@@ -37,6 +37,13 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     enum class RepeatMode { OFF, ALL, ONE }
 
+    data class LastPlayed(
+        val file: File,
+        val folderLabel: String,
+        val positionMs: Int,
+        val durationMs: Int
+    )
+
     companion object {
         const val ACTION_PLAY = "com.graball.player.PLAY"
         const val ACTION_PAUSE = "com.graball.player.PAUSE"
@@ -55,13 +62,6 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         private const val KEY_LAST_FOLDER = "last_folder"
         private const val KEY_LAST_POS_MS = "last_pos_ms"
         private const val KEY_LAST_DUR_MS = "last_dur_ms"
-
-        data class LastPlayed(
-            val file: File,
-            val folderLabel: String,
-            val positionMs: Int,
-            val durationMs: Int
-        )
 
         fun getLastPlayed(context: Context): LastPlayed? {
             val prefs = context.getSharedPreferences(LAST_PREFS, Context.MODE_PRIVATE)
