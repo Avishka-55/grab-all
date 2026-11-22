@@ -38,6 +38,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.graball.youtube.DownloadSheetHelper
 import com.graball.youtube.ThumbnailLoader
 import com.graball.youtube.YouTubePlaybackService
 import com.graball.youtube.YouTubePlaybackState
@@ -130,6 +131,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var npNext: TextView
     private lateinit var npRepeat: TextView
     private lateinit var npBtnAddPlaylist: TextView
+    private lateinit var npBtnDownload: TextView
 
     // Full-Screen Live Lyrics UI (Spotify / YouTube Music style)
     private lateinit var lyricsSheet: LinearLayout
@@ -261,6 +263,7 @@ class PlayerActivity : AppCompatActivity() {
         npNext = findViewById(R.id.npNext)
         npRepeat = findViewById(R.id.npRepeat)
         npBtnAddPlaylist = findViewById(R.id.npBtnAddPlaylist)
+        npBtnDownload = findViewById(R.id.npBtnDownload)
 
         // Full-Screen Live Lyrics views
         lyricsSheet = findViewById(R.id.lyricsSheet)
@@ -408,6 +411,12 @@ class PlayerActivity : AppCompatActivity() {
                 durationMs = service?.duration()?.toLong() ?: 0L
             )
             showAddToPlaylistDialog(track)
+        }
+        npBtnDownload.setOnClickListener {
+            val item = YouTubePlaybackService.currentState.currentItem
+            if (item != null) {
+                DownloadSheetHelper.show(this, item)
+            }
         }
         findViewById<TextView>(R.id.npBtnStop).setOnClickListener {
             when (resolveActiveSource()) {
@@ -638,6 +647,7 @@ class PlayerActivity : AppCompatActivity() {
         npShuffle.visibility = View.VISIBLE
         npRepeat.visibility = View.VISIBLE
         npBtnAddPlaylist.visibility = View.VISIBLE
+        npBtnDownload.visibility = View.GONE
         updateShuffleRepeatUi(svc)
 
         // Progress & SeekBar
@@ -698,6 +708,7 @@ class PlayerActivity : AppCompatActivity() {
         npShuffle.visibility = View.INVISIBLE
         npRepeat.visibility = View.INVISIBLE
         npBtnAddPlaylist.visibility = View.GONE
+        npBtnDownload.visibility = View.VISIBLE
 
         // Live ExoPlayer progress
         val dur = ytSvc?.durationMs()?.toInt() ?: 0
@@ -756,6 +767,7 @@ class PlayerActivity : AppCompatActivity() {
         npShuffle.visibility = View.VISIBLE
         npRepeat.visibility = View.VISIBLE
         npBtnAddPlaylist.visibility = View.GONE
+        npBtnDownload.visibility = View.GONE
         updateProgressBars(0, 0)
 
         if (lastArtKey != null) {

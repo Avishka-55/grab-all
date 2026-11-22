@@ -87,7 +87,9 @@ class YouTubePlaybackService : MediaSessionService() {
     private val ioExecutor = Executors.newCachedThreadPool()
 
     private val queue = mutableListOf<YtItem>()
+    private val playedVideoIds = mutableSetOf<String>()
     private var queueIndex = -1
+    private var fetchingAutoNext = false
     private var currentStreamInfo: VideoStreamInfo? = null
     private var currentStreamMode: StreamMode? = null
     private val attemptedModes = mutableSetOf<StreamMode>()
@@ -314,9 +316,17 @@ class YouTubePlaybackService : MediaSessionService() {
         val existingIdx = queue.indexOfFirst { it.id == item.id }
         if (existingIdx >= 0) {
             queueIndex = existingIdx
-        } else {
+        } else if (queueIndex < 0 && queue.isNotEmpty()) {
             queue.add(0, item)
             queueIndex = 0
+        } else {
+            // Fresh video tapped: keep history before it, replace stale auto-next tail
+            // so Next (⏭) immediately queues related songs for this new track!
+            if (queueIndex in queue.indices && queueIndex < queue.lastIndex) {
+                queue.subList(queueIndex + 1, queue.size).clear()
+            }
+            queue.add(item)
+            queueIndex = queue.lastIndex
         }
         isAudioOnly = audioOnly
         loadAtIndex(queueIndex)
@@ -368,6 +378,27 @@ class YouTubePlaybackService : MediaSessionService() {
             saveCurrentProgress()
             queueIndex++
             loadAtIndex(queueIndex)
+            return true
+        }
+        // If user hit Next before background related-videos queue finished loading,
+        // fetch related tracks on the fly and immediately advance to the next one!
+        val cur = queue.getOrNull(queueIndex) ?: return false
+        if (!fetchingAutoNext) {
+            fetchingAutoNext = true
+            val gen = loadGeneration
+            ioExecutor.execute {
+                val related = YouTubeInnerTube.fetchRelated(cur.id)
+                mainHandler.post {
+                    fetchingAutoNext = false
+                    if (gen != loadGeneration) return@post
+                    val added = appendRelatedToQueue(related)
+                    if (added > 0 && queueIndex + 1 in queue.indices) {
+                        saveCurrentProgress()
+                        queueIndex++
+                        loadAtIndex(queueIndex)
+                    }
+                }
+            }
             return true
         }
         return false
@@ -471,7 +502,9 @@ class YouTubePlaybackService : MediaSessionService() {
         player?.stop()
         player?.clearMediaItems()
         queue.clear()
+        playedVideoIds.clear()
         queueIndex = -1
+        fetchingAutoNext = false
         currentStreamInfo = null
         currentArtwork = null
         currentArtworkUrl = null
@@ -487,6 +520,7 @@ class YouTubePlaybackService : MediaSessionService() {
 
     private fun loadAtIndex(index: Int) {
         val item = queue.getOrNull(index) ?: return
+        playedVideoIds.add(item.id)
         com.graball.PlayerService.instance?.pauseIfPlaying()
         val gen = ++loadGeneration
         player?.stop()
@@ -558,6 +592,22 @@ class YouTubePlaybackService : MediaSessionService() {
                             }
                         }
                     }
+
+                    // Auto-populate Up Next queue with YouTube's related videos whenever
+                    // we reach the end of the queue, so Next (⏭) and Autoplay always work
+                    // from Music Player, Notification, PiP, and Bluetooth controls.
+                    if (queueIndex >= queue.lastIndex && !fetchingAutoNext) {
+                        fetchingAutoNext = true
+                        ioExecutor.execute {
+                            val related = YouTubeInnerTube.fetchRelated(item.id)
+                            mainHandler.post {
+                                fetchingAutoNext = false
+                                if (gen == loadGeneration && appendRelatedToQueue(related) > 0) {
+                                    broadcastState()
+                                }
+                            }
+                        }
+                    }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "Unexpected error loading video ${item.id}", t)
@@ -570,6 +620,20 @@ class YouTubePlaybackService : MediaSessionService() {
                 }
             }
         }
+    }
+
+    private fun appendRelatedToQueue(related: List<YtItem>): Int {
+        val existingIds = queue.map { it.id }.toMutableSet()
+        var added = 0
+        for (rel in related) {
+            if (rel.isPlaylist) continue
+            if (rel.id in existingIds || rel.id in playedVideoIds) continue
+            queue.add(rel)
+            existingIds.add(rel.id)
+            added++
+            if (added >= 15) break
+        }
+        return added
     }
 
     private fun prepareStream(info: VideoStreamInfo, resumePosMs: Long, playImmediately: Boolean) {
