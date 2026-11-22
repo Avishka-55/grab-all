@@ -56,6 +56,7 @@ data class YouTubePlaybackState(
     val isLoading: Boolean = false,
     val loadingStatus: String? = null,
     val isPlaying: Boolean = false,
+    val isBuffering: Boolean = false,
     val isAudioOnly: Boolean = false,
     val captionsEnabled: Boolean = false,
     val selectedHeight: Int? = null,
@@ -168,6 +169,7 @@ class YouTubePlaybackService : MediaSessionService() {
                 addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         if (isPlaying) {
+                            com.graball.PlayerService.stopAndClear(applicationContext)
                             currentTrackStartedPlaying = true
                             startSponsorTicker()
                         } else {
@@ -431,10 +433,10 @@ class YouTubePlaybackService : MediaSessionService() {
 
     fun togglePlayPause() {
         val p = player ?: return
-        if (p.isPlaying) {
+        if (p.isPlaying || p.playWhenReady) {
             p.pause()
         } else {
-            com.graball.PlayerService.instance?.pauseIfPlaying()
+            com.graball.PlayerService.stopAndClear(applicationContext)
             p.play()
         }
     }
@@ -558,12 +560,11 @@ class YouTubePlaybackService : MediaSessionService() {
     private fun loadAtIndex(index: Int, startFromBeginning: Boolean = false) {
         val item = queue.getOrNull(index) ?: return
         playedVideoIds.add(item.id)
-        com.graball.PlayerService.instance?.pauseIfPlaying()
+        com.graball.PlayerService.stopAndClear(applicationContext)
         val gen = ++loadGeneration
         currentTrackStartedPlaying = false
-        player?.stop()
-        player?.clearMediaItems()
-        player?.seekTo(0L)
+        // Set loading state BEFORE player?.stop() so ExoPlayer's synchronous
+        // onIsPlayingChanged(false) callback keeps the foreground notification pinned.
         isLoading = true
         loadingStatus = "Connecting to YouTube…"
         lastError = null
@@ -573,6 +574,9 @@ class YouTubePlaybackService : MediaSessionService() {
         attemptedModes.clear()
         sponsorSegments = emptyList()
         skippedSegmentKeys.clear()
+        player?.stop()
+        player?.clearMediaItems()
+        player?.seekTo(0L)
         broadcastState()
 
         ioExecutor.execute {
@@ -590,10 +594,10 @@ class YouTubePlaybackService : MediaSessionService() {
                 }
                 mainHandler.post {
                     if (gen != loadGeneration) return@post
-                    isLoading = false
-                    loadingStatus = null
                     val info = result.info
                     if (info == null) {
+                        isLoading = false
+                        loadingStatus = null
                         lastError = result.error
                             ?: "Couldn't load stream for this video. Try Retry or Download."
                         broadcastState()
@@ -622,6 +626,8 @@ class YouTubePlaybackService : MediaSessionService() {
                     }
                     YouTubeStore.recordHistory(applicationContext, enriched, resumePos)
                     prepareStream(info, resumePosMs = resumePos, playImmediately = true)
+                    isLoading = false
+                    loadingStatus = null
                     broadcastState()
 
                     // Fetch SponsorBlock asynchronously AFTER playback starts so it
@@ -750,8 +756,8 @@ class YouTubePlaybackService : MediaSessionService() {
             applyTrackSelection()
             p.setMediaSource(src, resumePosMs)
             p.setPlaybackSpeed(playbackSpeed)
-            p.prepare()
             p.playWhenReady = playImmediately
+            p.prepare()
             return true
         }
 
@@ -775,8 +781,8 @@ class YouTubePlaybackService : MediaSessionService() {
             applyTrackSelection()
             p.setMediaSource(merged, resumePosMs)
             p.setPlaybackSpeed(playbackSpeed)
-            p.prepare()
             p.playWhenReady = playImmediately
+            p.prepare()
             return true
         }
 
@@ -793,8 +799,8 @@ class YouTubePlaybackService : MediaSessionService() {
             applyTrackSelection()
             p.setMediaSource(src, resumePosMs)
             p.setPlaybackSpeed(playbackSpeed)
-            p.prepare()
             p.playWhenReady = playImmediately
+            p.prepare()
             return true
         }
 
@@ -850,6 +856,8 @@ class YouTubePlaybackService : MediaSessionService() {
     }
 
     private fun broadcastState() {
+        val p = player
+        val bufferingToPlay = p != null && p.playWhenReady && p.playbackState == Player.STATE_BUFFERING
         currentState = YouTubePlaybackState(
             currentItem = queue.getOrNull(queueIndex),
             streamInfo = currentStreamInfo,
@@ -857,7 +865,8 @@ class YouTubePlaybackService : MediaSessionService() {
             queueIndex = queueIndex,
             isLoading = isLoading,
             loadingStatus = loadingStatus,
-            isPlaying = player?.isPlaying == true,
+            isPlaying = p?.isPlaying == true,
+            isBuffering = bufferingToPlay,
             isAudioOnly = isAudioOnly,
             captionsEnabled = captionsEnabled,
             selectedHeight = selectedHeight,
@@ -912,7 +921,7 @@ class YouTubePlaybackService : MediaSessionService() {
         }
 
         val notif = buildPlaybackNotification(item)
-        val shouldForeground = currentState.isPlaying || currentState.isLoading
+        val shouldForeground = currentState.isPlaying || currentState.isLoading || currentState.isBuffering
         if (shouldForeground) {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -998,9 +1007,11 @@ class YouTubePlaybackService : MediaSessionService() {
         }
 
         val playing = currentState.isPlaying
+        val activeOrPreparing = playing || currentState.isLoading || currentState.isBuffering
         val sub = buildString {
             if (currentState.isAudioOnly) append("🎧 Background Audio")
             else if (currentState.isLoading) append(currentState.loadingStatus ?: "Loading…")
+            else if (currentState.isBuffering) append("Buffering…")
             else if (playing) append("Playing")
             else append("Paused")
             if (item.channel.isNotBlank()) {
@@ -1014,7 +1025,7 @@ class YouTubePlaybackService : MediaSessionService() {
             .setContentText(sub)
             .setContentIntent(contentPi)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(playing || currentState.isLoading)
+            .setOngoing(activeOrPreparing)
             .setOnlyAlertOnce(true)
             .addAction(
                 android.R.drawable.ic_media_previous,
@@ -1022,8 +1033,8 @@ class YouTubePlaybackService : MediaSessionService() {
                 svcAction(ACTION_PREV, 201)
             )
             .addAction(
-                if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
-                if (playing) "Pause" else "Play",
+                if (activeOrPreparing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+                if (activeOrPreparing) "Pause" else "Play",
                 svcAction(ACTION_PLAY_PAUSE, 202)
             )
             .addAction(
@@ -1092,6 +1103,23 @@ class YouTubePlaybackService : MediaSessionService() {
         @Volatile
         var instance: YouTubePlaybackService? = null
             private set
+
+        /**
+         * Stop YouTube playback, save current video timestamp to history,
+         * cancel notification ID 3 (even if detached/paused), and stop the service.
+         */
+        fun stopAndClear(context: Context) {
+            val svc = instance
+            if (svc != null) {
+                svc.stopPlayback()
+            } else {
+                try {
+                    (context.applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)
+                        ?.cancel(YT_NOTIFICATION_ID)
+                } catch (_: Exception) {
+                }
+            }
+        }
 
         @Volatile
         var currentState: YouTubePlaybackState = YouTubePlaybackState()

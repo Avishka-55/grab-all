@@ -79,6 +79,23 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         @Volatile
         var instance: PlayerService? = null
             private set
+
+        /**
+         * Stop local playback, persist the last-played track & timestamp,
+         * cancel notification ID 2 (even if detached/paused), and stop the service.
+         */
+        fun stopAndClear(context: Context) {
+            val svc = instance
+            if (svc != null) {
+                svc.stopPlayback()
+            } else {
+                try {
+                    (context.applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)
+                        ?.cancel(NOTIFICATION_ID)
+                } catch (_: Exception) {
+                }
+            }
+        }
     }
 
     private val binder = PlayerBinder()
@@ -225,7 +242,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     fun resume() {
-        YouTubePlaybackService.instance?.pauseIfPlaying()
+        YouTubePlaybackService.stopAndClear(applicationContext)
         if (player == null) {
             if (currentFile() != null) {
                 startPlayback()
@@ -279,6 +296,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     private fun persistLastPlayed(overridePosMs: Int? = null) {
         val file = currentFile() ?: return
+        if (overridePosMs == null && !isPrepared) return
         val pos = overridePosMs ?: position()
         val dur = duration()
         getSharedPreferences(LAST_PREFS, Context.MODE_PRIVATE).edit()
@@ -294,8 +312,8 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         val gen = ++playbackGen
         pendingSeekMs = initialSeekMs
         persistLastPlayed(overridePosMs = initialSeekMs)
-        // Ensure YouTube background audio pauses so both never play together
-        YouTubePlaybackService.instance?.pauseIfPlaying()
+        // Enforce single active player: stop YouTube & clear its notification cleanly
+        YouTubePlaybackService.stopAndClear(applicationContext)
         // Keep AudioFocus held across track transitions so abandoning + immediately
         // re-requesting focus never triggers a stale AUDIOFOCUS_LOSS pause race!
         releasePlayer(abandonAudioFocus = false)
@@ -382,16 +400,29 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         }
     }
 
-    private fun stopPlayback() {
+    fun stopPlayback() {
         persistLastPlayed()
         playbackGen++
         releasePlayer(abandonAudioFocus = true)
         index = -1
+        playlist = emptyList()
         currentArtPath = null
         currentArt = null
         currentMeta = null
-        @Suppress("DEPRECATION")
-        stopForeground(true)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        } catch (_: Exception) {
+        }
+        try {
+            (getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)
+                ?.cancel(NOTIFICATION_ID)
+        } catch (_: Exception) {
+        }
         stopSelf()
     }
 

@@ -595,8 +595,10 @@ class PlayerActivity : AppCompatActivity() {
         val ytState = YouTubePlaybackService.currentState
         val ytItem = ytState.currentItem
 
+        val ytActive = ytItem != null && (ytState.isPlaying || ytState.isLoading || ytState.isBuffering)
+
         return when {
-            ytItem != null && ytState.isPlaying -> ActiveSource.YOUTUBE
+            ytActive -> ActiveSource.YOUTUBE
             localFile != null && localActive -> ActiveSource.LOCAL
             ytItem != null && ytState.isAudioOnly && localFile == null -> ActiveSource.YOUTUBE
             localFile != null -> ActiveSource.LOCAL
@@ -1116,7 +1118,7 @@ class PlayerActivity : AppCompatActivity() {
             arrayListOf(last.file.absolutePath)
         }
         val startIdx = if (idx >= 0) idx else 0
-        YouTubePlaybackService.instance?.pauseIfPlaying()
+        YouTubePlaybackService.stopAndClear(this)
         startService(
             Intent(this, PlayerService::class.java).apply {
                 action = PlayerService.ACTION_PLAY
@@ -1875,7 +1877,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun playFolderTracks(tracks: List<AudioTrack>, startIndex: Int, folderLabel: String) {
         if (tracks.isEmpty()) return
-        YouTubePlaybackService.instance?.pauseIfPlaying()
+        YouTubePlaybackService.stopAndClear(this)
         startService(
             Intent(this, PlayerService::class.java).apply {
                 action = PlayerService.ACTION_PLAY
