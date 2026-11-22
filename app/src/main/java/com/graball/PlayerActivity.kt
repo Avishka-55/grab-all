@@ -131,6 +131,22 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var npRepeat: TextView
     private lateinit var npBtnAddPlaylist: TextView
 
+    // Full-Screen Live Lyrics UI (Spotify / YouTube Music style)
+    private lateinit var lyricsSheet: LinearLayout
+    private lateinit var lyricsTitle: TextView
+    private lateinit var lyricsSub: TextView
+    private lateinit var lyricsSyncRow: LinearLayout
+    private lateinit var lyricsRecycler: RecyclerView
+    private lateinit var lyricsLayoutManager: LinearLayoutManager
+    private lateinit var lyricsStatusBox: LinearLayout
+    private lateinit var lyricsSpinner: ProgressBar
+    private lateinit var lyricsStatusText: TextView
+    private lateinit var lyricsSeek: SeekBar
+    private lateinit var lyricsTimeCur: TextView
+    private lateinit var lyricsTimeDur: TextView
+    private lateinit var lyricsPlayPause: TextView
+    private lateinit var lyricsBtnOpenYoutube: TextView
+
     private var allFolders: List<MusicFolder> = emptyList()
     private var tracksByPath: Map<String, AudioTrack> = emptyMap()
     private var playlists: MutableList<MusicPlaylist> = mutableListOf()
@@ -143,12 +159,20 @@ class PlayerActivity : AppCompatActivity() {
     private var bound = false
     private var draggingSeek = false
     private var isNowPlayingOpen = false
+    private var isLyricsOpen = false
     private var lastTrack: File? = null
     private var lastArtKey: String? = null
     private var lastMetaPath: String? = null
     private var cachedLocalMeta: AlbumArtLoader.TrackMeta? = null
 
+    private var currentLyricsKey: String? = null
+    private var currentLyricsResult: LyricsFetcher.LyricsResult? = null
+    private var lyricsOffsetMs: Long = 0L
+    private var activeLyricIndex: Int = -1
+    private var userScrolledLyricsUntilMs: Long = 0L
+
     private lateinit var adapter: MusicRowAdapter
+    private lateinit var lyricsAdapter: LyricsAdapter
 
     private val handler = Handler(Looper.getMainLooper())
     private val ytStateListener: (YouTubePlaybackState) -> Unit = {
@@ -158,7 +182,8 @@ class PlayerActivity : AppCompatActivity() {
     private val poller = object : Runnable {
         override fun run() {
             updatePlayerUi()
-            handler.postDelayed(this, 500)
+            val delay = if (isLyricsOpen) 250L else 500L
+            handler.postDelayed(this, delay)
         }
     }
 
@@ -236,6 +261,21 @@ class PlayerActivity : AppCompatActivity() {
         npNext = findViewById(R.id.npNext)
         npRepeat = findViewById(R.id.npRepeat)
         npBtnAddPlaylist = findViewById(R.id.npBtnAddPlaylist)
+
+        // Full-Screen Live Lyrics views
+        lyricsSheet = findViewById(R.id.lyricsSheet)
+        lyricsTitle = findViewById(R.id.lyricsTitle)
+        lyricsSub = findViewById(R.id.lyricsSub)
+        lyricsSyncRow = findViewById(R.id.lyricsSyncRow)
+        lyricsRecycler = findViewById(R.id.lyricsRecycler)
+        lyricsStatusBox = findViewById(R.id.lyricsStatusBox)
+        lyricsSpinner = findViewById(R.id.lyricsSpinner)
+        lyricsStatusText = findViewById(R.id.lyricsStatusText)
+        lyricsSeek = findViewById(R.id.lyricsSeek)
+        lyricsTimeCur = findViewById(R.id.lyricsTimeCur)
+        lyricsTimeDur = findViewById(R.id.lyricsTimeDur)
+        lyricsPlayPause = findViewById(R.id.lyricsPlayPause)
+        lyricsBtnOpenYoutube = findViewById(R.id.lyricsBtnOpenYoutube)
 
         // Hardware-rounded clipping for both album art cards (API 21+)
         miniArtBox.outlineProvider = ViewOutlineProvider.BACKGROUND
@@ -356,6 +396,7 @@ class PlayerActivity : AppCompatActivity() {
             }
             Toast.makeText(this, label, Toast.LENGTH_SHORT).show()
         }
+        findViewById<TextView>(R.id.npBtnLyrics).setOnClickListener { openLyricsSheet() }
         findViewById<TextView>(R.id.npBtnEq).setOnClickListener { openSystemEqualizer() }
         npBtnAddPlaylist.setOnClickListener {
             val file = service?.currentFile() ?: return@setOnClickListener
@@ -391,6 +432,62 @@ class PlayerActivity : AppCompatActivity() {
                     ActiveSource.YOUTUBE -> YouTubePlaybackService.instance?.seekTo(seek.progress.toLong())
                     ActiveSource.LOCAL -> service?.seekTo(seek.progress)
                     ActiveSource.NONE -> Unit
+                }
+            }
+        })
+
+        // Full-Screen Live Lyrics interactions
+        findViewById<TextView>(R.id.lyricsClose).setOnClickListener { closeLyricsSheet() }
+        findViewById<TextView>(R.id.lyricsPrev).setOnClickListener { handlePrev() }
+        lyricsPlayPause.setOnClickListener { handlePlayPause() }
+        findViewById<TextView>(R.id.lyricsNext).setOnClickListener { handleNext() }
+        lyricsBtnOpenYoutube.setOnClickListener { openCurrentYouTubeVideo() }
+        findViewById<TextView>(R.id.lyricsSyncMinus).setOnClickListener {
+            lyricsOffsetMs -= 500L
+            Toast.makeText(
+                this,
+                String.format("Lyrics sync: %+.1fs", lyricsOffsetMs / 1000.0),
+                Toast.LENGTH_SHORT
+            ).show()
+            updatePlayerUi()
+        }
+        findViewById<TextView>(R.id.lyricsSyncPlus).setOnClickListener {
+            lyricsOffsetMs += 500L
+            Toast.makeText(
+                this,
+                String.format("Lyrics sync: %+.1fs", lyricsOffsetMs / 1000.0),
+                Toast.LENGTH_SHORT
+            ).show()
+            updatePlayerUi()
+        }
+        lyricsSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seek: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) lyricsTimeCur.text = formatTime(progress)
+            }
+            override fun onStartTrackingTouch(seek: SeekBar) {
+                draggingSeek = true
+            }
+            override fun onStopTrackingTouch(seek: SeekBar) {
+                draggingSeek = false
+                seekActiveSourceTo(seek.progress.toLong())
+            }
+        })
+
+        lyricsAdapter = LyricsAdapter { line ->
+            if (line.timeMs >= 0L) {
+                val targetMs = (line.timeMs - lyricsOffsetMs).coerceAtLeast(0L)
+                seekActiveSourceTo(targetMs)
+                userScrolledLyricsUntilMs = 0L
+                updatePlayerUi()
+            }
+        }
+        lyricsLayoutManager = LinearLayoutManager(this)
+        lyricsRecycler.layoutManager = lyricsLayoutManager
+        lyricsRecycler.adapter = lyricsAdapter
+        lyricsRecycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
+                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                    userScrolledLyricsUntilMs = System.currentTimeMillis() + 3500L
                 }
             }
         })
@@ -450,6 +547,7 @@ class PlayerActivity : AppCompatActivity() {
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
         when {
+            isLyricsOpen -> closeLyricsSheet()
             isNowPlayingOpen -> closeNowPlayingSheet()
             viewMode == ViewMode.FOLDER_SONGS -> {
                 viewMode = ViewMode.FOLDERS
@@ -545,6 +643,19 @@ class PlayerActivity : AppCompatActivity() {
         val dur = svc.duration()
         val pos = svc.position()
         updateProgressBars(pos, dur)
+        if (isLyricsOpen) {
+            syncLyricsUi(
+                cacheKey = "local:${current.absolutePath}",
+                title = title,
+                artist = meta?.artist?.takeIf { it.isNotBlank() } ?: folderLbl,
+                subLabel = sub,
+                posMs = pos.toLong(),
+                durMs = dur.toLong(),
+                isPlaying = playing,
+                isYouTube = false,
+                localFile = current
+            )
+        }
 
         // Album Art (only triggers when active track changes)
         val artKey = "local:${current.absolutePath}"
@@ -591,6 +702,19 @@ class PlayerActivity : AppCompatActivity() {
         val dur = ytSvc?.durationMs()?.toInt() ?: 0
         val pos = ytSvc?.positionMs()?.toInt() ?: 0
         updateProgressBars(pos, dur)
+        if (isLyricsOpen) {
+            syncLyricsUi(
+                cacheKey = "yt:${item.id}",
+                title = title,
+                artist = channel,
+                subLabel = "🎧 YouTube Audio · $channel",
+                posMs = pos.toLong(),
+                durMs = dur.toLong(),
+                isPlaying = playing,
+                isYouTube = true,
+                localFile = null
+            )
+        }
 
         // YouTube Thumbnail as Album Art (reuses existing disk-cached ThumbnailLoader)
         val thumbUrl = info?.thumbnailUrl?.takeIf { it.isNotBlank() } ?: item.thumbnailUrl
@@ -616,6 +740,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun bindIdlePlayerUi() {
+        if (isLyricsOpen) closeLyricsSheet()
         miniYtBanner.visibility = View.GONE
         miniTitle.text = getString(R.string.player_tap_to_play)
         miniSub.text = "Voice notes & call recordings auto-hidden"
@@ -650,19 +775,153 @@ class PlayerActivity : AppCompatActivity() {
     private fun updateProgressBars(posMs: Int, durMs: Int) {
         if (durMs > 0) {
             npSeek.max = durMs
+            lyricsSeek.max = durMs
             if (!draggingSeek) {
-                npSeek.progress = posMs.coerceIn(0, durMs)
+                val clamped = posMs.coerceIn(0, durMs)
+                npSeek.progress = clamped
+                lyricsSeek.progress = clamped
             }
-            npTimeCur.text = formatTime(posMs)
-            npTimeDur.text = formatTime(durMs)
+            val curStr = formatTime(posMs)
+            val durStr = formatTime(durMs)
+            npTimeCur.text = curStr
+            npTimeDur.text = durStr
+            lyricsTimeCur.text = curStr
+            lyricsTimeDur.text = durStr
             miniProgress.max = durMs
             miniProgress.progress = posMs.coerceIn(0, durMs)
         } else {
             npSeek.max = 100
-            if (!draggingSeek) npSeek.progress = 0
+            lyricsSeek.max = 100
+            if (!draggingSeek) {
+                npSeek.progress = 0
+                lyricsSeek.progress = 0
+            }
             npTimeCur.text = "0:00"
             npTimeDur.text = "0:00"
+            lyricsTimeCur.text = "0:00"
+            lyricsTimeDur.text = "0:00"
             miniProgress.progress = 0
+        }
+    }
+
+    private fun seekActiveSourceTo(targetMs: Long) {
+        when (resolveActiveSource()) {
+            ActiveSource.YOUTUBE -> YouTubePlaybackService.instance?.seekTo(targetMs)
+            ActiveSource.LOCAL -> service?.seekTo(targetMs.toInt())
+            ActiveSource.NONE -> Unit
+        }
+    }
+
+    // ---- Full-Screen Live Lyrics Sheet (Spotify / YouTube Music Style) ----
+
+    private fun openLyricsSheet() {
+        if (resolveActiveSource() == ActiveSource.NONE) return
+        if (isLyricsOpen) return
+        isLyricsOpen = true
+        userScrolledLyricsUntilMs = 0L
+        lyricsSheet.visibility = View.VISIBLE
+        lyricsSheet.translationY = resources.displayMetrics.heightPixels.toFloat() * 0.22f
+        lyricsSheet.alpha = 0f
+        lyricsSheet.animate()
+            .translationY(0f)
+            .alpha(1f)
+            .setDuration(220L)
+            .start()
+        updatePlayerUi()
+    }
+
+    private fun closeLyricsSheet() {
+        if (!isLyricsOpen) return
+        isLyricsOpen = false
+        lyricsSheet.animate()
+            .translationY(resources.displayMetrics.heightPixels.toFloat() * 0.22f)
+            .alpha(0f)
+            .setDuration(180L)
+            .withEndAction {
+                lyricsSheet.visibility = View.GONE
+                lyricsSheet.translationY = 0f
+                lyricsSheet.alpha = 1f
+            }
+            .start()
+    }
+
+    private fun syncLyricsUi(
+        cacheKey: String,
+        title: String,
+        artist: String,
+        subLabel: String,
+        posMs: Long,
+        durMs: Long,
+        isPlaying: Boolean,
+        isYouTube: Boolean,
+        localFile: File?
+    ) {
+        lyricsTitle.text = title
+        lyricsPlayPause.text = if (isPlaying) "⏸" else "▶"
+        lyricsBtnOpenYoutube.visibility = if (isYouTube) View.VISIBLE else View.INVISIBLE
+
+        if (cacheKey != currentLyricsKey) {
+            currentLyricsKey = cacheKey
+            currentLyricsResult = null
+            lyricsOffsetMs = 0L
+            activeLyricIndex = -1
+            userScrolledLyricsUntilMs = 0L
+            lyricsSub.text = subLabel
+            lyricsSyncRow.visibility = View.GONE
+            lyricsAdapter.submitLyrics(emptyList(), isSynced = false)
+            lyricsRecycler.visibility = View.GONE
+            lyricsStatusBox.visibility = View.VISIBLE
+            lyricsSpinner.visibility = View.VISIBLE
+            lyricsStatusText.text = "Finding synced lyrics…"
+
+            val durSec = (durMs / 1000L).toInt()
+            LyricsFetcher.fetchAsync(
+                context = this,
+                cacheId = cacheKey,
+                rawTitle = title,
+                rawArtist = artist,
+                durationSec = durSec,
+                localFile = localFile
+            ) { result ->
+                if (isFinishing || isDestroyed || currentLyricsKey != cacheKey) return@fetchAsync
+                currentLyricsResult = result
+                lyricsSpinner.visibility = View.GONE
+                if (result == null || result.lines.isEmpty()) {
+                    lyricsSyncRow.visibility = View.GONE
+                    lyricsRecycler.visibility = View.GONE
+                    lyricsStatusBox.visibility = View.VISIBLE
+                    lyricsStatusText.text = "No lyrics found for this song"
+                } else {
+                    lyricsStatusBox.visibility = View.GONE
+                    lyricsRecycler.visibility = View.VISIBLE
+                    lyricsSub.text = "$subLabel · ${result.source}"
+                    lyricsSyncRow.visibility = if (result.isSynced) View.VISIBLE else View.GONE
+                    lyricsAdapter.submitLyrics(result.lines, result.isSynced)
+                    activeLyricIndex = -1
+                }
+            }
+            return
+        }
+
+        val res = currentLyricsResult ?: return
+        if (!res.isSynced || res.lines.isEmpty()) return
+
+        val effectiveMs = (posMs + lyricsOffsetMs).coerceAtLeast(0L)
+        var nextIdx = -1
+        for (i in res.lines.indices) {
+            if (res.lines[i].timeMs <= effectiveMs) {
+                nextIdx = i
+            } else {
+                break
+            }
+        }
+        if (nextIdx != activeLyricIndex) {
+            activeLyricIndex = nextIdx
+            lyricsAdapter.setActiveIndex(nextIdx)
+            if (nextIdx >= 0 && System.currentTimeMillis() >= userScrolledLyricsUntilMs) {
+                val offsetPx = (lyricsRecycler.height * 0.34f).toInt().coerceAtLeast(80)
+                lyricsLayoutManager.scrollToPositionWithOffset(nextIdx, offsetPx)
+            }
         }
     }
 
@@ -1595,6 +1854,65 @@ class PlayerActivity : AppCompatActivity() {
             val title: TextView = view.findViewById(R.id.musicRowTitle)
             val sub: TextView = view.findViewById(R.id.musicRowSub)
             val action: TextView = view.findViewById(R.id.musicRowAction)
+        }
+    }
+
+    private inner class LyricsAdapter(
+        private val onLineTap: (LyricsFetcher.LyricLine) -> Unit
+    ) : RecyclerView.Adapter<LyricsAdapter.LineHolder>() {
+
+        private var lines: List<LyricsFetcher.LyricLine> = emptyList()
+        private var isSynced: Boolean = false
+        private var activeIndex: Int = -1
+
+        fun submitLyrics(newLines: List<LyricsFetcher.LyricLine>, synced: Boolean) {
+            lines = newLines
+            isSynced = synced
+            activeIndex = -1
+            notifyDataSetChanged()
+        }
+
+        fun setActiveIndex(newIndex: Int) {
+            val prev = activeIndex
+            if (prev == newIndex) return
+            activeIndex = newIndex
+            if (prev in lines.indices) notifyItemChanged(prev)
+            if (newIndex in lines.indices) notifyItemChanged(newIndex)
+        }
+
+        override fun getItemCount(): Int = lines.size
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): LineHolder {
+            val view = LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_lyric_line, parent, false)
+            return LineHolder(view)
+        }
+
+        override fun onBindViewHolder(holder: LineHolder, position: Int) {
+            val line = lines[position]
+            val isActive = isSynced && position == activeIndex
+            holder.text.text = line.text
+            if (isActive) {
+                holder.text.textSize = 23f
+                holder.text.setTextColor(ContextCompat.getColor(this@PlayerActivity, R.color.graball_text))
+                holder.text.setTypeface(null, android.graphics.Typeface.BOLD)
+                holder.text.alpha = 1.0f
+            } else if (!isSynced) {
+                holder.text.textSize = 19f
+                holder.text.setTextColor(ContextCompat.getColor(this@PlayerActivity, R.color.graball_text))
+                holder.text.setTypeface(null, android.graphics.Typeface.NORMAL)
+                holder.text.alpha = 0.88f
+            } else {
+                holder.text.textSize = 18f
+                holder.text.setTextColor(ContextCompat.getColor(this@PlayerActivity, R.color.graball_subtext))
+                holder.text.setTypeface(null, android.graphics.Typeface.NORMAL)
+                holder.text.alpha = if (position < activeIndex) 0.48f else 0.72f
+            }
+            holder.itemView.setOnClickListener { onLineTap(line) }
+        }
+
+        inner class LineHolder(view: View) : RecyclerView.ViewHolder(view) {
+            val text: TextView = view.findViewById(R.id.lyricLineText)
         }
     }
 
