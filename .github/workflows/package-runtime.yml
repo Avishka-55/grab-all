@@ -32,10 +32,16 @@ jobs:
           cd ..
           python3 - <<'EOF'
           import zipfile, os
+          # Skip dist-info, pycache, and host x86_64 native .so extensions
+          # downloaded by pip on this Ubuntu runner — they cannot load on
+          # ARM Android and add ~8.5 MB of dead weight (e.g. _brotli,
+          # Cryptodome x86_64 .abi3.so, charset_normalizer, websockets).
           skip = ('.dist-info', '__pycache__')
           with zipfile.ZipFile('ytdlp.zip', 'w', zipfile.ZIP_DEFLATED) as z:
               for root, _, files in os.walk('pkg'):
                   for f in files:
+                      if f.endswith('.so'):
+                          continue
                       p = os.path.join(root, f)
                       rel = os.path.relpath(p, 'pkg')
                       if any(s in rel for s in skip):
@@ -43,7 +49,7 @@ jobs:
                       z.write(p, rel)
           EOF
           ls -la ytdlp.zip
-          python3 -c "import zipfile; print('\n'.join(sorted(zipfile.ZipFile('ytdlp.zip').namelist())[:8]))"
+          python3 -c "import zipfile; names=zipfile.ZipFile('ytdlp.zip').namelist(); assert not any(n.endswith('.so') for n in names), 'x86_64 .so leaked into ytdlp.zip'; assert 'certifi/cacert.pem' in names, 'certifi cacert.pem missing'; print('entries:', len(names), 'first 8:', sorted(names)[:8])"
       - uses: actions/upload-artifact@v4
         with:
           name: ytdlp-zip
@@ -70,6 +76,7 @@ jobs:
             -D_GNU_SOURCE -DCONFIG_VERSION='"2024-01-13"' -DCONFIG_BIGNUM \
             -o qjs qjs.c repl.c qjscalc.c quickjs.c libregexp.c libunicode.c \
             cutils.c quickjs-libc.c libbf.c -lm -ldl
+          "$NDK_BIN/llvm-strip" --strip-unneeded qjs
           mkdir -p ../qjs-pkg/bin
           cp qjs ../qjs-pkg/bin/qjs
           cd ..
@@ -102,9 +109,11 @@ jobs:
           cp quickjs-host/repl.c quickjs-host/qjscalc.c quickjs-2024-01-13/
           cd quickjs-2024-01-13
           "$NDK_BIN/aarch64-linux-android21-clang" -O2 -fwrapv \
+            -Wl,-z,max-page-size=16384 \
             -D_GNU_SOURCE -DCONFIG_VERSION='"2024-01-13"' -DCONFIG_BIGNUM \
             -o qjs qjs.c repl.c qjscalc.c quickjs.c libregexp.c libunicode.c \
             cutils.c quickjs-libc.c libbf.c -lm -ldl
+          "$NDK_BIN/llvm-strip" --strip-unneeded qjs
           mkdir -p ../qjs-pkg/bin
           cp qjs ../qjs-pkg/bin/qjs
           cd ..
@@ -161,18 +170,18 @@ jobs:
             --enable-libmp3lame \
             --extra-cflags="-I$PWD/../lame-install/include" \
             --extra-ldflags="-L$PWD/../lame-install/lib" \
-            --disable-doc --disable-ffplay --disable-ffprobe \
+            --disable-doc --disable-ffplay \
             --disable-avdevice --disable-network --disable-swscale \
             --disable-vulkan \
             --disable-everything \
             --enable-swresample \
-            --enable-demuxer=mp4,mov,matroska,webm,mp3 \
-            --enable-muxer=mp4,matroska,webm,mp3 \
-            --enable-decoder=h264,aac,opus,vorbis,mp3 \
+            --enable-demuxer=mp4,mov,matroska,webm,mp3,mpegts,hls,flv,ogg,flac,wav,aac,concat \
+            --enable-muxer=mp4,matroska,webm,mp3,mpegts,ogg,flac,wav,ipod \
+            --enable-decoder=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mp3,flac,alac,pcm_s16le,pcm_s24le,pcm_f32le \
             --enable-encoder=aac,libmp3lame \
-            --enable-parser=h264,aac,opus,vorbis,mpegaudio \
-            --enable-bsf=aac_adtstoasc,h264_mp4toannexb \
-            --enable-protocol=file,pipe \
+            --enable-parser=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mpegaudio,flac \
+            --enable-bsf=aac_adtstoasc,h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe,extract_extradata \
+            --enable-protocol=file,pipe,crypto \
             --enable-filter=aresample,anull 2>&1 | tail -15
           make -j"$(nproc)" 2>&1 | tail -5
           make install 2>&1 | tail -3
@@ -182,14 +191,17 @@ jobs:
           # The libmp3lame string check is fatal: without it the app's
           # MP3 mode would fail on the phone with no encoder.
           test -s ../ffmpeg-install/bin/ffmpeg && file ../ffmpeg-install/bin/ffmpeg
+          test -s ../ffmpeg-install/bin/ffprobe && file ../ffmpeg-install/bin/ffprobe
           strings ../ffmpeg-install/bin/ffmpeg | grep -q libmp3lame
           mkdir -p ../ffmpeg-pkg/bin
           cp ../ffmpeg-install/bin/ffmpeg ../ffmpeg-pkg/bin/ffmpeg
+          cp ../ffmpeg-install/bin/ffprobe ../ffmpeg-pkg/bin/ffprobe
           cd ..
           python3 - <<'EOF'
           import zipfile
           with zipfile.ZipFile('ffmpeg32.zip', 'w', zipfile.ZIP_DEFLATED) as z:
               z.write('ffmpeg-pkg/bin/ffmpeg', 'bin/ffmpeg')
+              z.write('ffmpeg-pkg/bin/ffprobe', 'bin/ffprobe')
           EOF
           ls -la ffmpeg32.zip
       - uses: actions/upload-artifact@v4
@@ -238,19 +250,19 @@ jobs:
             --prefix="$PWD/../ffmpeg-install" \
             --enable-libmp3lame \
             --extra-cflags="-I$PWD/../lame-install/include" \
-            --extra-ldflags="-L$PWD/../lame-install/lib" \
-            --disable-doc --disable-ffplay --disable-ffprobe \
+            --extra-ldflags="-L$PWD/../lame-install/lib -Wl,-z,max-page-size=16384" \
+            --disable-doc --disable-ffplay \
             --disable-avdevice --disable-network --disable-swscale \
             --disable-vulkan \
             --disable-everything \
             --enable-swresample \
-            --enable-demuxer=mp4,mov,matroska,webm,mp3 \
-            --enable-muxer=mp4,matroska,webm,mp3 \
-            --enable-decoder=h264,aac,opus,vorbis,mp3 \
+            --enable-demuxer=mp4,mov,matroska,webm,mp3,mpegts,hls,flv,ogg,flac,wav,aac,concat \
+            --enable-muxer=mp4,matroska,webm,mp3,mpegts,ogg,flac,wav,ipod \
+            --enable-decoder=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mp3,flac,alac,pcm_s16le,pcm_s24le,pcm_f32le \
             --enable-encoder=aac,libmp3lame \
-            --enable-parser=h264,aac,opus,vorbis,mpegaudio \
-            --enable-bsf=aac_adtstoasc,h264_mp4toannexb \
-            --enable-protocol=file,pipe \
+            --enable-parser=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mpegaudio,flac \
+            --enable-bsf=aac_adtstoasc,h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe,extract_extradata \
+            --enable-protocol=file,pipe,crypto \
             --enable-filter=aresample,anull 2>&1 | tail -15
           make -j"$(nproc)" 2>&1 | tail -5
           make install 2>&1 | tail -3
@@ -259,14 +271,17 @@ jobs:
           # The libmp3lame string check is fatal: without it the app's
           # MP3 mode would fail on the phone with no encoder.
           test -s ../ffmpeg-install/bin/ffmpeg && file ../ffmpeg-install/bin/ffmpeg
+          test -s ../ffmpeg-install/bin/ffprobe && file ../ffmpeg-install/bin/ffprobe
           strings ../ffmpeg-install/bin/ffmpeg | grep -q libmp3lame
           mkdir -p ../ffmpeg-pkg/bin
           cp ../ffmpeg-install/bin/ffmpeg ../ffmpeg-pkg/bin/ffmpeg
+          cp ../ffmpeg-install/bin/ffprobe ../ffmpeg-pkg/bin/ffprobe
           cd ..
           python3 - <<'EOF'
           import zipfile
           with zipfile.ZipFile('ffmpeg64.zip', 'w', zipfile.ZIP_DEFLATED) as z:
               z.write('ffmpeg-pkg/bin/ffmpeg', 'bin/ffmpeg')
+              z.write('ffmpeg-pkg/bin/ffprobe', 'bin/ffprobe')
           EOF
           ls -la ffmpeg64.zip
       - uses: actions/upload-artifact@v4
@@ -414,25 +429,37 @@ jobs:
           ls target-install/lib/python3.13/lib-dynload/ | head -40
       - name: Package python zips (shared + 32-bit)
         run: |
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           mkdir -p python-pkg/bin python-pkg/lib
           cp target-install/bin/python3.13 python-pkg/bin/python
           cp -r target-install/lib/python3.13 python-pkg/lib/
           cp target-install/lib/libpython3.13.so* python-pkg/lib/
           find python-pkg -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+          # Strip DWARF debug info from interpreter, libpython, and dynload
+          # modules (cuts python32.zip from ~17 MB down to ~4-5 MB).
+          "$NDK_BIN/llvm-strip" --strip-unneeded python-pkg/bin/python python-pkg/lib/libpython3.13.so* python-pkg/lib/python3.13/lib-dynload/*.so
           python3 - <<'EOF'
           import zipfile, os
           # Split the staged tree: shared holds the arch-independent
-          # stdlib .py files; arch holds the native binaries. The dead
-          # libpython3.13.a static library is dropped entirely — the
-          # app runs the shared libpython3.13.so, nothing links the .a.
+          # stdlib .py files; arch holds native binaries + per-arch
+          # _sysconfigdata (so 64-bit never misses its sysconfigdata).
+          # Dead build artifacts and desktop-only stdlib modules
+          # (idlelib, tkinter, turtledemo, ensurepip, pydoc_data, config-*)
+          # are dropped to keep the APK lean and extraction fast.
+          drop_dirs = (
+              '/config-', '/idlelib/', '/tkinter/', '/turtledemo/',
+              '/ensurepip/', '/pydoc_data/', '/test/', '/unittest/'
+          )
           def bucket(rel):
-              if rel.endswith('libpython3.13.a'):
+              if rel.endswith(('.a', '.o')):
+                  return None
+              if any(d in rel for d in drop_dirs):
                   return None
               if rel.startswith('bin/'):
                   return 'arch'
-              if rel.endswith('.so'):
+              if rel.endswith('.so') or '/lib-dynload/' in rel:
                   return 'arch'
-              if '/lib-dynload/' in rel or '/config-' in rel:
+              if '_sysconfigdata' in rel:
                   return 'arch'
               return 'shared'
           shared, arch = [], []
@@ -454,7 +481,7 @@ jobs:
           print('shared entries:', len(shared), 'arch entries:', len(arch))
           EOF
           ls -la python-shared.zip python32.zip
-          python3 -c "import zipfile; s=set(zipfile.ZipFile('python-shared.zip').namelist()); a=set(zipfile.ZipFile('python32.zip').namelist()); print('overlap:', s & a); print('has .a:', any(x.endswith('.a') for x in s | a)); print('arch has bin/python:', 'bin/python' in a, '| arch has libpython:', any('libpython3.13.so' in x for x in a))"
+          python3 -c "import zipfile; s=set(zipfile.ZipFile('python-shared.zip').namelist()); a=set(zipfile.ZipFile('python32.zip').namelist()); assert not (s & a); assert not any('_sysconfigdata' in x for x in s), 'sysconfigdata leaked into shared'; assert any('_sysconfigdata' in x for x in a), 'sysconfigdata missing from python32'; print('OK: bin/python:', 'bin/python' in a, 'libpython:', any('libpython3.13.so' in x for x in a))"
       - uses: actions/upload-artifact@v4
         with:
           name: python-shared-zip
@@ -568,7 +595,7 @@ jobs:
           CC="$NDK_BIN/aarch64-linux-android21-clang" \
             AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
             CFLAGS="-I$PWD/../deps-install-64/openssl/include -I$PWD/../deps-install-64/libffi/include -I$PWD/../deps-install-64/xz/include" \
-            LDFLAGS="-L$PWD/../deps-install-64/openssl/lib -L$PWD/../deps-install-64/openssl/lib64 -L$PWD/../deps-install-64/libffi/lib -L$PWD/../deps-install-64/xz/lib" \
+            LDFLAGS="-L$PWD/../deps-install-64/openssl/lib -L$PWD/../deps-install-64/openssl/lib64 -L$PWD/../deps-install-64/libffi/lib -L$PWD/../deps-install-64/xz/lib -Wl,-z,max-page-size=16384" \
             ../cpython-target/configure \
             --host=aarch64-linux-android \
             --build=x86_64-linux-gnu \
@@ -587,24 +614,31 @@ jobs:
           ls target-install/lib/python3.13/lib-dynload/ | head -40
       - name: Package python zip (64-bit arch only)
         run: |
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           mkdir -p python-pkg/bin python-pkg/lib
           cp target-install/bin/python3.13 python-pkg/bin/python
           cp -r target-install/lib/python3.13 python-pkg/lib/
           cp target-install/lib/libpython3.13.so* python-pkg/lib/
           find python-pkg -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+          "$NDK_BIN/llvm-strip" --strip-unneeded python-pkg/bin/python python-pkg/lib/libpython3.13.so* python-pkg/lib/python3.13/lib-dynload/*.so
           python3 - <<'EOF'
           import zipfile, os
-          # Same split as the 32-bit job, but only the arch zip is
-          # produced here — the shared stdlib zip comes from that job.
-          # The dead libpython3.13.a is dropped, same as there.
+          # Same split as the 32-bit job, including 64-bit _sysconfigdata
+          # so sysconfig works on arm64-v8a devices.
+          drop_dirs = (
+              '/config-', '/idlelib/', '/tkinter/', '/turtledemo/',
+              '/ensurepip/', '/pydoc_data/', '/test/', '/unittest/'
+          )
           def bucket(rel):
-              if rel.endswith('libpython3.13.a'):
+              if rel.endswith(('.a', '.o')):
+                  return None
+              if any(d in rel for d in drop_dirs):
                   return None
               if rel.startswith('bin/'):
                   return 'arch'
-              if rel.endswith('.so'):
+              if rel.endswith('.so') or '/lib-dynload/' in rel:
                   return 'arch'
-              if '/lib-dynload/' in rel or '/config-' in rel:
+              if '_sysconfigdata' in rel:
                   return 'arch'
               return 'shared'
           arch = []
@@ -620,7 +654,7 @@ jobs:
           print('arch entries:', len(arch))
           EOF
           ls -la python64.zip
-          python3 -c "import zipfile; a=set(zipfile.ZipFile('python64.zip').namelist()); print('has .a:', any(x.endswith('.a') for x in a)); print('arch has bin/python:', 'bin/python' in a, '| arch has libpython:', any('libpython3.13.so' in x for x in a))"
+          python3 -c "import zipfile; a=set(zipfile.ZipFile('python64.zip').namelist()); assert any('_sysconfigdata' in x for x in a), 'sysconfigdata missing from python64'; print('OK: bin/python:', 'bin/python' in a, 'libpython:', any('libpython3.13.so' in x for x in a))"
       - uses: actions/upload-artifact@v4
         with:
           name: python-zip-64

@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -150,12 +151,25 @@ class PlayerActivity : AppCompatActivity() {
             playAt(position)
         }
         if (ContextCompat.checkSelfPermission(
-                this, Manifest.permission.READ_EXTERNAL_STORAGE
+                this, audioReadPermission()
             ) == PackageManager.PERMISSION_GRANTED
         ) {
             loadFiles()
         } else {
-            permissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+            permissionLauncher.launch(audioReadPermission())
+        }
+    }
+
+    /**
+     * Android 13+ (API 33+) replaced READ_EXTERNAL_STORAGE (which has
+     * maxSdkVersion=32 in the manifest and auto-denies on API 33+) with
+     * granular READ_MEDIA_AUDIO.
+     */
+    private fun audioReadPermission(): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
         }
     }
 
@@ -169,7 +183,7 @@ class PlayerActivity : AppCompatActivity() {
         // screen was last open must show up without restarting the
         // app — the old onCreate-only scan left a stale empty list.
         if (ContextCompat.checkSelfPermission(
-                this, Manifest.permission.READ_EXTERNAL_STORAGE
+                this, audioReadPermission()
             ) == PackageManager.PERMISSION_GRANTED
         ) {
             loadFiles()
@@ -223,9 +237,11 @@ class PlayerActivity : AppCompatActivity() {
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
             "GrabAll"
         )
-        dir.listFiles()
-            ?.filter { it.isFile && isAudio(it.name) }
-            ?.let { found.addAll(it) }
+        if (dir.isDirectory) {
+            dir.walkTopDown()
+                .filter { it.isFile && isAudio(it.name) }
+                .forEach { found.add(it) }
+        }
         files = found.distinctBy { it.absolutePath }
             .sortedByDescending { it.lastModified() }
         if (files.isEmpty()) {

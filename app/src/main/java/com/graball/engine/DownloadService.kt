@@ -124,16 +124,22 @@ class DownloadService : Service() {
             null
         }
         val uri = MediaStorePublisher.publish(this, file, file.name, subfolder)
-        val ok = uri != null
-        if (ok) {
+        if (uri != null) {
             session.publishedPaths.add(file.absolutePath)
-            // Same sanitizing the publisher applies, so the recorded
-            // path always matches where the file actually landed.
-            val safeFolder = subfolder?.let { MediaStorePublisher.sanitizeSubfolder(it) }
-            val rel = if (safeFolder != null) "$safeFolder/${file.name}" else file.name
-            session.publishedRelPaths.add(rel)
+            // On Android 10+ (scoped storage), keep the MediaStore
+            // content:// URI directly so Open works without storage
+            // permission and even if MediaStore auto-renamed a duplicate.
+            // On Android 5-9, keep the relative path under Downloads/GrabAll.
+            if (uri.scheme == "content") {
+                session.publishedRelPaths.add(uri.toString())
+            } else {
+                val safeFolder = subfolder?.let { MediaStorePublisher.sanitizeSubfolder(it) }
+                val rel = if (safeFolder != null) "$safeFolder/${file.name}" else file.name
+                session.publishedRelPaths.add(rel)
+            }
+            return true
         }
-        return ok
+        return false
     }
 
     /**
@@ -175,6 +181,10 @@ class DownloadService : Service() {
      * would have survived: one tap resumes from the .part file.
      */
     private fun registerNetworkCallback() {
+        // registerDefaultNetworkCallback requires API 24 (Android 7.0+);
+        // calling it on API 21-23 throws NoSuchMethodError (an Error, not
+        // an Exception) and crashes on Android 5/6 devices.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         val manager =
             getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
                 ?: return
@@ -195,19 +205,20 @@ class DownloadService : Service() {
         networkCallback = callback
         try {
             manager.registerDefaultNetworkCallback(callback)
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             networkCallback = null
         }
     }
 
     private fun unregisterNetworkCallback() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         val callback = networkCallback ?: return
         networkCallback = null
         try {
             val manager =
                 getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             manager?.unregisterNetworkCallback(callback)
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
         }
     }
 
@@ -294,11 +305,17 @@ class DownloadService : Service() {
             outputTemplate, audioOnly, maxHeight, playlistMode
         )
         // The network this download starts on: a switch away from it
-        // auto-pauses (see registerNetworkCallback).
-        startNetwork = try {
-            (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)
-                ?.activeNetwork
-        } catch (_: Exception) {
+        // auto-pauses (see registerNetworkCallback). activeNetwork is
+        // API 23+ (Android 6.0+), so guard it to avoid NoSuchMethodError
+        // on Android 5.0/5.1.
+        startNetwork = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)
+                    ?.activeNetwork
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
             null
         }
 
@@ -350,7 +367,10 @@ class DownloadService : Service() {
                         ytDlpScript = RuntimePaths.ytDlpScript(this),
                         ffmpegDir = RuntimePaths.ffmpegDir(this),
                         quickJsBinary = RuntimePaths.quickJsBinary(this),
-                        cookiesFile = cookies
+                        cookiesFile = cookies,
+                        cacheDir = cacheDir,
+                        homeDir = filesDir,
+                        certFile = RuntimePaths.certFile(this)
                     )
                     session.runner = newRunner
                     newRunner.download(
@@ -692,7 +712,12 @@ class DownloadService : Service() {
                 )
             }
             val cap = if (maxHeight != null) "[height<=$maxHeight]" else ""
-            val format = "bestvideo$cap[vcodec^=avc1]+bestaudio/" +
+            // Prefer H.264 (avc1) + AAC (m4a) first so the remuxed MP4
+            // plays with hardware video AND working audio on every device
+            // from Android 5 through Android 16 (older players fail on
+            // Opus-in-MP4), falling back cleanly to any audio/video.
+            val format = "bestvideo$cap[vcodec^=avc1]+bestaudio[ext=m4a]/" +
+                "bestvideo$cap[vcodec^=avc1]+bestaudio/" +
                 "best$cap[vcodec^=avc1]/best$cap/best"
             return listOf("-f", format, "--remux-video", "mp4")
         }
@@ -715,16 +740,21 @@ class DownloadService : Service() {
             }
         }
 
-        /** Cancel one download, addressed by its URL. */
+        /**
+         * Cancel one download, addressed by its URL.
+         * Uses startService (not startForegroundService): onStartCommand
+         * returns early for control actions without calling startForeground(),
+         * which would throw ForegroundServiceDidNotStartInTimeException on
+         * Android 8+ if startForegroundService were used when idle.
+         */
         fun cancel(context: Context, url: String) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 action = ACTION_CANCEL
                 putExtra(EXTRA_URL, url)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
+            try {
                 context.startService(intent)
+            } catch (_: Exception) {
             }
         }
 
@@ -734,10 +764,9 @@ class DownloadService : Service() {
                 action = ACTION_PAUSE
                 putExtra(EXTRA_URL, url)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
+            try {
                 context.startService(intent)
+            } catch (_: Exception) {
             }
         }
 
@@ -747,10 +776,9 @@ class DownloadService : Service() {
                 action = ACTION_RESUME
                 putExtra(EXTRA_URL, url)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
+            try {
                 context.startService(intent)
+            } catch (_: Exception) {
             }
         }
     }

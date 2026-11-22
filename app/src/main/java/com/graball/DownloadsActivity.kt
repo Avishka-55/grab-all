@@ -352,12 +352,29 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
     }
 
     /** Open a finished download in the device's default app for its
-     * type (video player, music player, …). [relPath] is relative to
-     * Downloads/GrabAll, as recorded on the row. */
-    private fun openOutput(relPath: String) {
+     * type (video player, music player, …). [output] is either a
+     * MediaStore content:// URI (Android 10+) or a path relative to
+     * Downloads/GrabAll (Android 5-9 and older history entries). */
+    private fun openOutput(output: String) {
+        if (output.startsWith("content://")) {
+            try {
+                val uri = Uri.parse(output)
+                val mime = contentResolver.getType(uri) ?: "*/*"
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(intent)
+            } catch (_: Exception) {
+                Toast.makeText(
+                    this, getString(R.string.queue_open_failed), Toast.LENGTH_SHORT
+                ).show()
+            }
+            return
+        }
         val file = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            "GrabAll/$relPath"
+            "GrabAll/$output"
         )
         if (!file.isFile) {
             Toast.makeText(

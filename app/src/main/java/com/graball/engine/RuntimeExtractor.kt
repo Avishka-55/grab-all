@@ -72,52 +72,78 @@ object RuntimeExtractor {
         val executables: List<String>
     )
 
-    /** True on 64-bit ARM devices (arm64-v8a); false on 32-bit ARM. */
-    private val IS_64_BIT: Boolean =
-        android.os.Build.SUPPORTED_ABIS.any { it == "arm64-v8a" }
+    /**
+     * Device ABI supported by the bundled runtimes, or null on non-ARM
+     * devices (e.g. x86/x86_64 emulators without ARM translation).
+     * Prefers 64-bit ARM (arm64-v8a) whenever available, falling back
+     * to 32-bit ARM (armeabi-v7a) on 32-bit devices.
+     */
+    private val DEVICE_ABI: String? = run {
+        val abis = android.os.Build.SUPPORTED_ABIS
+        when {
+            abis.any { it == "arm64-v8a" } -> "arm64-v8a"
+            abis.any { it == "armeabi-v7a" } -> "armeabi-v7a"
+            else -> null
+        }
+    }
 
     /**
-     * Components for this device's ABI. The shared stdlib zip and
-     * yt-dlp are arch-independent; the native sets (python, qjs,
-     * ffmpeg) come in a 32-bit and a 64-bit variant. All variants
-     * unzip into the same directories, so nothing downstream of
-     * extraction cares which ABI was picked. The shared zip must
-     * extract before the arch python zip (both land in "python").
+     * Components for [abi]. The shared stdlib zip and yt-dlp are
+     * arch-independent; the native sets (python, qjs, ffmpeg) come in
+     * a 32-bit and a 64-bit variant. All variants unzip into the same
+     * directories, so nothing downstream of extraction cares which ABI
+     * was picked. The shared zip must extract before the arch python
+     * zip (both land in "python").
      */
-    private fun componentsForAbi(): List<Component> {
+    private fun componentsForAbi(abi: String): List<Component> {
+        val is64Bit = abi == "arm64-v8a"
         val pythonZip =
-            if (IS_64_BIT) "runtime/python64.zip" else "runtime/python32.zip"
+            if (is64Bit) "runtime/python64.zip" else "runtime/python32.zip"
         val qjsZip =
-            if (IS_64_BIT) "runtime/qjs64.zip" else "runtime/qjs32.zip"
+            if (is64Bit) "runtime/qjs64.zip" else "runtime/qjs32.zip"
         val ffmpegZip =
-            if (IS_64_BIT) "runtime/ffmpeg64.zip" else "runtime/ffmpeg32.zip"
+            if (is64Bit) "runtime/ffmpeg64.zip" else "runtime/ffmpeg32.zip"
         return listOf(
             Component("runtime/python-shared.zip", "python", emptyList()),
             Component(pythonZip, "python", listOf("bin/python")),
             Component("runtime/ytdlp.zip", "ytdlp", emptyList()),
             Component(qjsZip, "qjs", listOf("bin/qjs")),
-            Component(ffmpegZip, "ffmpeg", listOf("bin/ffmpeg"))
+            Component(ffmpegZip, "ffmpeg", listOf("bin/ffmpeg", "bin/ffprobe"))
         )
     }
 
     /**
-     * Extract all components if the bundled [version] differs from the
-     * marker file. [onProgress] receives 0..1 as each component finishes.
-     * Returns true when the runtime is ready (already extracted or freshly
-     * extracted), false on any failure.
+     * Extract all components if the bundled [version] (plus device ABI)
+     * differs from the marker file. [onProgress] receives 0..1 as each
+     * component finishes. Returns true when the runtime is ready (already
+     * extracted or freshly extracted), false on any failure.
+     *
+     * Synchronized so two downloads started back-to-back on first launch
+     * cannot race and delete runtimeDir out from under each other.
      */
+    @Synchronized
     fun extractIfNeeded(
         context: Context,
         version: String,
         onProgress: ((Float) -> Unit)? = null
     ): Boolean {
+        val abi = DEVICE_ABI
+        if (abi == null) {
+            val reported = android.os.Build.SUPPORTED_ABIS.joinToString()
+            lastError = "Unsupported CPU architecture ($reported). GrabAll requires an ARM device."
+            Log.e(TAG, lastError!!)
+            return false
+        }
         val runtimeDir = RuntimePaths.runtimeDir(context)
         val marker = File(runtimeDir, MARKER)
-        if (marker.exists() && marker.readText().trim() == version) {
+        // Include ABI in the marker so a backup restored from a 32-bit
+        // phone onto a 64-bit phone always re-extracts the right binaries.
+        val expectedMarker = "$version-$abi"
+        if (marker.exists() && marker.readText().trim() == expectedMarker) {
             return true
         }
         lastError = null
-        val components = componentsForAbi()
+        val components = componentsForAbi(abi)
         try {
             if (runtimeDir.exists()) {
                 runtimeDir.deleteRecursively()
@@ -135,13 +161,13 @@ object RuntimeExtractor {
                         if (!ensureExecutable(binary)) {
                             Log.w(TAG, "Could not make executable: " + binary.absolutePath)
                         }
-                    } else {
+                    } else if (relativePath != "bin/ffprobe") {
                         Log.w(TAG, "Expected executable missing: " + binary.absolutePath)
                     }
                 }
                 onProgress?.invoke((index + 1).toFloat() / components.size)
             }
-            marker.writeText(version)
+            marker.writeText(expectedMarker)
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Runtime extraction failed", e)

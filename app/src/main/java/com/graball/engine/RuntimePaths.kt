@@ -41,11 +41,15 @@ object RuntimePaths {
     fun ytDlpScript(context: Context): File =
         File(runtimeDir(context), "ytdlp/yt-dlp")
 
+    /** Bundled CA certificate bundle (certifi) for Python/OpenSSL TLS. */
+    fun certFile(context: Context): File =
+        File(runtimeDir(context), "ytdlp/certifi/cacert.pem")
+
     /** qjs executable, cross-compiled for the device ABI with the NDK. */
     fun quickJsBinary(context: Context): File =
         File(runtimeDir(context), "qjs/bin/qjs")
 
-    /** Directory holding the ffmpeg executable (for --ffmpeg-location). */
+    /** Directory holding the ffmpeg (and optional ffprobe) executables. */
     fun ffmpegDir(context: Context): File =
         File(runtimeDir(context), "ffmpeg/bin")
 

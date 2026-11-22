@@ -6,8 +6,10 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.ThumbnailUtils
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
 import android.util.Size
 import android.view.LayoutInflater
 import android.view.View
@@ -46,14 +48,30 @@ class StatusActivity : AppCompatActivity() {
     private var files: List<File> = emptyList()
 
     private val permissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+            if (results.values.any { it }) {
                 loadStatuses()
             } else {
                 emptyView.text = getString(R.string.status_need_permission)
                 emptyView.visibility = View.VISIBLE
             }
         }
+
+    /**
+     * Android 13+ (API 33+) auto-denies READ_EXTERNAL_STORAGE because of
+     * maxSdkVersion=32 in the manifest; request READ_MEDIA_IMAGES and
+     * READ_MEDIA_VIDEO there instead.
+     */
+    private fun statusReadPermissions(): Array<String> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO
+            )
+        } else {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -89,13 +107,14 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
                 }
             )
         }
-        if (ContextCompat.checkSelfPermission(
-                this, Manifest.permission.READ_EXTERNAL_STORAGE
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
+        val perms = statusReadPermissions()
+        val hasAll = perms.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+        if (hasAll) {
             loadStatuses()
         } else {
-            permissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+            permissionLauncher.launch(perms)
         }
     }
 
@@ -212,7 +231,18 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
         private fun thumbnailFor(file: File): Bitmap? {
             return try {
                 if (isVideo(file.name)) {
-                    ThumbnailUtils.createVideoThumbnail(file, Size(400, 400), null)
+                    // createVideoThumbnail(File, Size, CancellationSignal) is
+                    // API 29+ (Android 10+); older Android 5-9 devices throw
+                    // NoSuchMethodError unless we use the legacy overload.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        ThumbnailUtils.createVideoThumbnail(file, Size(400, 400), null)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        ThumbnailUtils.createVideoThumbnail(
+                            file.absolutePath,
+                            MediaStore.Images.Thumbnails.MINI_KIND
+                        )
+                    }
                 } else {
                     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     BitmapFactory.decodeFile(file.absolutePath, bounds)
@@ -223,7 +253,7 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
                     BitmapFactory.Options().apply { inSampleSize = sample }
                         .let { BitmapFactory.decodeFile(file.absolutePath, it) }
                 }
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
                 null
             }
         }

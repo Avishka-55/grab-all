@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Exclude extracted native binaries and download staging files from
+     Android Auto Backup (API 23-30). Otherwise restoring a backup from
+     a 32-bit phone onto a 64-bit-only phone would copy 32-bit binaries
+     and waste tens of MB of backup quota. -->
+<full-backup-content>
+    <exclude domain="file" path="runtime" />
+    <exclude domain="file" path="staging" />
+</full-backup-content>

@@ -56,7 +56,10 @@ class YtDlpRunner(
     private val ytDlpScript: File,
     private val ffmpegDir: File?,
     private val quickJsBinary: File?,
-    private val cookiesFile: File?
+    private val cookiesFile: File?,
+    private val cacheDir: File? = null,
+    private val homeDir: File? = null,
+    private val certFile: File? = null
 ) {
     @Volatile
     private var process: Process? = null
@@ -67,13 +70,31 @@ class YtDlpRunner(
      * LD_LIBRARY_PATH pointing at the extracted python lib dir; without
      * it the process dies at startup (and ctypes dies with
      * "libpython3.13.so not found", as seen on device in v0.2.4).
+     *
+     * Also sets PYTHONHOME (so Python never looks at CI's build prefix),
+     * TMPDIR/HOME (Android has no writable /tmp), and SSL_CERT_FILE
+     * (so stdlib ssl/urllib uses bundled certifi certs even on old
+     * Android 5-7 devices with expired system root CAs).
      */
     private fun pythonProcessBuilder(command: List<String>): ProcessBuilder {
         val builder = ProcessBuilder(command)
+        val env = builder.environment()
         val pythonDir = pythonBinary.parentFile?.parentFile
         if (pythonDir != null) {
-            builder.environment()["LD_LIBRARY_PATH"] =
-                File(pythonDir, "lib").absolutePath
+            env["LD_LIBRARY_PATH"] = File(pythonDir, "lib").absolutePath
+            env["PYTHONHOME"] = pythonDir.absolutePath
+        }
+        if (cacheDir != null) {
+            if (!cacheDir.exists()) {
+                cacheDir.mkdirs()
+            }
+            env["TMPDIR"] = cacheDir.absolutePath
+        }
+        if (homeDir != null) {
+            env["HOME"] = homeDir.absolutePath
+        }
+        if (certFile != null && certFile.exists()) {
+            env["SSL_CERT_FILE"] = certFile.absolutePath
         }
         return builder
     }
@@ -87,12 +108,26 @@ class YtDlpRunner(
     ) {
         // The version marker can skip extraction while the bits are
         // wrong (v0.2.0 left a non-executable python binary behind), so
-        // enforce executability on every run, not just during extraction.
+        // enforce executability on every run for python, ffmpeg/ffprobe,
+        // and QuickJS — not just during extraction.
         if (!RuntimeExtractor.ensureExecutable(pythonBinary)) {
             listener.onError(
                 "Python engine not executable: " + pythonBinary.absolutePath
             )
             return
+        }
+        if (quickJsBinary != null && quickJsBinary.exists()) {
+            RuntimeExtractor.ensureExecutable(quickJsBinary)
+        }
+        if (ffmpegDir != null) {
+            val ffmpeg = File(ffmpegDir, "ffmpeg")
+            if (ffmpeg.exists()) {
+                RuntimeExtractor.ensureExecutable(ffmpeg)
+            }
+            val ffprobe = File(ffmpegDir, "ffprobe")
+            if (ffprobe.exists()) {
+                RuntimeExtractor.ensureExecutable(ffprobe)
+            }
         }
         Thread {
             // Declared outside the try so the exception path can

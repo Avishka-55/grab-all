@@ -156,19 +156,28 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         val file = currentFile() ?: return
         releasePlayer()
         requestFocus()
-        player = MediaPlayer().apply {
-            setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build()
-            )
-            setDataSource(file.absolutePath)
-            setOnCompletionListener(this@PlayerService)
-            setOnPreparedListener { it.start(); updateNotification() }
-            prepareAsync()
+        try {
+            val mp = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
+                setDataSource(file.absolutePath)
+                setOnCompletionListener(this@PlayerService)
+                setOnErrorListener { _, _, _ ->
+                    releasePlayer()
+                    true
+                }
+                setOnPreparedListener { it.start(); updateNotification() }
+                prepareAsync()
+            }
+            player = mp
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (_: Exception) {
+            releasePlayer()
         }
-        startForeground(NOTIFICATION_ID, buildNotification())
     }
 
     private fun stopPlayback() {
@@ -245,11 +254,18 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     // ---- Notification ----
 
+    private fun pendingIntentFlags(): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+    }
+
     private fun actionIntent(action: String): PendingIntent {
         val intent = Intent(this, PlayerService::class.java).setAction(action)
         return PendingIntent.getService(
-            this, action.hashCode(), intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            this, action.hashCode(), intent, pendingIntentFlags()
         )
     }
 
@@ -260,7 +276,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
             Intent(this, PlayerActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            pendingIntentFlags()
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
