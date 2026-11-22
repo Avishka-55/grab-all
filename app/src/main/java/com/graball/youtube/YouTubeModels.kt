@@ -35,6 +35,13 @@ data class StreamFormat(
     val isMuxed: Boolean
 )
 
+data class CaptionTrack(
+    val langCode: String,
+    val label: String,
+    val vttUrl: String,
+    val isAuto: Boolean = false
+)
+
 data class VideoStreamInfo(
     val videoId: String,
     val title: String,
@@ -47,7 +54,8 @@ data class VideoStreamInfo(
     val videoStreams: List<StreamFormat>,
     val audioStreams: List<StreamFormat>,
     val muxedStreams: List<StreamFormat>,
-    val userAgent: String
+    val userAgent: String,
+    val captionTracks: List<CaptionTrack> = emptyList()
 ) {
     /** Distinct playable video heights sorted descending (e.g. 1080, 720, 480, 360). */
     fun availableHeights(): List<Int> {

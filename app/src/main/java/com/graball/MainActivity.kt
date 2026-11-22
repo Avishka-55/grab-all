@@ -11,6 +11,8 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -46,6 +48,26 @@ class MainActivity : AppCompatActivity() {
     private lateinit var mainTabs: List<TextView>
     /** What the open Grab panel holds; video panels force single. */
     private var grabbedKind: LinkKind = LinkKind.VIDEO
+
+    private val hintHandler = Handler(Looper.getMainLooper())
+    private val rotatingHints = listOf(
+        "Search YouTube…",
+        "Paste any video URL…",
+        "Search songs or playlists…"
+    )
+    private var hintIdx = 0
+    private val hintCycler = object : Runnable {
+        override fun run() {
+            if (::linkInput.isInitialized && linkInput.text.isNullOrEmpty() && !linkInput.hasFocus()) {
+                hintIdx = (hintIdx + 1) % rotatingHints.size
+                linkInput.animate().alpha(0.35f).setDuration(140L).withEndAction {
+                    linkInput.hint = rotatingHints[hintIdx]
+                    linkInput.animate().alpha(1f).setDuration(180L).start()
+                }.start()
+            }
+            hintHandler.postDelayed(this, 2800L)
+        }
+    }
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -382,6 +404,13 @@ class MainActivity : AppCompatActivity() {
         if (::mainTabs.isInitialized) {
             selectTab(mainTabs[0])
         }
+        hintHandler.removeCallbacks(hintCycler)
+        hintHandler.postDelayed(hintCycler, 2800L)
+    }
+
+    override fun onPause() {
+        hintHandler.removeCallbacks(hintCycler)
+        super.onPause()
     }
 
     /** Add a queue row for [url], or refresh it if one already exists. */

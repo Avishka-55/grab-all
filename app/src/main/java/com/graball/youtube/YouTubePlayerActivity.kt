@@ -149,14 +149,14 @@ class YouTubePlayerActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.actionPip).setOnClickListener { enterPipOrMinimize() }
         findViewById<TextView>(R.id.btnFullscreen).setOnClickListener { toggleFullscreen() }
         btnTopQuality.setOnClickListener { showQualityPicker() }
-        btnTopCaptions.setOnClickListener {
-            val svc = YouTubePlaybackService.instance ?: return@setOnClickListener
-            val next = !YouTubePlaybackService.currentState.captionsEnabled
-            svc.setCaptionsEnabled(next)
-            showHud(if (next) "CC: ON" else "CC: OFF")
-        }
-        // In fullscreen, auto-hide the top overlay (Back / CC / Quality / PiP / Fullscreen)
-        // along with ExoPlayer's controls so it never obstructs the video.
+        btnTopCaptions.setOnClickListener { toggleCaptions() }
+        // Disable PlayerView's own tap-to-toggle so our GestureDetector is the
+        // single source of truth (prevents the double-toggle bug where tapping
+        // to hide immediately re-shows controls!).
+        playerView.controllerHideOnTouch = false
+        playerView.controllerAutoShow = false
+        // In fullscreen, keep the top overlay synced with ExoPlayer's controls
+        // so it cleanly disappears while watching and reappears on tap.
         playerView.setControllerVisibilityListener(
             PlayerView.ControllerVisibilityListener { visibility ->
                 if (inPipMode) {
@@ -193,12 +193,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         actionQuality.setOnClickListener { showQualityPicker() }
         actionSpeed.setOnClickListener { showSpeedPicker() }
-        actionCaptions.setOnClickListener {
-            val svc = YouTubePlaybackService.instance ?: return@setOnClickListener
-            val next = !YouTubePlaybackService.currentState.captionsEnabled
-            svc.setCaptionsEnabled(next)
-            showHud(if (next) "CC: ON" else "CC: OFF")
-        }
+        actionCaptions.setOnClickListener { toggleCaptions() }
 
         actionBookmark.setOnClickListener {
             val item = YouTubePlaybackService.currentState.currentItem ?: return@setOnClickListener
@@ -525,7 +520,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private fun applyChromeVisibility() {
         val hideDetails = inPipMode || isFullscreen
         detailsContainer.visibility = if (hideDetails) View.GONE else View.VISIBLE
-        playerTopOverlay.visibility = if (inPipMode) View.GONE else View.VISIBLE
+        playerTopOverlay.visibility = when {
+            inPipMode -> View.GONE
+            isFullscreen -> if (playerView.isControllerFullyVisible) View.VISIBLE else View.GONE
+            else -> View.VISIBLE
+        }
         playerView.useController = !inPipMode
 
         val params = playerContainer.layoutParams
@@ -579,8 +578,10 @@ class YouTubePlayerActivity : AppCompatActivity() {
                     if (inPipMode) return false
                     if (playerView.isControllerFullyVisible) {
                         playerView.hideController()
+                        if (isFullscreen) playerTopOverlay.visibility = View.GONE
                     } else {
                         playerView.showController()
+                        playerTopOverlay.visibility = View.VISIBLE
                     }
                     return true
                 }
@@ -610,7 +611,10 @@ class YouTubePlayerActivity : AppCompatActivity() {
                     startBrightness = if (curB in 0f..1f) curB else 0.5f
                     startVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                     maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-                    false
+                    // Consume touch on the video surface so PlayerView.onTouchEvent
+                    // doesn't double-toggle controls behind our GestureDetector!
+                    // (Child Play/Pause/SeekBar buttons still handle their own taps.)
+                    true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.x - downX
@@ -648,13 +652,10 @@ class YouTubePlayerActivity : AppCompatActivity() {
                                 showHud("↑ Release for Fullscreen")
                             }
                         }
-                        true
-                    } else {
-                        false
                     }
+                    true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val consumed = draggingVertical
                     if (draggingVertical && !isFullscreen && event.actionMasked == MotionEvent.ACTION_UP) {
                         if (lastDy < -portraitSwipeThresholdPx) {
                             enterPipOrMinimize()
@@ -664,9 +665,9 @@ class YouTubePlayerActivity : AppCompatActivity() {
                     }
                     draggingVertical = false
                     lastDy = 0f
-                    consumed
+                    true
                 }
-                else -> false
+                else -> true
             }
         }
     }
@@ -678,32 +679,61 @@ class YouTubePlayerActivity : AppCompatActivity() {
         mainHandler.postDelayed(hideHudRunnable, 900L)
     }
 
+    private fun toggleCaptions() {
+        val svc = YouTubePlaybackService.instance ?: return
+        val next = !YouTubePlaybackService.currentState.captionsEnabled
+        if (next && !svc.hasAnyCaptions()) {
+            showHud("No captions available for this video")
+            return
+        }
+        svc.setCaptionsEnabled(next)
+        showHud(if (next) "CC: ON" else "CC: OFF")
+    }
+
     // ---- Quality & Speed Pickers ----
 
     private fun showQualityPicker() {
         val svc = YouTubePlaybackService.instance ?: return
-        val heights = YouTubePlaybackService.currentState.streamInfo?.availableHeights()
-            ?.ifEmpty { listOf(1080, 720, 480, 360) }
-            ?: listOf(1080, 720, 480, 360)
-        val labels = mutableListOf("Auto", "Audio only (battery saver)")
-        heights.forEach { labels.add("${it}p") }
+        val heights = svc.availableVideoHeights()
+            .ifEmpty { listOf(1080, 720, 480, 360) }
+        val state = YouTubePlaybackService.currentState
+        val labels = mutableListOf(
+            if (!state.isAudioOnly && state.selectedHeight == null) "✓ Auto" else "Auto",
+            if (state.isAudioOnly) "✓ Audio only (battery saver)" else "Audio only (battery saver)"
+        )
+        heights.forEach { h ->
+            val mark = if (!state.isAudioOnly && state.selectedHeight == h) "✓ " else ""
+            labels.add("$mark${h}p")
+        }
 
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle("Video Quality")
             .setItems(labels.toTypedArray()) { _, which ->
                 when (which) {
                     0 -> {
                         svc.setAudioOnlyMode(false)
                         svc.setQuality(null)
+                        showHud("Quality: Auto")
                     }
-                    1 -> svc.setAudioOnlyMode(true)
+                    1 -> {
+                        svc.setAudioOnlyMode(true)
+                        showHud("Audio Only")
+                    }
                     else -> {
+                        val h = heights[which - 2]
                         svc.setAudioOnlyMode(false)
-                        svc.setQuality(heights[which - 2])
+                        svc.setQuality(h)
+                        showHud("Quality: ${h}p")
                     }
                 }
             }
-            .show()
+            .setOnDismissListener {
+                if (isFullscreen && !inPipMode) {
+                    applyChromeVisibility()
+                }
+            }
+            .create()
+        dialog.show()
     }
 
     private fun showSpeedPicker() {

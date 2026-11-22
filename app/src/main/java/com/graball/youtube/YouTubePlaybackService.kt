@@ -20,6 +20,7 @@ import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -32,8 +33,10 @@ import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.MediaStyleNotificationHelper
@@ -475,6 +478,30 @@ class YouTubePlaybackService : MediaSessionService() {
         broadcastState()
     }
 
+    /** True if the active stream has any subtitle/caption track (either HLS-embedded or WebVTT). */
+    fun hasAnyCaptions(): Boolean {
+        if (currentStreamInfo?.captionTracks?.isNotEmpty() == true) return true
+        val p = player ?: return false
+        return p.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
+    }
+
+    /** Real playable video heights detected from ExoPlayer tracks + stream metadata. */
+    fun availableVideoHeights(): List<Int> {
+        val heights = mutableSetOf<Int>()
+        currentStreamInfo?.availableHeights()?.let { heights.addAll(it) }
+        val p = player
+        if (p != null) {
+            for (group in p.currentTracks.groups) {
+                if (group.type != C.TRACK_TYPE_VIDEO) continue
+                for (i in 0 until group.length) {
+                    val h = group.getTrackFormat(i).height
+                    if (h in 144..2160) heights.add(h)
+                }
+            }
+        }
+        return heights.sortedDescending()
+    }
+
     fun setQuality(height: Int?) {
         selectedHeight = height
         YouTubeStore.setDefaultHeight(this, height ?: 0)
@@ -694,6 +721,23 @@ class YouTubePlaybackService : MediaSessionService() {
             .setArtworkUri(info.thumbnailUrl.takeIf { it.startsWith("http") }?.let { Uri.parse(it) })
             .build()
 
+        fun attachSubtitles(baseSource: MediaSource): MediaSource {
+            val tracks = info.captionTracks
+            if (tracks.isEmpty()) return baseSource
+            val subSources = tracks.take(4).mapIndexed { idx, cap ->
+                val subConfig = MediaItem.SubtitleConfiguration.Builder(Uri.parse(cap.vttUrl))
+                    .setMimeType(MimeTypes.TEXT_VTT)
+                    .setLanguage(cap.langCode)
+                    .setLabel(cap.label)
+                    .setSelectionFlags(if (idx == 0) C.SELECTION_FLAG_DEFAULT else 0)
+                    .build()
+                SingleSampleMediaSource.Factory(httpFactory)
+                    .createMediaSource(subConfig, C.TIME_UNSET)
+            }
+            val all = arrayOf(baseSource) + subSources.toTypedArray()
+            return MergingMediaSource(*all)
+        }
+
         // 1) HLS first when available
         if (StreamMode.HLS !in attemptedModes && !info.hlsUrl.isNullOrBlank()) {
             attemptedModes.add(StreamMode.HLS)
@@ -702,7 +746,7 @@ class YouTubePlaybackService : MediaSessionService() {
                 .setUri(info.hlsUrl)
                 .setMediaMetadata(meta)
                 .build()
-            val src = HlsMediaSource.Factory(dsFactory).createMediaSource(item)
+            val src = attachSubtitles(HlsMediaSource.Factory(dsFactory).createMediaSource(item))
             applyTrackSelection()
             p.setMediaSource(src, resumePosMs)
             p.setPlaybackSpeed(playbackSpeed)
@@ -727,8 +771,9 @@ class YouTubePlaybackService : MediaSessionService() {
                 .build()
             val vSrc = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(vItem)
             val aSrc = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(aItem)
+            val merged = attachSubtitles(MergingMediaSource(vSrc, aSrc))
             applyTrackSelection()
-            p.setMediaSource(MergingMediaSource(vSrc, aSrc), resumePosMs)
+            p.setMediaSource(merged, resumePosMs)
             p.setPlaybackSpeed(playbackSpeed)
             p.prepare()
             p.playWhenReady = playImmediately
@@ -744,7 +789,7 @@ class YouTubePlaybackService : MediaSessionService() {
                 .setUri(muxed.url)
                 .setMediaMetadata(meta)
                 .build()
-            val src = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(item)
+            val src = attachSubtitles(ProgressiveMediaSource.Factory(dsFactory).createMediaSource(item))
             applyTrackSelection()
             p.setMediaSource(src, resumePosMs)
             p.setPlaybackSpeed(playbackSpeed)
@@ -758,14 +803,24 @@ class YouTubePlaybackService : MediaSessionService() {
 
     private fun applyTrackSelection() {
         val p = player ?: return
-        val maxH = selectedHeight ?: 720
+        val chosen = selectedHeight
         val builder = p.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, isAudioOnly)
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !captionsEnabled)
             .setPreferredVideoMimeType("video/avc")
-            .setMaxVideoSize(Int.MAX_VALUE, maxH)
-        if (captionsEnabled) {
-            builder.setPreferredTextLanguage("en")
+        if (chosen != null) {
+            // Explicit resolution picked (e.g. 1080p, 720p, 480p, 360p):
+            // force highest bitrate within <= chosen height so HLS actually switches!
+            builder
+                .setMaxVideoSize(Int.MAX_VALUE, chosen)
+                .setMinVideoSize(0, (chosen * 0.7f).toInt())
+                .setForceHighestSupportedBitrate(true)
+        } else {
+            // Auto mode: smooth adaptive switching up to 720p/1080p
+            builder
+                .setMaxVideoSize(Int.MAX_VALUE, 1080)
+                .setMinVideoSize(0, 0)
+                .setForceHighestSupportedBitrate(false)
         }
         p.trackSelectionParameters = builder.build()
     }

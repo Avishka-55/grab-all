@@ -380,6 +380,7 @@ object YouTubeInnerTube {
         val description = details?.optString("shortDescription").orEmpty()
         val thumb = pickThumb(details?.optJSONObject("thumbnail"))
             .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
+        val captions = parseInnerTubeCaptions(root)
 
         return ResolveResult(
             VideoStreamInfo(
@@ -394,8 +395,36 @@ object YouTubeInnerTube {
                 videoStreams = videoStreams,
                 audioStreams = audioStreams,
                 muxedStreams = muxedStreams,
-                userAgent = userAgent
+                userAgent = userAgent,
+                captionTracks = captions
             )
+        )
+    }
+
+    private fun parseInnerTubeCaptions(root: JSONObject): List<CaptionTrack> {
+        val arr = root.optJSONObject("captions")
+            ?.optJSONObject("playerCaptionsTracklistRenderer")
+            ?.optJSONArray("captionTracks")
+            ?: return emptyList()
+        val out = mutableListOf<CaptionTrack>()
+        for (i in 0 until arr.length()) {
+            val c = arr.optJSONObject(i) ?: continue
+            val baseUrl = c.optString("baseUrl")
+            if (!baseUrl.startsWith("http")) continue
+            val vttUrl = if (baseUrl.contains("fmt=")) {
+                baseUrl.replace(Regex("fmt=[^&]+"), "fmt=vtt")
+            } else {
+                "$baseUrl&fmt=vtt"
+            }
+            val lang = c.optString("languageCode").ifBlank { "und" }
+            val label = extractText(c.optJSONObject("name")).ifBlank { lang }
+            val isAuto = c.optString("kind") == "asr"
+            out.add(CaptionTrack(langCode = lang, label = label, vttUrl = vttUrl, isAuto = isAuto))
+        }
+        // Prefer manual tracks first, then English tracks first
+        return out.sortedWith(
+            compareBy<CaptionTrack> { it.isAuto }
+                .thenByDescending { it.langCode.startsWith("en", ignoreCase = true) }
         )
     }
 
@@ -521,6 +550,8 @@ object YouTubeInnerTube {
                 return ResolveResult(null, "No playable formats found")
             }
 
+            val captions = parseYtDlpCaptions(root)
+
             ResolveResult(
                 VideoStreamInfo(
                     videoId = videoId,
@@ -535,13 +566,43 @@ object YouTubeInnerTube {
                     videoStreams = videoStreams,
                     audioStreams = audioStreams,
                     muxedStreams = muxedStreams,
-                    userAgent = detectedUa
+                    userAgent = detectedUa,
+                    captionTracks = captions
                 )
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed parsing yt-dlp JSON", e)
             ResolveResult(null, e.message ?: "Stream parse failed")
         }
+    }
+
+    private fun parseYtDlpCaptions(root: JSONObject): List<CaptionTrack> {
+        val out = mutableListOf<CaptionTrack>()
+        fun collect(obj: JSONObject?, isAuto: Boolean) {
+            if (obj == null) return
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val lang = keys.next()
+                val arr = obj.optJSONArray(lang) ?: continue
+                for (i in 0 until arr.length()) {
+                    val fmt = arr.optJSONObject(i) ?: continue
+                    if (fmt.optString("ext") == "vtt") {
+                        val u = fmt.optString("url")
+                        if (u.startsWith("http")) {
+                            val name = fmt.optString("name").ifBlank { lang }
+                            out.add(CaptionTrack(lang, name, u, isAuto))
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        collect(root.optJSONObject("subtitles"), isAuto = false)
+        collect(root.optJSONObject("automatic_captions"), isAuto = true)
+        return out.sortedWith(
+            compareBy<CaptionTrack> { it.isAuto }
+                .thenByDescending { it.langCode.startsWith("en", ignoreCase = true) }
+        )
     }
 
     // ---- HTTP & JSON Traversal Helpers ----

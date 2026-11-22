@@ -243,12 +243,16 @@
                     android:layout_gravity="center_vertical"
                     android:layout_weight="1"
                     android:background="@null"
-                    android:hint="Search YouTube or paste URL…"
+                    android:ellipsize="end"
+                    android:hint="Search YouTube…"
                     android:imeOptions="actionSearch"
                     android:inputType="text"
                     android:maxLines="1"
+                    android:paddingEnd="8dp"
+                    android:singleLine="true"
                     android:textColor="@color/graball_text"
-                    android:textColorHint="@color/graball_tab_text" />
+                    android:textColorHint="@color/graball_tab_text"
+                    android:textSize="13sp" />
 
                 <Button
                     android:id="@+id/grabButton"
