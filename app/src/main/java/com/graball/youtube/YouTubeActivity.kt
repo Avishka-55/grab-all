@@ -280,6 +280,19 @@ class YouTubeActivity : AppCompatActivity() {
             selectTab(Tab.EXPLORE)
             return true
         }
+        if (!currentQuery.isNullOrBlank()) {
+            searchClear.performClick()
+            return true
+        }
+        // If YouTubeActivity became the task root (e.g. after returning from
+        // background/notification), bring MainActivity back instead of exiting!
+        if (isTaskRoot) {
+            startActivity(
+                Intent(this, com.graball.MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+            )
+        }
         finish()
         return true
     }

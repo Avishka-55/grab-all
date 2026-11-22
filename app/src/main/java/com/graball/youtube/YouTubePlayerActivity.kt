@@ -138,7 +138,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
             if (isFullscreen) {
                 toggleFullscreen()
             } else {
-                finish()
+                navigateBackCleanly()
             }
         }
         findViewById<TextView>(R.id.btnTopPip).setOnClickListener { enterPipOrMinimize() }
@@ -315,8 +315,20 @@ class YouTubePlayerActivity : AppCompatActivity() {
         if (isFullscreen) {
             toggleFullscreen()
         } else {
-            super.onBackPressed()
+            navigateBackCleanly()
         }
+    }
+
+    /** Never trap the user or exit to launcher if this player became task root. */
+    private fun navigateBackCleanly() {
+        if (isTaskRoot) {
+            startActivity(
+                Intent(this, com.graball.MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+            )
+        }
+        finish()
     }
 
     // ---- State Binding ----

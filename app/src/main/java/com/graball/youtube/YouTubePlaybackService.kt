@@ -107,6 +107,7 @@ class YouTubePlaybackService : MediaSessionService() {
     private var currentArtworkUrl: String? = null
     private var isForegroundActive = false
     private var loadGeneration = 0
+    private var currentTrackStartedPlaying = false
 
     private val sponsorTicker = object : Runnable {
         override fun run() {
@@ -164,6 +165,7 @@ class YouTubePlaybackService : MediaSessionService() {
                 addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         if (isPlaying) {
+                            currentTrackStartedPlaying = true
                             startSponsorTicker()
                         } else {
                             stopSponsorTicker()
@@ -184,8 +186,13 @@ class YouTubePlaybackService : MediaSessionService() {
                         Log.e(TAG, "ExoPlayer error ($currentStreamMode): ${error.message}", error)
                         // Automatically cascade through alternative stream modes
                         // (HLS -> Adaptive Merge -> Muxed) before surfacing an error.
+                        // Only resume from currentPosition if THIS track already started playing!
                         val info = currentStreamInfo
-                        val pos = player?.currentPosition?.coerceAtLeast(0L) ?: 0L
+                        val pos = if (currentTrackStartedPlaying) {
+                            player?.currentPosition?.coerceAtLeast(0L) ?: 0L
+                        } else {
+                            0L
+                        }
                         if (info != null && tryNextStreamMode(info, pos, playImmediately = true)) {
                             return
                         }
@@ -377,7 +384,7 @@ class YouTubePlaybackService : MediaSessionService() {
         if (queueIndex + 1 in queue.indices) {
             saveCurrentProgress()
             queueIndex++
-            loadAtIndex(queueIndex)
+            loadAtIndex(queueIndex, startFromBeginning = true)
             return true
         }
         // If user hit Next before background related-videos queue finished loading,
@@ -395,7 +402,7 @@ class YouTubePlaybackService : MediaSessionService() {
                     if (added > 0 && queueIndex + 1 in queue.indices) {
                         saveCurrentProgress()
                         queueIndex++
-                        loadAtIndex(queueIndex)
+                        loadAtIndex(queueIndex, startFromBeginning = true)
                     }
                 }
             }
@@ -413,7 +420,7 @@ class YouTubePlaybackService : MediaSessionService() {
         if (queueIndex - 1 in queue.indices) {
             saveCurrentProgress()
             queueIndex--
-            loadAtIndex(queueIndex)
+            loadAtIndex(queueIndex, startFromBeginning = true)
             return true
         }
         return false
@@ -440,8 +447,11 @@ class YouTubePlaybackService : MediaSessionService() {
         p.seekTo(positionMs.coerceIn(0L, dur))
     }
 
-    fun positionMs(): Long = player?.currentPosition?.coerceAtLeast(0L) ?: 0L
-    fun durationMs(): Long = player?.duration?.takeIf { it > 0L } ?: 0L
+    fun positionMs(): Long =
+        if (isLoading) 0L else (player?.currentPosition?.coerceAtLeast(0L) ?: 0L)
+
+    fun durationMs(): Long =
+        if (isLoading) 0L else (player?.duration?.takeIf { it > 0L } ?: 0L)
     fun audioSessionId(): Int = player?.audioSessionId ?: 0
 
     fun seekBy(deltaMs: Long) {
@@ -518,12 +528,15 @@ class YouTubePlaybackService : MediaSessionService() {
 
     // ---- Stream Loading Internals ----
 
-    private fun loadAtIndex(index: Int) {
+    private fun loadAtIndex(index: Int, startFromBeginning: Boolean = false) {
         val item = queue.getOrNull(index) ?: return
         playedVideoIds.add(item.id)
         com.graball.PlayerService.instance?.pauseIfPlaying()
         val gen = ++loadGeneration
+        currentTrackStartedPlaying = false
         player?.stop()
+        player?.clearMediaItems()
+        player?.seekTo(0L)
         isLoading = true
         loadingStatus = "Connecting to YouTube…"
         lastError = null
@@ -568,8 +581,12 @@ class YouTubePlaybackService : MediaSessionService() {
                     if (index in queue.indices) {
                         queue[index] = enriched
                     }
-                    val savedPos = YouTubeStore.getSavedPosition(applicationContext, item.id)
-                    val resumePos = if (info.durationSec > 30 &&
+                    val savedPos = if (startFromBeginning) {
+                        0L
+                    } else {
+                        YouTubeStore.getSavedPosition(applicationContext, item.id)
+                    }
+                    val resumePos = if (!startFromBeginning && info.durationSec > 30 &&
                         savedPos in 5_000L until (info.durationSec * 1000L - 10_000L)
                     ) {
                         savedPos
@@ -769,7 +786,11 @@ class YouTubePlaybackService : MediaSessionService() {
 
     private fun saveCurrentProgress(resetToZero: Boolean = false) {
         val item = queue.getOrNull(queueIndex) ?: return
-        val pos = if (resetToZero) 0L else (player?.currentPosition ?: 0L)
+        val pos = if (resetToZero || !currentTrackStartedPlaying) {
+            0L
+        } else {
+            player?.currentPosition ?: 0L
+        }
         YouTubeStore.recordHistory(applicationContext, item, pos)
     }
 
@@ -884,16 +905,37 @@ class YouTubePlaybackService : MediaSessionService() {
         }
     }
 
-    private fun buildPlaybackNotification(item: YtItem): Notification {
-        val openIntent = Intent(this, YouTubePlayerActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    private fun contentTapPendingIntent(): PendingIntent {
+        // In Audio-Only mode, tapping the notification / media bar opens GrabAll's
+        // full-screen Music Player directly (with lyrics, download & Watch Video button).
+        // In normal Video mode, it opens YouTubePlayerActivity.
+        val openIntent = if (currentState.isAudioOnly) {
+            Intent(this, com.graball.PlayerActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                putExtra("open_now_playing", true)
+            }
+        } else {
+            Intent(this, YouTubePlayerActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
         }
         val piFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         } else {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
-        val contentPi = PendingIntent.getActivity(this, 200, openIntent, piFlags)
+        val reqCode = if (currentState.isAudioOnly) 205 else 200
+        return PendingIntent.getActivity(this, reqCode, openIntent, piFlags)
+    }
+
+    private fun buildPlaybackNotification(item: YtItem): Notification {
+        val piFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val contentPi = contentTapPendingIntent()
+        mediaSession?.setSessionActivity(contentPi)
 
         fun svcAction(action: String, reqCode: Int): PendingIntent {
             val i = Intent(this, YouTubePlaybackService::class.java).setAction(action)
