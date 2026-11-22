@@ -868,7 +868,7 @@ class PlayerActivity : AppCompatActivity() {
             userScrolledLyricsUntilMs = 0L
             lyricsSub.text = subLabel
             lyricsSyncRow.visibility = View.GONE
-            lyricsAdapter.submitLyrics(emptyList(), isSynced = false)
+            lyricsAdapter.submitLyrics(emptyList(), synced = false)
             lyricsRecycler.visibility = View.GONE
             lyricsStatusBox.visibility = View.VISIBLE
             lyricsSpinner.visibility = View.VISIBLE
