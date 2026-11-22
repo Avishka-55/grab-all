@@ -61,21 +61,21 @@ jobs:
       - name: Cross-compile QuickJS for armeabi-v7a
         run: |
           NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          curl -fsSL --retry 3 -o quickjs.tar.xz https://bellard.org/quickjs/quickjs-2024-01-13.tar.xz
+          curl -fsSL --retry 3 -o quickjs.tar.xz https://bellard.org/quickjs/quickjs-2026-06-04.tar.xz
           tar xf quickjs.tar.xz
-          # Host build first: its runnable qjsc generates repl.c/qjscalc.c.
+          # Host build first: its runnable qjsc generates repl.c.
           # The cross Makefile would try to RUN the ARM qjsc on this x86
           # runner, which fails, so the target binary is compiled with one
           # direct clang invocation instead. bionic bundles pthread into
           # libc, so no -lpthread on the target link.
-          cp -r quickjs-2024-01-13 quickjs-host
+          cp -r quickjs-2026-06-04 quickjs-host
           (cd quickjs-host && make qjs -j"$(nproc)")
-          cp quickjs-host/repl.c quickjs-host/qjscalc.c quickjs-2024-01-13/
-          cd quickjs-2024-01-13
+          cp quickjs-host/repl.c quickjs-2026-06-04/
+          cd quickjs-2026-06-04
           "$NDK_BIN/armv7a-linux-androideabi21-clang" -O2 -fwrapv \
-            -D_GNU_SOURCE -DCONFIG_VERSION='"2024-01-13"' -DCONFIG_BIGNUM \
-            -o qjs qjs.c repl.c qjscalc.c quickjs.c libregexp.c libunicode.c \
-            cutils.c quickjs-libc.c libbf.c -lm -ldl
+            -D_GNU_SOURCE -DCONFIG_VERSION='"2026-06-04"' \
+            -o qjs qjs.c repl.c quickjs.c dtoa.c libregexp.c libunicode.c \
+            cutils.c quickjs-libc.c -lm -ldl
           "$NDK_BIN/llvm-strip" --strip-unneeded qjs
           mkdir -p ../qjs-pkg/bin
           cp qjs ../qjs-pkg/bin/qjs
@@ -97,22 +97,22 @@ jobs:
       - name: Cross-compile QuickJS for arm64-v8a
         run: |
           NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          curl -fsSL --retry 3 -o quickjs.tar.xz https://bellard.org/quickjs/quickjs-2024-01-13.tar.xz
+          curl -fsSL --retry 3 -o quickjs.tar.xz https://bellard.org/quickjs/quickjs-2026-06-04.tar.xz
           tar xf quickjs.tar.xz
-          # Host build first: its runnable qjsc generates repl.c/qjscalc.c.
+          # Host build first: its runnable qjsc generates repl.c.
           # The cross Makefile would try to RUN the ARM qjsc on this x86
           # runner, which fails, so the target binary is compiled with one
           # direct clang invocation instead. bionic bundles pthread into
           # libc, so no -lpthread on the target link.
-          cp -r quickjs-2024-01-13 quickjs-host
+          cp -r quickjs-2026-06-04 quickjs-host
           (cd quickjs-host && make qjs -j"$(nproc)")
-          cp quickjs-host/repl.c quickjs-host/qjscalc.c quickjs-2024-01-13/
-          cd quickjs-2024-01-13
+          cp quickjs-host/repl.c quickjs-2026-06-04/
+          cd quickjs-2026-06-04
           "$NDK_BIN/aarch64-linux-android21-clang" -O2 -fwrapv \
             -Wl,-z,max-page-size=16384 \
-            -D_GNU_SOURCE -DCONFIG_VERSION='"2024-01-13"' -DCONFIG_BIGNUM \
-            -o qjs qjs.c repl.c qjscalc.c quickjs.c libregexp.c libunicode.c \
-            cutils.c quickjs-libc.c libbf.c -lm -ldl
+            -D_GNU_SOURCE -DCONFIG_VERSION='"2026-06-04"' \
+            -o qjs qjs.c repl.c quickjs.c dtoa.c libregexp.c libunicode.c \
+            cutils.c quickjs-libc.c -lm -ldl
           "$NDK_BIN/llvm-strip" --strip-unneeded qjs
           mkdir -p ../qjs-pkg/bin
           cp qjs ../qjs-pkg/bin/qjs

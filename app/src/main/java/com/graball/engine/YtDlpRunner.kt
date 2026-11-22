@@ -64,6 +64,9 @@ class YtDlpRunner(
     @Volatile
     private var process: Process? = null
 
+    @Volatile
+    private var cancelled: Boolean = false
+
     /**
      * CPython is built --enable-shared, so the interpreter itself and
      * ctypes both need libpython3.13.so. The loader finds it via
@@ -129,6 +132,7 @@ class YtDlpRunner(
                 RuntimeExtractor.ensureExecutable(ffprobe)
             }
         }
+        cancelled = false
         Thread {
             // Declared outside the try so the exception path can
             // still deliver it: a download killed mid-read (cancel,
@@ -145,100 +149,96 @@ class YtDlpRunner(
                 }
             }
             try {
-                val command = buildCommand(url, outputTemplate, extraArgs)
-                Log.d(TAG, "Running: " + command.joinToString(" "))
-                val proc = pythonProcessBuilder(command)
-                    .redirectErrorStream(true)
-                    .start()
-                process = proc
+                // Fast-path for YouTube: yt-dlp's default clients include
+                // tv_samsung/web which trigger downloading YouTube's 2.5MB
+                // player.js and solving JS challenges in QuickJS (very slow
+                // on older QuickJS / older phones). Trying visionos alone
+                // first skips JS challenges completely (~1s startup); if
+                // visionos fails (e.g. Made-for-Kids, age-gated, or bot-check),
+                // we automatically fall back to yt-dlp's default clients.
+                val isYouTube = isYouTubeUrl(url)
+                val attempts: List<List<String>> = if (isYouTube) {
+                    listOf(
+                        listOf("--extractor-args", "youtube:player_client=visionos") + extraArgs,
+                        extraArgs
+                    )
+                } else {
+                    listOf(extraArgs)
+                }
+
                 val destinations = mutableListOf<File>()
                 var merged: File? = null
-                // Last non-progress output lines: the evidence when the
-                // run fails. Progress lines are noise; error lines from
-                // yt-dlp, Python tracebacks, and linker errors are signal.
                 val tail = ArrayDeque<String>()
                 val skipped = mutableListOf<File>()
-                // Full non-progress log for the copy-log button: the
-                // 8-line tail is what the row shows, but debugging
-                // (pasted to Boba) wants the whole run. Progress lines
-                // are excluded, or they would flush the real content.
-                // Capped so one chatty download cannot grow memory.
-                // Playlist position, from yt-dlp's own
-                // "[download] Downloading item N of M" lines. Without
-                // it, a playlist looks like one download that keeps
-                // restarting: each song's percent runs 0→100 and the
-                // row gives no hint which song is playing.
-                var currentItem: String? = null
-                // The last destination seen, emitted as finished when
-                // the NEXT destination appears (yt-dlp prints
-                // Destination when it starts a file, so a file is
-                // certainly done once the next one starts). The
-                // service publishes these immediately for audio-only
-                // downloads, where a destination IS the final file —
-                // so each song appears in Downloads as it finishes
-                // instead of only when the whole playlist ends. For
-                // merged video downloads the service ignores these
-                // mid-run emissions (they are parts, not finals) and
-                // publishes only the final file at the end.
-                var lastDestination: File? = null
-                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
-                    var line: String?
-                    while (reader.readLine().also { line = it } != null) {
-                        val raw = line ?: break
-                        ITEM_REGEX.find(raw)?.let { match ->
-                            currentItem = "Item " + match.groupValues[1] +
-                                " of " + match.groupValues[2]
-                            listener.onProgress(
-                                DownloadProgress(
-                                    null, null, null, raw, currentItem
+                var exitCode = -1
+
+                for ((attemptIdx, attemptArgs) in attempts.withIndex()) {
+                    if (cancelled) break
+                    if (attemptIdx > 0) {
+                        val fallbackMsg = "[GrabAll] Fast client unavailable, retrying with full engine…"
+                        logLines.addLast(fallbackMsg)
+                        listener.onProgress(DownloadProgress(null, null, null, fallbackMsg, null))
+                        tail.clear()
+                    }
+                    val command = buildCommand(url, outputTemplate, attemptArgs)
+                    Log.d(TAG, "Running (attempt ${attemptIdx + 1}): " + command.joinToString(" "))
+                    val proc = pythonProcessBuilder(command)
+                        .redirectErrorStream(true)
+                        .start()
+                    process = proc
+
+                    var currentItem: String? = null
+                    var lastDestination: File? = null
+                    BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                        var line: String?
+                        while (reader.readLine().also { line = it } != null) {
+                            val raw = line ?: break
+                            ITEM_REGEX.find(raw)?.let { match ->
+                                currentItem = "Item " + match.groupValues[1] +
+                                    " of " + match.groupValues[2]
+                                listener.onProgress(
+                                    DownloadProgress(
+                                        null, null, null, raw, currentItem
+                                    )
                                 )
-                            )
-                        }
-                        listener.onProgress(parseProgress(raw, currentItem))
-                        if (!PROGRESS_REGEX.containsMatchIn(raw)) {
-                            tail.addLast(raw)
-                            while (tail.size > 8) tail.removeFirst()
-                            logLines.addLast(raw)
-                            while (logLines.size > 500) logLines.removeFirst()
-                        }
-                        // [ExtractAudio] Destination lines REPLACE the
-                        // pending destination instead of emitting it:
-                        // the original file is deleted after conversion,
-                        // so publishing it would save a file yt-dlp is
-                        // about to remove (and duplicate the mp3 that
-                        // follows). The mp3 becomes pending, and is
-                        // emitted when the next song starts — by then
-                        // its conversion is done.
-                        val extractDest =
-                            EXTRACT_AUDIO_REGEX.find(raw)?.groupValues?.get(1)
-                        if (extractDest != null) {
-                            val dest = File(extractDest.trim())
-                            lastDestination = dest
-                            destinations += dest
-                        } else {
-                            DESTINATION_REGEX.find(raw)?.groupValues?.get(1)?.let {
-                                val dest = File(it.trim())
-                                lastDestination?.let { prev ->
-                                    listener.onDownloadedFiles(listOf(prev))
-                                }
+                            }
+                            listener.onProgress(parseProgress(raw, currentItem))
+                            if (!PROGRESS_REGEX.containsMatchIn(raw)) {
+                                tail.addLast(raw)
+                                while (tail.size > 8) tail.removeFirst()
+                                logLines.addLast(raw)
+                                while (logLines.size > 500) logLines.removeFirst()
+                            }
+                            val extractDest =
+                                EXTRACT_AUDIO_REGEX.find(raw)?.groupValues?.get(1)
+                            if (extractDest != null) {
+                                val dest = File(extractDest.trim())
                                 lastDestination = dest
                                 destinations += dest
+                            } else {
+                                DESTINATION_REGEX.find(raw)?.groupValues?.get(1)?.let {
+                                    val dest = File(it.trim())
+                                    lastDestination?.let { prev ->
+                                        listener.onDownloadedFiles(listOf(prev))
+                                    }
+                                    lastDestination = dest
+                                    destinations += dest
+                                }
+                            }
+                            MERGER_REGEX.find(raw)?.groupValues?.get(1)?.let {
+                                merged = File(it.trim())
+                            }
+                            SKIPPED_REGEX.find(raw)?.groupValues?.get(1)?.let {
+                                skipped += File(it.trim())
                             }
                         }
-                        MERGER_REGEX.find(raw)?.groupValues?.get(1)?.let {
-                            merged = File(it.trim())
-                        }
-                        // A resume run skips files that already exist
-                        // complete in the stable staging dir. The
-                        // service must know them so the end-of-run
-                        // scan does not publish them a second time.
-                        SKIPPED_REGEX.find(raw)?.groupValues?.get(1)?.let {
-                            skipped += File(it.trim())
-                        }
+                    }
+                    exitCode = proc.waitFor()
+                    process = null
+                    if (exitCode == 0 || cancelled) {
+                        break
                     }
                 }
-                val exitCode = proc.waitFor()
-                process = null
                 // The merged file replaces its parts (yt-dlp deletes them),
                 // so prefer it when present; otherwise use the destinations.
                 val finalFiles = merged?.let { listOf(it) } ?: destinations
@@ -263,7 +263,13 @@ class YtDlpRunner(
 
     /** Kill the running download, if any. */
     fun cancel() {
+        cancelled = true
         process?.destroy()
+    }
+
+    private fun isYouTubeUrl(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("youtube.com/") || lower.contains("youtu.be/")
     }
 
     /**

@@ -387,9 +387,20 @@ class DownloadService : Service() {
                                     "Downloading…" + itemSuffix
                                 }
                                 this@DownloadService.updateNotification(text, pct?.toInt())
+                                // Surface the latest yt-dlp status line (e.g.
+                                // Extracting URL / Merging / Solving JS) when no
+                                // percentage is active yet so the row never looks hung.
+                                val liveDetail = if (pct == null) {
+                                    progress.rawLine.trim().take(120).takeIf { it.isNotBlank() }
+                                } else {
+                                    listOfNotNull(progress.speed, progress.eta?.let { "ETA $it" })
+                                        .joinToString(" · ")
+                                        .takeIf { it.isNotBlank() }
+                                }
                                 DownloadProgressBus.post(
                                     DownloadProgressBus.State(
                                         url, pct, DownloadProgressBus.Status.DOWNLOADING,
+                                        detail = liveDetail,
                                         item = progress.item
                                     )
                                 )

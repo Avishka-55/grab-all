@@ -529,7 +529,8 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
             android.view.View.GONE
         }
         if ((state.status == DownloadProgressBus.Status.FAILED ||
-            state.status == DownloadProgressBus.Status.PAUSED) &&
+            state.status == DownloadProgressBus.Status.PAUSED ||
+            state.status == DownloadProgressBus.Status.DOWNLOADING) &&
             !state.detail.isNullOrBlank() && detailView != null
         ) {
             detailView.text = state.detail
