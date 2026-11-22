@@ -12,12 +12,28 @@ name: Package runtime
 
 on:
   workflow_dispatch:
+  push:
+    tags: [ 'runtime-*' ]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure internal draft release exists for runtime zips
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view runtime-latest --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create runtime-latest --repo "${{ github.repository }}" \
+              --prerelease --title "Runtime assets (internal)" \
+              --notes "Internal native runtime zips for GrabAll (not a user release)."
+          fi
+
   ytdlp:
+    needs: prepare-release
     runs-on: ubuntu-latest
     steps:
       - name: Build yt-dlp package zip
@@ -50,12 +66,13 @@ jobs:
           EOF
           ls -la ytdlp.zip
           python3 -c "import zipfile; names=zipfile.ZipFile('ytdlp.zip').namelist(); assert not any(n.endswith('.so') for n in names), 'x86_64 .so leaked into ytdlp.zip'; assert 'certifi/cacert.pem' in names, 'certifi cacert.pem missing'; print('entries:', len(names), 'first 8:', sorted(names)[:8])"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ytdlp-zip
-          path: ytdlp-build/ytdlp.zip
+      - name: Upload ytdlp.zip to runtime-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload runtime-latest ytdlp-build/ytdlp.zip --repo "${{ github.repository }}" --clobber
 
   qjs:
+    needs: prepare-release
     runs-on: ubuntu-latest
     steps:
       - name: Cross-compile QuickJS for armeabi-v7a
@@ -86,12 +103,13 @@ jobs:
               z.write('qjs-pkg/bin/qjs', 'bin/qjs')
           EOF
           ls -la qjs32.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: qjs-zip-32
-          path: qjs32.zip
+      - name: Upload qjs32.zip to runtime-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload runtime-latest qjs32.zip --repo "${{ github.repository }}" --clobber
 
   qjs64:
+    needs: prepare-release
     runs-on: ubuntu-latest
     steps:
       - name: Cross-compile QuickJS for arm64-v8a
@@ -123,12 +141,13 @@ jobs:
               z.write('qjs-pkg/bin/qjs', 'bin/qjs')
           EOF
           ls -la qjs64.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: qjs-zip-64
-          path: qjs64.zip
+      - name: Upload qjs64.zip to runtime-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload runtime-latest qjs64.zip --repo "${{ github.repository }}" --clobber
 
   ffmpeg:
+    needs: prepare-release
     runs-on: ubuntu-latest
     steps:
       - name: Cross-compile ffmpeg for armeabi-v7a
@@ -171,18 +190,18 @@ jobs:
             --extra-cflags="-I$PWD/../lame-install/include" \
             --extra-ldflags="-L$PWD/../lame-install/lib" \
             --disable-doc --disable-ffplay \
-            --disable-avdevice --disable-network --disable-swscale \
+            --disable-avdevice --disable-network \
             --disable-vulkan \
             --disable-everything \
-            --enable-swresample \
-            --enable-demuxer=mp4,mov,matroska,webm,mp3,mpegts,hls,flv,ogg,flac,wav,aac,concat \
-            --enable-muxer=mp4,matroska,webm,mp3,mpegts,ogg,flac,wav,ipod \
-            --enable-decoder=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mp3,flac,alac,pcm_s16le,pcm_s24le,pcm_f32le \
-            --enable-encoder=aac,libmp3lame \
+            --enable-swresample --enable-swscale \
+            --enable-demuxer=mp4,mov,matroska,webm,mp3,mpegts,hls,flv,ogg,flac,wav,aac,concat,image2,webp_pipe,png_pipe,mjpeg \
+            --enable-muxer=mp4,matroska,webm,mp3,mpegts,ogg,flac,wav,ipod,image2,mjpeg \
+            --enable-decoder=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mp3,flac,alac,pcm_s16le,pcm_s24le,pcm_f32le,webp,png,mjpeg \
+            --enable-encoder=aac,libmp3lame,png,mjpeg \
             --enable-parser=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mpegaudio,flac \
             --enable-bsf=aac_adtstoasc,h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe,extract_extradata \
             --enable-protocol=file,pipe,crypto \
-            --enable-filter=aresample,anull 2>&1 | tail -15
+            --enable-filter=aresample,anull,scale 2>&1 | tail -15
           make -j"$(nproc)" 2>&1 | tail -5
           make install 2>&1 | tail -3
           # Verify WITHOUT executing: this is an ARM binary, running it
@@ -204,12 +223,13 @@ jobs:
               z.write('ffmpeg-pkg/bin/ffprobe', 'bin/ffprobe')
           EOF
           ls -la ffmpeg32.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ffmpeg-zip-32
-          path: ffmpeg32.zip
+      - name: Upload ffmpeg32.zip to runtime-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload runtime-latest ffmpeg32.zip --repo "${{ github.repository }}" --clobber
 
   ffmpeg64:
+    needs: prepare-release
     runs-on: ubuntu-latest
     steps:
       - name: Cross-compile ffmpeg for arm64-v8a
@@ -252,18 +272,18 @@ jobs:
             --extra-cflags="-I$PWD/../lame-install/include" \
             --extra-ldflags="-L$PWD/../lame-install/lib -Wl,-z,max-page-size=16384" \
             --disable-doc --disable-ffplay \
-            --disable-avdevice --disable-network --disable-swscale \
+            --disable-avdevice --disable-network \
             --disable-vulkan \
             --disable-everything \
-            --enable-swresample \
-            --enable-demuxer=mp4,mov,matroska,webm,mp3,mpegts,hls,flv,ogg,flac,wav,aac,concat \
-            --enable-muxer=mp4,matroska,webm,mp3,mpegts,ogg,flac,wav,ipod \
-            --enable-decoder=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mp3,flac,alac,pcm_s16le,pcm_s24le,pcm_f32le \
-            --enable-encoder=aac,libmp3lame \
+            --enable-swresample --enable-swscale \
+            --enable-demuxer=mp4,mov,matroska,webm,mp3,mpegts,hls,flv,ogg,flac,wav,aac,concat,image2,webp_pipe,png_pipe,mjpeg \
+            --enable-muxer=mp4,matroska,webm,mp3,mpegts,ogg,flac,wav,ipod,image2,mjpeg \
+            --enable-decoder=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mp3,flac,alac,pcm_s16le,pcm_s24le,pcm_f32le,webp,png,mjpeg \
+            --enable-encoder=aac,libmp3lame,png,mjpeg \
             --enable-parser=h264,hevc,vp8,vp9,av1,aac,opus,vorbis,mpegaudio,flac \
             --enable-bsf=aac_adtstoasc,h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe,extract_extradata \
             --enable-protocol=file,pipe,crypto \
-            --enable-filter=aresample,anull 2>&1 | tail -15
+            --enable-filter=aresample,anull,scale 2>&1 | tail -15
           make -j"$(nproc)" 2>&1 | tail -5
           make install 2>&1 | tail -3
           # Verify WITHOUT executing: this is an ARM binary, running it
@@ -284,12 +304,13 @@ jobs:
               z.write('ffmpeg-pkg/bin/ffprobe', 'bin/ffprobe')
           EOF
           ls -la ffmpeg64.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ffmpeg-zip-64
-          path: ffmpeg64.zip
+      - name: Upload ffmpeg64.zip to runtime-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload runtime-latest ffmpeg64.zip --repo "${{ github.repository }}" --clobber
 
   cpython:
+    needs: prepare-release
     # Standalone CPython 3.13 for armeabi-v7a. Run 5 proved p4a only
     # produces a JNI library (libpython3.14.so), not a runnable
     # interpreter, so Python is cross-compiled directly: a host python,
@@ -482,22 +503,13 @@ jobs:
           EOF
           ls -la python-shared.zip python32.zip
           python3 -c "import zipfile; s=set(zipfile.ZipFile('python-shared.zip').namelist()); a=set(zipfile.ZipFile('python32.zip').namelist()); assert not (s & a); assert not any('_sysconfigdata' in x for x in s), 'sysconfigdata leaked into shared'; assert any('_sysconfigdata' in x for x in a), 'sysconfigdata missing from python32'; print('OK: bin/python:', 'bin/python' in a, 'libpython:', any('libpython3.13.so' in x for x in a))"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: python-shared-zip
-          path: python-shared.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: python-zip-32
-          path: python32.zip
-      - name: Upload build logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cpython-logs
-          path: "*.log"
+      - name: Upload python-shared.zip and python32.zip to runtime-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload runtime-latest python-shared.zip python32.zip --repo "${{ github.repository }}" --clobber
 
   cpython64:
+    needs: prepare-release
     # Standalone CPython 3.13 for arm64-v8a — same recipe as the 32-bit
     # job, with the aarch64 toolchain throughout. Native deps get their
     # own cache key/path (deps-install-64) so the armv7 cache is never
@@ -655,13 +667,7 @@ jobs:
           EOF
           ls -la python64.zip
           python3 -c "import zipfile; a=set(zipfile.ZipFile('python64.zip').namelist()); assert any('_sysconfigdata' in x for x in a), 'sysconfigdata missing from python64'; print('OK: bin/python:', 'bin/python' in a, 'libpython:', any('libpython3.13.so' in x for x in a))"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: python-zip-64
-          path: python64.zip
-      - name: Upload build logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cpython-logs-64
-          path: "*.log"
+      - name: Upload python64.zip to runtime-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload runtime-latest python64.zip --repo "${{ github.repository }}" --clobber
