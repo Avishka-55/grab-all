@@ -964,9 +964,24 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
                     android:gravity="center"
-                    android:text="Finding synced lyrics…"
+                    android:text="Searching lyrics…"
                     android:textColor="#CCFFFFFF"
                     android:textSize="15sp" />
+
+                <TextView
+                    android:id="@+id/lyricsRetryBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/pill_translucent_bg"
+                    android:gravity="center"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:text="↻ Retry"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
             </LinearLayout>
         </FrameLayout>
 

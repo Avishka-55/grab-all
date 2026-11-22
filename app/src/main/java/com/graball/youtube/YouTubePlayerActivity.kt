@@ -63,6 +63,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var playerLoadingBox: LinearLayout
     private lateinit var playerLoadingText: TextView
     private lateinit var playerTopOverlay: LinearLayout
+    private lateinit var btnTopCaptions: TextView
+    private lateinit var btnTopQuality: TextView
     private lateinit var detailsContainer: LinearLayout
 
     private lateinit var videoTitle: TextView
@@ -117,6 +119,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
         playerLoadingBox = findViewById(R.id.playerLoadingBox)
         playerLoadingText = findViewById(R.id.playerLoadingText)
         playerTopOverlay = findViewById(R.id.playerTopOverlay)
+        btnTopCaptions = findViewById(R.id.btnTopCaptions)
+        btnTopQuality = findViewById(R.id.btnTopQuality)
         detailsContainer = findViewById(R.id.detailsContainer)
 
         videoTitle = findViewById(R.id.playerVideoTitle)
@@ -144,6 +148,26 @@ class YouTubePlayerActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.btnTopPip).setOnClickListener { enterPipOrMinimize() }
         findViewById<TextView>(R.id.actionPip).setOnClickListener { enterPipOrMinimize() }
         findViewById<TextView>(R.id.btnFullscreen).setOnClickListener { toggleFullscreen() }
+        btnTopQuality.setOnClickListener { showQualityPicker() }
+        btnTopCaptions.setOnClickListener {
+            val svc = YouTubePlaybackService.instance ?: return@setOnClickListener
+            val next = !YouTubePlaybackService.currentState.captionsEnabled
+            svc.setCaptionsEnabled(next)
+            showHud(if (next) "CC: ON" else "CC: OFF")
+        }
+        // In fullscreen, auto-hide the top overlay (Back / CC / Quality / PiP / Fullscreen)
+        // along with ExoPlayer's controls so it never obstructs the video.
+        playerView.setControllerVisibilityListener(
+            PlayerView.ControllerVisibilityListener { visibility ->
+                if (inPipMode) {
+                    playerTopOverlay.visibility = View.GONE
+                } else if (isFullscreen) {
+                    playerTopOverlay.visibility = visibility
+                } else {
+                    playerTopOverlay.visibility = View.VISIBLE
+                }
+            }
+        )
 
         findViewById<TextView>(R.id.actionDownload).setOnClickListener {
             val item = YouTubePlaybackService.currentState.currentItem
@@ -362,13 +386,15 @@ class YouTubePlayerActivity : AppCompatActivity() {
             playerErrorRow.visibility = View.GONE
         }
 
-        actionQuality.text = if (state.isAudioOnly) {
+        val qualityText = if (state.isAudioOnly) {
             "⚙ Audio"
         } else if (state.selectedHeight != null) {
             "⚙ ${state.selectedHeight}p"
         } else {
             "⚙ Auto"
         }
+        actionQuality.text = qualityText
+        btnTopQuality.text = qualityText
 
         actionSpeed.text = "${trimSpeed(state.playbackSpeed)}×"
 
@@ -378,12 +404,15 @@ class YouTubePlayerActivity : AppCompatActivity() {
         actionCaptions.setBackgroundResource(
             if (state.captionsEnabled) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
         )
-        actionCaptions.setTextColor(
-            ContextCompat.getColor(
-                this,
-                if (state.captionsEnabled) R.color.graball_text else R.color.graball_subtext
-            )
+        val ccColor = ContextCompat.getColor(
+            this,
+            if (state.captionsEnabled) R.color.graball_text else R.color.graball_subtext
         )
+        actionCaptions.setTextColor(ccColor)
+        btnTopCaptions.setBackgroundResource(
+            if (state.captionsEnabled) R.drawable.yt_chip_selected else R.drawable.yt_badge_bg
+        )
+        btnTopCaptions.setTextColor(ccColor)
 
         if (item != null) {
             updateBookmarkChip(YouTubeStore.isBookmarked(this, item.id))

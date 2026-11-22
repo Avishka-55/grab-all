@@ -152,6 +152,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var lyricsStatusBox: LinearLayout
     private lateinit var lyricsSpinner: ProgressBar
     private lateinit var lyricsStatusText: TextView
+    private lateinit var lyricsRetryBtn: TextView
     private lateinit var lyricsSeek: SeekBar
     private lateinit var lyricsTimeCur: TextView
     private lateinit var lyricsTimeDur: TextView
@@ -301,6 +302,11 @@ class PlayerActivity : AppCompatActivity() {
         lyricsStatusBox = findViewById(R.id.lyricsStatusBox)
         lyricsSpinner = findViewById(R.id.lyricsSpinner)
         lyricsStatusText = findViewById(R.id.lyricsStatusText)
+        lyricsRetryBtn = findViewById(R.id.lyricsRetryBtn)
+        lyricsRetryBtn.setOnClickListener {
+            currentLyricsKey = null
+            updatePlayerUi()
+        }
         lyricsSeek = findViewById(R.id.lyricsSeek)
         lyricsTimeCur = findViewById(R.id.lyricsTimeCur)
         lyricsTimeDur = findViewById(R.id.lyricsTimeDur)
@@ -673,7 +679,7 @@ class PlayerActivity : AppCompatActivity() {
                 posMs = pos.toLong(),
                 durMs = dur.toLong(),
                 isPlaying = playing,
-                isYouTube = false,
+                youtubeVideoId = null,
                 localFile = current
             )
         }
@@ -739,7 +745,7 @@ class PlayerActivity : AppCompatActivity() {
                 posMs = pos.toLong(),
                 durMs = dur.toLong(),
                 isPlaying = playing,
-                isYouTube = true,
+                youtubeVideoId = item.id,
                 localFile = null
             )
         }
@@ -981,14 +987,14 @@ class PlayerActivity : AppCompatActivity() {
         posMs: Long,
         durMs: Long,
         isPlaying: Boolean,
-        isYouTube: Boolean,
+        youtubeVideoId: String?,
         localFile: File?
     ) {
         lyricsTitle.text = title
         lyricsPlayPause.setImageResource(
             if (isPlaying) R.drawable.ic_media_pause_white else R.drawable.ic_media_play_white
         )
-        lyricsBtnOpenYoutube.visibility = if (isYouTube) View.VISIBLE else View.INVISIBLE
+        lyricsBtnOpenYoutube.visibility = if (youtubeVideoId != null) View.VISIBLE else View.INVISIBLE
 
         if (cacheKey != currentLyricsKey) {
             currentLyricsKey = cacheKey
@@ -1002,7 +1008,8 @@ class PlayerActivity : AppCompatActivity() {
             lyricsRecycler.visibility = View.GONE
             lyricsStatusBox.visibility = View.VISIBLE
             lyricsSpinner.visibility = View.VISIBLE
-            lyricsStatusText.text = "Finding synced lyrics…"
+            lyricsRetryBtn.visibility = View.GONE
+            lyricsStatusText.text = "Searching lyrics…"
 
             val durSec = (durMs / 1000L).toInt()
             LyricsFetcher.fetchAsync(
@@ -1011,7 +1018,8 @@ class PlayerActivity : AppCompatActivity() {
                 rawTitle = title,
                 rawArtist = artist,
                 durationSec = durSec,
-                localFile = localFile
+                localFile = localFile,
+                youtubeVideoId = youtubeVideoId
             ) { result ->
                 if (isFinishing || isDestroyed || currentLyricsKey != cacheKey) return@fetchAsync
                 currentLyricsResult = result
@@ -1021,8 +1029,10 @@ class PlayerActivity : AppCompatActivity() {
                     lyricsRecycler.visibility = View.GONE
                     lyricsStatusBox.visibility = View.VISIBLE
                     lyricsStatusText.text = "No lyrics found for this song"
+                    lyricsRetryBtn.visibility = View.VISIBLE
                 } else {
                     lyricsStatusBox.visibility = View.GONE
+                    lyricsRetryBtn.visibility = View.GONE
                     lyricsRecycler.visibility = View.VISIBLE
                     lyricsSub.text = "$subLabel · ${result.source}"
                     lyricsSyncRow.visibility = if (result.isSynced) View.VISIBLE else View.GONE

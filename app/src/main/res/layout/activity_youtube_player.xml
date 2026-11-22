@@ -112,6 +112,34 @@
                 android:layout_weight="1" />
 
             <TextView
+                android:id="@+id/btnTopCaptions"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:layout_marginEnd="6dp"
+                android:background="@drawable/yt_badge_bg"
+                android:gravity="center"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:text="CC"
+                android:textColor="@color/graball_subtext"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnTopQuality"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:layout_marginEnd="6dp"
+                android:background="@drawable/yt_badge_bg"
+                android:gravity="center"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:text="⚙ Auto"
+                android:textColor="@color/graball_text"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
                 android:id="@+id/btnTopPip"
                 android:layout_width="wrap_content"
                 android:layout_height="32dp"
