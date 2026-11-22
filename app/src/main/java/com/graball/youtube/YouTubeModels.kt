@@ -68,21 +68,27 @@ data class VideoStreamInfo(
 
     /**
      * Pick a video-only stream closest to [targetHeight] (or <= targetHeight),
-     * preferring H.264 (avc1) for low CPU / battery hardware decoding on all devices.
+     * strictly preferring H.264 (avc1) first — NOT generic "mp4" which also
+     * matches AV1 (av01) that older 32-bit devices cannot decode in hardware.
      */
     fun pickVideoStream(targetHeight: Int?): StreamFormat? {
         if (videoStreams.isEmpty()) return null
-        val h264 = videoStreams.filter {
-            it.mimeType.contains("avc1", ignoreCase = true) ||
-                it.mimeType.contains("mp4", ignoreCase = true)
-        }.ifEmpty { videoStreams }
+        val preferred = videoStreams.filter {
+            it.mimeType.contains("avc1", ignoreCase = true)
+        }.ifEmpty {
+            videoStreams.filter { it.mimeType.contains("vp9", ignoreCase = true) }
+        }.ifEmpty {
+            videoStreams
+        }
         return if (targetHeight == null) {
-            // Auto: cap at 720p on low-RAM devices, 1080p otherwise
-            h264.filter { it.height in 1..1080 }.maxByOrNull { it.height * 10_000L + it.bitrate }
-                ?: h264.maxByOrNull { it.height }
+            // Auto: pick 720p max for fast startup and smooth playback on all devices
+            preferred.filter { it.height in 1..720 }
+                .maxByOrNull { it.height * 10_000L + it.bitrate }
+                ?: preferred.minByOrNull { it.height }
         } else {
-            h264.filter { it.height in 1..targetHeight }.maxByOrNull { it.height * 10_000L + it.bitrate }
-                ?: h264.minByOrNull { kotlin.math.abs(it.height - targetHeight) }
+            preferred.filter { it.height in 1..targetHeight }
+                .maxByOrNull { it.height * 10_000L + it.bitrate }
+                ?: preferred.minByOrNull { kotlin.math.abs(it.height - targetHeight) }
         }
     }
 

@@ -37,6 +37,7 @@ data class YouTubePlaybackState(
     val queue: List<YtItem> = emptyList(),
     val queueIndex: Int = -1,
     val isLoading: Boolean = false,
+    val loadingStatus: String? = null,
     val isPlaying: Boolean = false,
     val isAudioOnly: Boolean = false,
     val selectedHeight: Int? = null,
@@ -61,17 +62,24 @@ data class YouTubePlaybackState(
 @OptIn(UnstableApi::class)
 class YouTubePlaybackService : MediaSessionService() {
 
+    private enum class StreamMode { HLS, ADAPTIVE_MERGE, MUXED }
+
     private var player: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor = Executors.newSingleThreadExecutor()
+    // Cached pool so tapping a new video never blocks behind a slow fallback
+    // or SponsorBlock fetch for a previous video.
+    private val ioExecutor = Executors.newCachedThreadPool()
 
     private val queue = mutableListOf<YtItem>()
     private var queueIndex = -1
     private var currentStreamInfo: VideoStreamInfo? = null
+    private var currentStreamMode: StreamMode? = null
+    private val attemptedModes = mutableSetOf<StreamMode>()
     private var sponsorSegments: List<SponsorSegment> = emptyList()
     private val skippedSegmentKeys = mutableSetOf<String>()
     private var isLoading = false
+    private var loadingStatus: String? = null
     private var isAudioOnly = false
     private var selectedHeight: Int? = null
     private var playbackSpeed = 1.0f
@@ -150,17 +158,15 @@ class YouTubePlaybackService : MediaSessionService() {
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
-                        Log.e(TAG, "ExoPlayer error: ${error.message}", error)
-                        // If adaptive/HLS failed, try muxed fallback once before reporting error
+                        Log.e(TAG, "ExoPlayer error ($currentStreamMode): ${error.message}", error)
+                        // Automatically cascade through alternative stream modes
+                        // (HLS -> Adaptive Merge -> Muxed) before surfacing an error.
                         val info = currentStreamInfo
-                        val muxed = info?.pickMuxedStream(selectedHeight)
-                        if (muxed != null && lastError == null) {
-                            lastError = "Retrying stream…"
-                            broadcastState()
-                            playMuxedFallback(info, muxed)
+                        val pos = player?.currentPosition?.coerceAtLeast(0L) ?: 0L
+                        if (info != null && tryNextStreamMode(info, pos, playImmediately = true)) {
                             return
                         }
-                        lastError = "Playback error: ${error.errorCodeName}"
+                        lastError = "Playback failed (${error.errorCodeName}). Tap Retry or Download."
                         broadcastState()
                     }
                 })
@@ -362,10 +368,23 @@ class YouTubePlaybackService : MediaSessionService() {
         YouTubeStore.setDefaultHeight(this, height ?: 0)
         val info = currentStreamInfo ?: return
         val p = player ?: return
+        if (currentStreamMode == StreamMode.HLS) {
+            // Instant seamless quality switch on HLS without re-preparing!
+            applyTrackSelection()
+            broadcastState()
+            return
+        }
         val pos = p.currentPosition
         val wasPlaying = p.playWhenReady
+        attemptedModes.clear()
         prepareStream(info, resumePosMs = pos, playImmediately = wasPlaying)
         broadcastState()
+    }
+
+    fun retryCurrent() {
+        if (queueIndex in queue.indices) {
+            loadAtIndex(queueIndex)
+        }
     }
 
     fun setSpeed(speed: Float) {
@@ -395,54 +414,109 @@ class YouTubePlaybackService : MediaSessionService() {
     private fun loadAtIndex(index: Int) {
         val item = queue.getOrNull(index) ?: return
         val gen = ++loadGeneration
+        player?.stop()
         isLoading = true
+        loadingStatus = "Connecting to YouTube…"
         lastError = null
         lastSponsorSkip = null
+        currentStreamInfo = null
+        currentStreamMode = null
+        attemptedModes.clear()
         sponsorSegments = emptyList()
         skippedSegmentKeys.clear()
         broadcastState()
 
         ioExecutor.execute {
-            val info = YouTubeInnerTube.resolveStreams(applicationContext, item.id)
-            val segments = if (YouTubeStore.isSponsorBlockEnabled(applicationContext)) {
-                SponsorBlockClient.fetchSegments(item.id)
-            } else {
-                emptyList()
-            }
-            mainHandler.post {
-                if (gen != loadGeneration) return@post
-                isLoading = false
-                if (info == null) {
-                    lastError = "Couldn't load stream for this video. Try downloading or check connection."
+            try {
+                val result = YouTubeInnerTube.resolveStreams(
+                    applicationContext,
+                    item.id
+                ) { status ->
+                    mainHandler.post {
+                        if (gen == loadGeneration && isLoading) {
+                            loadingStatus = status
+                            broadcastState()
+                        }
+                    }
+                }
+                mainHandler.post {
+                    if (gen != loadGeneration) return@post
+                    isLoading = false
+                    loadingStatus = null
+                    val info = result.info
+                    if (info == null) {
+                        lastError = result.error
+                            ?: "Couldn't load stream for this video. Try Retry or Download."
+                        broadcastState()
+                        return@post
+                    }
+                    currentStreamInfo = info
+                    val enriched = item.copy(
+                        title = info.title,
+                        channel = info.channel.ifBlank { item.channel },
+                        thumbnailUrl = info.thumbnailUrl.ifBlank { item.thumbnailUrl }
+                    )
+                    if (index in queue.indices) {
+                        queue[index] = enriched
+                    }
+                    val savedPos = YouTubeStore.getSavedPosition(applicationContext, item.id)
+                    val resumePos = if (info.durationSec > 30 &&
+                        savedPos in 5_000L until (info.durationSec * 1000L - 10_000L)
+                    ) {
+                        savedPos
+                    } else {
+                        0L
+                    }
+                    YouTubeStore.recordHistory(applicationContext, enriched, resumePos)
+                    prepareStream(info, resumePosMs = resumePos, playImmediately = true)
                     broadcastState()
-                    return@post
+
+                    // Fetch SponsorBlock asynchronously AFTER playback starts so it
+                    // never delays video startup even if sponsor.ajay.app is slow.
+                    if (YouTubeStore.isSponsorBlockEnabled(applicationContext)) {
+                        ioExecutor.execute {
+                            val segs = SponsorBlockClient.fetchSegments(item.id)
+                            mainHandler.post {
+                                if (gen == loadGeneration) {
+                                    sponsorSegments = segs
+                                }
+                            }
+                        }
+                    }
                 }
-                currentStreamInfo = info
-                sponsorSegments = segments
-                // Update item title/channel/thumb with full details
-                val enriched = item.copy(
-                    title = info.title,
-                    channel = info.channel.ifBlank { item.channel },
-                    thumbnailUrl = info.thumbnailUrl.ifBlank { item.thumbnailUrl }
-                )
-                if (index in queue.indices) {
-                    queue[index] = enriched
+            } catch (t: Throwable) {
+                Log.e(TAG, "Unexpected error loading video ${item.id}", t)
+                mainHandler.post {
+                    if (gen != loadGeneration) return@post
+                    isLoading = false
+                    loadingStatus = null
+                    lastError = "Load error: ${t.message ?: t.javaClass.simpleName}"
+                    broadcastState()
                 }
-                val savedPos = YouTubeStore.getSavedPosition(applicationContext, item.id)
-                val resumePos = if (info.durationSec > 30 && savedPos in 5_000L until (info.durationSec * 1000L - 10_000L)) {
-                    savedPos
-                } else {
-                    0L
-                }
-                YouTubeStore.recordHistory(applicationContext, enriched, resumePos)
-                prepareStream(info, resumePosMs = resumePos, playImmediately = true)
-                broadcastState()
             }
         }
     }
 
     private fun prepareStream(info: VideoStreamInfo, resumePosMs: Long, playImmediately: Boolean) {
-        val p = player ?: return
+        attemptedModes.clear()
+        if (!tryNextStreamMode(info, resumePosMs, playImmediately)) {
+            lastError = "No playable format available for this video"
+            broadcastState()
+        }
+    }
+
+    /**
+     * Try the next unattempted stream mode in priority order:
+     * 1) HLS (chunked, unthrottled, instant startup, supports quality cap & audio-only!)
+     * 2) Adaptive Merge (separate H.264 video + AAC audio for battery-saver audio-only)
+     * 3) Muxed MP4 (universal single-file fallback)
+     */
+    private fun tryNextStreamMode(
+        info: VideoStreamInfo,
+        resumePosMs: Long,
+        playImmediately: Boolean
+    ): Boolean {
+        val p = player ?: return false
         val dsFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(info.userAgent)
             .setAllowCrossProtocolRedirects(true)
@@ -455,71 +529,81 @@ class YouTubePlaybackService : MediaSessionService() {
             .setArtworkUri(info.thumbnailUrl.takeIf { it.startsWith("http") }?.let { Uri.parse(it) })
             .build()
 
-        val videoStream = info.pickVideoStream(selectedHeight)
-        val audioStream = info.bestAudio()
-
-        val mediaSource = when {
-            videoStream != null && audioStream != null -> {
-                // Separate adaptive video + audio tracks: lets us disable
-                // TRACK_TYPE_VIDEO when screen is off so ZERO video data
-                // is downloaded or decoded in background audio mode!
-                val vItem = MediaItem.Builder()
-                    .setUri(videoStream.url)
-                    .setMediaMetadata(meta)
-                    .build()
-                val aItem = MediaItem.Builder()
-                    .setUri(audioStream.url)
-                    .setMediaMetadata(meta)
-                    .build()
-                val vSrc = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(vItem)
-                val aSrc = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(aItem)
-                MergingMediaSource(vSrc, aSrc)
-            }
-            info.hlsUrl != null -> {
-                val item = MediaItem.Builder()
-                    .setUri(info.hlsUrl)
-                    .setMediaMetadata(meta)
-                    .build()
-                HlsMediaSource.Factory(dsFactory).createMediaSource(item)
-            }
-            else -> {
-                val muxed = info.pickMuxedStream(selectedHeight) ?: return
-                val item = MediaItem.Builder()
-                    .setUri(muxed.url)
-                    .setMediaMetadata(meta)
-                    .build()
-                ProgressiveMediaSource.Factory(dsFactory).createMediaSource(item)
-            }
+        // 1) HLS first when available
+        if (StreamMode.HLS !in attemptedModes && !info.hlsUrl.isNullOrBlank()) {
+            attemptedModes.add(StreamMode.HLS)
+            currentStreamMode = StreamMode.HLS
+            val item = MediaItem.Builder()
+                .setUri(info.hlsUrl)
+                .setMediaMetadata(meta)
+                .build()
+            val src = HlsMediaSource.Factory(dsFactory).createMediaSource(item)
+            applyTrackSelection()
+            p.setMediaSource(src, resumePosMs)
+            p.setPlaybackSpeed(playbackSpeed)
+            p.prepare()
+            p.playWhenReady = playImmediately
+            return true
         }
 
-        applyVideoTrackEnabled(!isAudioOnly)
-        p.setMediaSource(mediaSource, resumePosMs)
-        p.setPlaybackSpeed(playbackSpeed)
-        p.prepare()
-        p.playWhenReady = playImmediately
+        // 2) Adaptive separate video + audio
+        val videoStream = info.pickVideoStream(selectedHeight)
+        val audioStream = info.bestAudio()
+        if (StreamMode.ADAPTIVE_MERGE !in attemptedModes && videoStream != null && audioStream != null) {
+            attemptedModes.add(StreamMode.ADAPTIVE_MERGE)
+            currentStreamMode = StreamMode.ADAPTIVE_MERGE
+            val vItem = MediaItem.Builder()
+                .setUri(videoStream.url)
+                .setMediaMetadata(meta)
+                .build()
+            val aItem = MediaItem.Builder()
+                .setUri(audioStream.url)
+                .setMediaMetadata(meta)
+                .build()
+            val vSrc = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(vItem)
+            val aSrc = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(aItem)
+            applyTrackSelection()
+            p.setMediaSource(MergingMediaSource(vSrc, aSrc), resumePosMs)
+            p.setPlaybackSpeed(playbackSpeed)
+            p.prepare()
+            p.playWhenReady = playImmediately
+            return true
+        }
+
+        // 3) Muxed single-file MP4 fallback
+        val muxed = info.pickMuxedStream(selectedHeight)
+        if (StreamMode.MUXED !in attemptedModes && muxed != null) {
+            attemptedModes.add(StreamMode.MUXED)
+            currentStreamMode = StreamMode.MUXED
+            val item = MediaItem.Builder()
+                .setUri(muxed.url)
+                .setMediaMetadata(meta)
+                .build()
+            val src = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(item)
+            applyTrackSelection()
+            p.setMediaSource(src, resumePosMs)
+            p.setPlaybackSpeed(playbackSpeed)
+            p.prepare()
+            p.playWhenReady = playImmediately
+            return true
+        }
+
+        return false
     }
 
-    private fun playMuxedFallback(info: VideoStreamInfo, muxed: StreamFormat) {
+    private fun applyTrackSelection() {
         val p = player ?: return
-        val dsFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(info.userAgent)
-            .setAllowCrossProtocolRedirects(true)
-        val meta = MediaMetadata.Builder()
-            .setTitle(info.title)
-            .setArtist(info.channel)
+        val maxH = selectedHeight ?: 720
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, isAudioOnly)
+            .setPreferredVideoMimeType("video/avc")
+            .setMaxVideoSize(Int.MAX_VALUE, maxH)
             .build()
-        val item = MediaItem.Builder().setUri(muxed.url).setMediaMetadata(meta).build()
-        val src = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(item)
-        p.setMediaSource(src, p.currentPosition.coerceAtLeast(0L))
-        p.prepare()
-        p.playWhenReady = true
     }
 
     private fun applyVideoTrackEnabled(enabled: Boolean) {
-        val p = player ?: return
-        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enabled)
-            .build()
+        isAudioOnly = !enabled
+        applyTrackSelection()
     }
 
     private fun startSponsorTicker() {
@@ -544,6 +628,7 @@ class YouTubePlaybackService : MediaSessionService() {
             queue = queue.toList(),
             queueIndex = queueIndex,
             isLoading = isLoading,
+            loadingStatus = loadingStatus,
             isPlaying = player?.isPlaying == true,
             isAudioOnly = isAudioOnly,
             selectedHeight = selectedHeight,

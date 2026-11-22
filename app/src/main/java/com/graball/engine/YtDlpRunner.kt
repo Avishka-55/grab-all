@@ -270,13 +270,19 @@ class YtDlpRunner(
      * Synchronous metadata + direct stream extraction (--dump-single-json).
      * Used as a bulletproof fallback by the native YouTube player whenever
      * InnerTube direct extraction is restricted (e.g. Made-for-Kids, age-gated
-     * with cookies, or future YouTube client changes). Call off the main thread.
+     * with cookies, or bot-checked IP). Call off the main thread.
+     *
+     * Drains stderr on a helper thread (preventing pipe buffer deadlock) and
+     * enforces a hard timeout so a stalled process can never spin forever.
      */
-    fun extractInfoJson(url: String): String? {
-        if (!RuntimeExtractor.ensureExecutable(pythonBinary)) return null
+    fun extractInfoJson(url: String, timeoutSec: Long = 35L): Pair<String?, String> {
+        if (!RuntimeExtractor.ensureExecutable(pythonBinary)) {
+            return null to "Python runtime not executable"
+        }
         if (quickJsBinary != null && quickJsBinary.exists()) {
             RuntimeExtractor.ensureExecutable(quickJsBinary)
         }
+        var proc: Process? = null
         return try {
             val cmd = mutableListOf(
                 pythonBinary.absolutePath,
@@ -285,7 +291,7 @@ class YtDlpRunner(
                 "--no-playlist",
                 "--no-warnings",
                 "--skip-download",
-                "--socket-timeout", "20"
+                "--socket-timeout", "15"
             )
             if (quickJsBinary != null && quickJsBinary.exists()) {
                 cmd += listOf("--js-runtimes", "quickjs:" + quickJsBinary.absolutePath)
@@ -294,15 +300,51 @@ class YtDlpRunner(
                 cmd += listOf("--cookies", cookiesFile.absolutePath)
             }
             cmd += url
-            val proc = pythonProcessBuilder(cmd)
+            val started = pythonProcessBuilder(cmd)
                 .redirectErrorStream(false)
                 .start()
-            val stdout = BufferedReader(InputStreamReader(proc.inputStream)).use { it.readText() }
-            proc.waitFor()
-            stdout.trim().takeIf { it.startsWith("{") }
-        } catch (e: Exception) {
+            proc = started
+
+            val errBuf = StringBuilder()
+            val errThread = Thread {
+                try {
+                    BufferedReader(InputStreamReader(started.errorStream)).use { r ->
+                        var line: String?
+                        while (r.readLine().also { line = it } != null) {
+                            if (errBuf.length < 1000) {
+                                errBuf.append(line).append('\n')
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }.apply { isDaemon = true; start() }
+
+            // Watchdog thread (works on API 21+ unlike Process.waitFor(timeout))
+            val watchdog = Thread {
+                try {
+                    Thread.sleep(timeoutSec * 1000L)
+                    started.destroy()
+                } catch (_: InterruptedException) {
+                }
+            }.apply { isDaemon = true; start() }
+
+            val stdout = BufferedReader(InputStreamReader(started.inputStream)).use { it.readText() }
+            started.waitFor()
+            watchdog.interrupt()
+            errThread.join(1000)
+
+            val trimmed = stdout.trim()
+            if (trimmed.startsWith("{")) {
+                trimmed to ""
+            } else {
+                val errMsg = errBuf.toString().trim().lines().lastOrNull().orEmpty()
+                null to errMsg.ifBlank { "yt-dlp returned no stream info" }
+            }
+        } catch (e: Throwable) {
+            proc?.destroy()
             Log.e(TAG, "extractInfoJson failed", e)
-            null
+            null to (e.message ?: "yt-dlp error")
         }
     }
 

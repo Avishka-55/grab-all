@@ -60,12 +60,14 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var playerView: PlayerView
     private lateinit var audioOnlyBanner: TextView
     private lateinit var gestureHud: TextView
-    private lateinit var playerLoading: ProgressBar
+    private lateinit var playerLoadingBox: LinearLayout
+    private lateinit var playerLoadingText: TextView
     private lateinit var playerTopOverlay: LinearLayout
     private lateinit var detailsContainer: LinearLayout
 
     private lateinit var videoTitle: TextView
     private lateinit var videoMeta: TextView
+    private lateinit var playerErrorRow: LinearLayout
     private lateinit var videoError: TextView
     private lateinit var actionBgAudio: TextView
     private lateinit var actionQuality: TextView
@@ -111,13 +113,18 @@ class YouTubePlayerActivity : AppCompatActivity() {
         playerView = findViewById(R.id.ytPlayerView)
         audioOnlyBanner = findViewById(R.id.audioOnlyBanner)
         gestureHud = findViewById(R.id.gestureHud)
-        playerLoading = findViewById(R.id.playerLoading)
+        playerLoadingBox = findViewById(R.id.playerLoadingBox)
+        playerLoadingText = findViewById(R.id.playerLoadingText)
         playerTopOverlay = findViewById(R.id.playerTopOverlay)
         detailsContainer = findViewById(R.id.detailsContainer)
 
         videoTitle = findViewById(R.id.playerVideoTitle)
         videoMeta = findViewById(R.id.playerVideoMeta)
+        playerErrorRow = findViewById(R.id.playerErrorRow)
         videoError = findViewById(R.id.playerError)
+        findViewById<TextView>(R.id.btnPlayerRetry).setOnClickListener {
+            YouTubePlaybackService.instance?.retryCurrent()
+        }
         actionBgAudio = findViewById(R.id.actionBgAudio)
         actionQuality = findViewById(R.id.actionQuality)
         actionSpeed = findViewById(R.id.actionSpeed)
@@ -299,9 +306,12 @@ class YouTubePlayerActivity : AppCompatActivity() {
             playerView.player = svc.getPlayer()
         }
 
-        playerLoading.visibility = if (state.isLoading) View.VISIBLE else View.GONE
+        playerLoadingBox.visibility = if (state.isLoading) View.VISIBLE else View.GONE
+        if (state.isLoading) {
+            playerLoadingText.text = state.loadingStatus ?: "Loading…"
+        }
         audioOnlyBanner.visibility =
-            if (state.isAudioOnly && !inPipMode) View.VISIBLE else View.GONE
+            if (state.isAudioOnly && !inPipMode && !state.isLoading) View.VISIBLE else View.GONE
 
         val item = state.currentItem
         val info = state.streamInfo
@@ -314,9 +324,9 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         if (!state.error.isNullOrBlank()) {
             videoError.text = state.error
-            videoError.visibility = View.VISIBLE
+            playerErrorRow.visibility = View.VISIBLE
         } else {
-            videoError.visibility = View.GONE
+            playerErrorRow.visibility = View.GONE
         }
 
         actionQuality.text = if (state.isAudioOnly) {

@@ -40,6 +40,19 @@ object YouTubeInnerTube {
     private const val VISIONOS_UA =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
 
+    private const val ANDROID_VR_CLIENT_VERSION = "1.61.48"
+    private const val ANDROID_VR_UA =
+        "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+
+    private const val IOS_CLIENT_VERSION = "21.26.4"
+    private const val IOS_UA =
+        "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+
+    data class ResolveResult(
+        val info: VideoStreamInfo?,
+        val error: String? = null
+    )
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
@@ -155,38 +168,91 @@ object YouTubeInnerTube {
         return items.filter { !it.isPlaylist }.take(30)
     }
 
-    // ---- Stream Resolution (Fast InnerTube + Bulletproof yt-dlp Fallback) ----
+    // ---- Stream Resolution (Multi-Client InnerTube + Bulletproof yt-dlp Fallback) ----
 
-    fun resolveStreams(context: Context, videoId: String): VideoStreamInfo? {
-        // Tier 1: Fast direct InnerTube /player with VISIONOS client (~300ms)
-        val fast = resolveViaVisionOs(videoId)
-        if (fast != null) return fast
+    fun resolveStreams(
+        context: Context,
+        videoId: String,
+        onStatus: ((String) -> Unit)? = null
+    ): ResolveResult {
+        onStatus?.invoke("Connecting to YouTube…")
+
+        // Tier 1: Fast direct InnerTube /player clients (~300ms each)
+        val visionOs = resolveViaClient(
+            videoId = videoId,
+            clientName = "VISIONOS",
+            clientVersion = VISIONOS_CLIENT_VERSION,
+            clientNameId = "101",
+            userAgent = VISIONOS_UA,
+            extraClientFields = mapOf(
+                "deviceMake" to "Apple",
+                "deviceModel" to "RealityDevice17,1",
+                "osName" to "visionOS",
+                "osVersion" to "26.5.23O471"
+            )
+        )
+        if (visionOs.info != null) return visionOs
+
+        val androidVr = resolveViaClient(
+            videoId = videoId,
+            clientName = "ANDROID_VR",
+            clientVersion = ANDROID_VR_CLIENT_VERSION,
+            clientNameId = "28",
+            userAgent = ANDROID_VR_UA,
+            extraClientFields = mapOf(
+                "deviceMake" to "Oculus",
+                "deviceModel" to "Quest 3",
+                "androidSdkVersion" to 32,
+                "osName" to "Android",
+                "osVersion" to "12L"
+            )
+        )
+        if (androidVr.info != null) return androidVr
+
+        val ios = resolveViaClient(
+            videoId = videoId,
+            clientName = "IOS",
+            clientVersion = IOS_CLIENT_VERSION,
+            clientNameId = "5",
+            userAgent = IOS_UA,
+            extraClientFields = mapOf(
+                "deviceMake" to "Apple",
+                "deviceModel" to "iPhone16,2",
+                "osName" to "iPhone",
+                "osVersion" to "18.3.2.22D82"
+            )
+        )
+        if (ios.info != null) return ios
 
         // Tier 2: Bulletproof fallback via bundled yt-dlp + QuickJS + cookies.txt
-        Log.d(TAG, "InnerTube fast path unavailable for $videoId, falling back to yt-dlp")
-        return resolveViaYtDlp(context, videoId)
+        onStatus?.invoke("Resolving via yt-dlp engine…")
+        Log.d(TAG, "InnerTube fast clients failed ($videoId: ${visionOs.error}), trying yt-dlp")
+        val ytDlpResult = resolveViaYtDlp(context, videoId)
+        if (ytDlpResult.info != null) return ytDlpResult
+
+        val reason = ytDlpResult.error?.takeIf { it.isNotBlank() }
+            ?: visionOs.error?.takeIf { it.isNotBlank() }
+            ?: "Couldn't load stream for this video"
+        return ResolveResult(null, reason)
     }
 
-    private fun resolveViaVisionOs(videoId: String): VideoStreamInfo? {
+    private fun resolveViaClient(
+        videoId: String,
+        clientName: String,
+        clientVersion: String,
+        clientNameId: String,
+        userAgent: String,
+        extraClientFields: Map<String, Any>
+    ): ResolveResult {
+        val clientObj = JSONObject().apply {
+            put("clientName", clientName)
+            put("clientVersion", clientVersion)
+            put("hl", "en")
+            put("gl", "US")
+            extraClientFields.forEach { (k, v) -> put(k, v) }
+        }
         val body = JSONObject().apply {
-            put(
-                "context",
-                JSONObject().apply {
-                    put(
-                        "client",
-                        JSONObject().apply {
-                            put("clientName", "VISIONOS")
-                            put("clientVersion", VISIONOS_CLIENT_VERSION)
-                            put("deviceMake", "Apple")
-                            put("deviceModel", "RealityDevice17,1")
-                            put("osName", "visionOS")
-                            put("osVersion", "26.5.23O471")
-                            put("hl", "en")
-                            put("gl", "US")
-                        }
-                    )
-                }
-            )
+            put("context", JSONObject().apply { put("client", clientObj) })
             put("videoId", videoId)
             put("contentCheckOk", true)
             put("racyCheckOk", true)
@@ -194,15 +260,20 @@ object YouTubeInnerTube {
         val root = postInnerTube(
             url = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
             body = body,
-            userAgent = VISIONOS_UA,
-            clientNameId = "101",
-            clientVersion = VISIONOS_CLIENT_VERSION
-        ) ?: return null
+            userAgent = userAgent,
+            clientNameId = clientNameId,
+            clientVersion = clientVersion
+        ) ?: return ResolveResult(null, "Network error reaching YouTube")
 
-        val status = root.optJSONObject("playabilityStatus")?.optString("status") ?: ""
-        if (status != "OK") return null
+        val playStatus = root.optJSONObject("playabilityStatus")
+        val status = playStatus?.optString("status") ?: ""
+        if (status != "OK") {
+            val reason = playStatus?.optString("reason").orEmpty()
+            return ResolveResult(null, reason.ifBlank { status.ifBlank { "UNPLAYABLE" } })
+        }
 
-        val streamingData = root.optJSONObject("streamingData") ?: return null
+        val streamingData = root.optJSONObject("streamingData")
+            ?: return ResolveResult(null, "No streaming data returned")
         val hlsUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
 
         val videoStreams = mutableListOf<StreamFormat>()
@@ -213,7 +284,7 @@ object YouTubeInnerTube {
         parseInnerTubeFormats(streamingData.optJSONArray("adaptiveFormats"), isMuxedDefault = false, videoStreams, audioStreams, muxedStreams)
 
         if (hlsUrl == null && muxedStreams.isEmpty() && (videoStreams.isEmpty() || audioStreams.isEmpty())) {
-            return null
+            return ResolveResult(null, "No playable stream URLs")
         }
 
         val details = root.optJSONObject("videoDetails")
@@ -225,19 +296,21 @@ object YouTubeInnerTube {
         val thumb = pickThumb(details?.optJSONObject("thumbnail"))
             .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
 
-        return VideoStreamInfo(
-            videoId = videoId,
-            title = title,
-            channel = channel,
-            durationSec = durationSec,
-            viewCount = views,
-            description = description,
-            thumbnailUrl = thumb,
-            hlsUrl = hlsUrl,
-            videoStreams = videoStreams,
-            audioStreams = audioStreams,
-            muxedStreams = muxedStreams,
-            userAgent = VISIONOS_UA
+        return ResolveResult(
+            VideoStreamInfo(
+                videoId = videoId,
+                title = title,
+                channel = channel,
+                durationSec = durationSec,
+                viewCount = views,
+                description = description,
+                thumbnailUrl = thumb,
+                hlsUrl = hlsUrl,
+                videoStreams = videoStreams,
+                audioStreams = audioStreams,
+                muxedStreams = muxedStreams,
+                userAgent = userAgent
+            )
         )
     }
 
@@ -279,9 +352,9 @@ object YouTubeInnerTube {
         }
     }
 
-    private fun resolveViaYtDlp(context: Context, videoId: String): VideoStreamInfo? {
+    private fun resolveViaYtDlp(context: Context, videoId: String): ResolveResult {
         if (!RuntimeExtractor.extractIfNeeded(context, DownloadService.RUNTIME_VERSION)) {
-            return null
+            return ResolveResult(null, RuntimeExtractor.lastError ?: "Runtime setup failed")
         }
         val cookies = RuntimePaths.cookiesFile(context).takeIf { it.exists() }
         val runner = YtDlpRunner(
@@ -294,7 +367,10 @@ object YouTubeInnerTube {
             homeDir = context.filesDir,
             certFile = RuntimePaths.certFile(context)
         )
-        val raw = runner.extractInfoJson("https://www.youtube.com/watch?v=$videoId") ?: return null
+        val (raw, err) = runner.extractInfoJson("https://www.youtube.com/watch?v=$videoId")
+        if (raw == null) {
+            return ResolveResult(null, err.ifBlank { "yt-dlp failed to extract video" })
+        }
         return try {
             val root = JSONObject(raw)
             val formats = root.optJSONArray("formats") ?: JSONArray()
@@ -351,27 +427,29 @@ object YouTubeInnerTube {
             }
 
             if (hlsUrl == null && muxedStreams.isEmpty() && (videoStreams.isEmpty() || audioStreams.isEmpty())) {
-                return null
+                return ResolveResult(null, "No playable formats found")
             }
 
-            VideoStreamInfo(
-                videoId = videoId,
-                title = root.optString("title", "YouTube Video"),
-                channel = root.optString("uploader", root.optString("channel", "")),
-                durationSec = root.optLong("duration", 0L),
-                viewCount = formatViews(root.optLong("view_count", -1L).takeIf { it >= 0 }),
-                description = root.optString("description", ""),
-                thumbnailUrl = root.optString("thumbnail")
-                    .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" },
-                hlsUrl = hlsUrl,
-                videoStreams = videoStreams,
-                audioStreams = audioStreams,
-                muxedStreams = muxedStreams,
-                userAgent = detectedUa
+            ResolveResult(
+                VideoStreamInfo(
+                    videoId = videoId,
+                    title = root.optString("title", "YouTube Video"),
+                    channel = root.optString("uploader", root.optString("channel", "")),
+                    durationSec = root.optLong("duration", 0L),
+                    viewCount = formatViews(root.optLong("view_count", -1L).takeIf { it >= 0 }),
+                    description = root.optString("description", ""),
+                    thumbnailUrl = root.optString("thumbnail")
+                        .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" },
+                    hlsUrl = hlsUrl,
+                    videoStreams = videoStreams,
+                    audioStreams = audioStreams,
+                    muxedStreams = muxedStreams,
+                    userAgent = detectedUa
+                )
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed parsing yt-dlp JSON", e)
-            null
+            ResolveResult(null, e.message ?: "Stream parse failed")
         }
     }
 
