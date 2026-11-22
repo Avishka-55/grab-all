@@ -390,8 +390,28 @@ class YouTubePlaybackService : MediaSessionService() {
 
     fun togglePlayPause() {
         val p = player ?: return
-        if (p.isPlaying) p.pause() else p.play()
+        if (p.isPlaying) {
+            p.pause()
+        } else {
+            com.graball.PlayerService.instance?.pauseIfPlaying()
+            p.play()
+        }
     }
+
+    fun pauseIfPlaying() {
+        val p = player ?: return
+        if (p.isPlaying) p.pause()
+    }
+
+    fun seekTo(positionMs: Long) {
+        val p = player ?: return
+        val dur = p.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
+        p.seekTo(positionMs.coerceIn(0L, dur))
+    }
+
+    fun positionMs(): Long = player?.currentPosition?.coerceAtLeast(0L) ?: 0L
+    fun durationMs(): Long = player?.duration?.takeIf { it > 0L } ?: 0L
+    fun audioSessionId(): Int = player?.audioSessionId ?: 0
 
     fun seekBy(deltaMs: Long) {
         val p = player ?: return
@@ -467,6 +487,7 @@ class YouTubePlaybackService : MediaSessionService() {
 
     private fun loadAtIndex(index: Int) {
         val item = queue.getOrNull(index) ?: return
+        com.graball.PlayerService.instance?.pauseIfPlaying()
         val gen = ++loadGeneration
         player?.stop()
         isLoading = true

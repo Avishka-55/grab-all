@@ -19,10 +19,16 @@ import android.provider.MediaStore
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -32,18 +38,24 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.graball.youtube.ThumbnailLoader
+import com.graball.youtube.YouTubePlaybackService
+import com.graball.youtube.YouTubePlaybackState
+import com.graball.youtube.YouTubePlayerActivity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
 /**
- * Modern folder-aware local Music Player.
- *
- * - Scans audio across BOTH internal storage and external SD card / memory card.
- * - Automatically hides voice notes, call recordings, alarms, notifications,
- *   and ringtones so you never accidentally blast a recording!
- * - Folder-first browsing, Custom Playlists across folders, Built-in Equalizer
- *   button, and Long-Press context menus on songs, folders, and playlists.
+ * Modern folder-aware Music Player with:
+ * - Compact Mini-Player bar showing real embedded album art + live progress
+ * - Expandable Full-Screen "Now Playing" screen (large cover art, ID3 tags,
+ *   full transport controls, Equalizer, Add to Playlist, Up Next Queue,
+ *   swipe-down to collapse)
+ * - Seamless YouTube Audio Mode integration: when YouTube is playing in
+ *   background audio-only mode, the mini-player & full-screen player display
+ *   its YouTube thumbnail, live controls, and a 1-tap "Watch Video ↗" button
+ *   to jump directly to the playing video in GrabAll's YouTube UI.
  */
 class PlayerActivity : AppCompatActivity() {
 
@@ -69,7 +81,9 @@ class PlayerActivity : AppCompatActivity() {
     )
 
     private enum class ViewMode { FOLDERS, FOLDER_SONGS, PLAYLISTS, PLAYLIST_SONGS, ALL_MUSIC }
+    private enum class ActiveSource { NONE, LOCAL, YOUTUBE }
 
+    // Library UI
     private lateinit var searchInput: EditText
     private lateinit var tabsRow: LinearLayout
     private lateinit var tabFolders: TextView
@@ -81,14 +95,41 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var folderHeaderName: TextView
     private lateinit var recycler: RecyclerView
     private lateinit var emptyView: TextView
-    private lateinit var nowPlaying: TextView
-    private lateinit var nowFolder: TextView
-    private lateinit var seekBar: SeekBar
-    private lateinit var timeCur: TextView
-    private lateinit var timeDur: TextView
-    private lateinit var playPause: TextView
-    private lateinit var shuffleBtn: TextView
-    private lateinit var repeatBtn: TextView
+
+    // Mini-Player UI
+    private lateinit var miniPlayerCard: LinearLayout
+    private lateinit var miniProgress: ProgressBar
+    private lateinit var miniYtBanner: LinearLayout
+    private lateinit var miniBtnOpenYoutube: TextView
+    private lateinit var miniPlayerRow: LinearLayout
+    private lateinit var miniArtBox: FrameLayout
+    private lateinit var miniArt: ImageView
+    private lateinit var miniArtFallback: TextView
+    private lateinit var miniTitle: TextView
+    private lateinit var miniSub: TextView
+    private lateinit var miniPlayPause: TextView
+    private lateinit var miniNext: TextView
+
+    // Full-Screen Now Playing UI
+    private lateinit var nowPlayingSheet: ScrollView
+    private lateinit var npTopBar: LinearLayout
+    private lateinit var npSourceLabel: TextView
+    private lateinit var npYoutubeBar: LinearLayout
+    private lateinit var npBtnOpenYoutube: TextView
+    private lateinit var npArtBox: FrameLayout
+    private lateinit var npArt: ImageView
+    private lateinit var npArtFallback: TextView
+    private lateinit var npTitle: TextView
+    private lateinit var npArtist: TextView
+    private lateinit var npSeek: SeekBar
+    private lateinit var npTimeCur: TextView
+    private lateinit var npTimeDur: TextView
+    private lateinit var npShuffle: TextView
+    private lateinit var npPrev: TextView
+    private lateinit var npPlayPause: TextView
+    private lateinit var npNext: TextView
+    private lateinit var npRepeat: TextView
+    private lateinit var npBtnAddPlaylist: TextView
 
     private var allFolders: List<MusicFolder> = emptyList()
     private var tracksByPath: Map<String, AudioTrack> = emptyMap()
@@ -100,45 +141,23 @@ class PlayerActivity : AppCompatActivity() {
 
     private var service: PlayerService? = null
     private var bound = false
-    private var dragging = false
+    private var draggingSeek = false
+    private var isNowPlayingOpen = false
     private var lastTrack: File? = null
+    private var lastArtKey: String? = null
+    private var lastMetaPath: String? = null
+    private var cachedLocalMeta: AlbumArtLoader.TrackMeta? = null
 
     private lateinit var adapter: MusicRowAdapter
 
     private val handler = Handler(Looper.getMainLooper())
+    private val ytStateListener: (YouTubePlaybackState) -> Unit = {
+        updatePlayerUi()
+    }
+
     private val poller = object : Runnable {
         override fun run() {
-            val svc = service
-            if (bound && svc != null) {
-                val current = svc.currentFile()
-                nowPlaying.text = current?.nameWithoutExtension
-                    ?: getString(R.string.player_tap_to_play)
-                val folderLbl = svc.currentFolderLabel()
-                nowFolder.text = if (current != null && folderLbl.isNotBlank()) {
-                    "📁 $folderLbl"
-                } else {
-                    "Voice notes & call recordings auto-hidden"
-                }
-                playPause.text = if (svc.isPlaying()) "⏸" else "▶"
-                val dur = svc.duration()
-                val pos = svc.position()
-                if (dur > 0) {
-                    seekBar.max = dur
-                    if (!dragging) {
-                        seekBar.progress = pos
-                    }
-                    timeCur.text = formatTime(pos)
-                    timeDur.text = formatTime(dur)
-                } else {
-                    timeCur.text = "0:00"
-                    timeDur.text = "0:00"
-                }
-                updateShuffleRepeatUi(svc)
-                if (current != lastTrack) {
-                    lastTrack = current
-                    adapter.setActiveFile(current)
-                }
-            }
+            updatePlayerUi()
             handler.postDelayed(this, 500)
         }
     }
@@ -157,7 +176,7 @@ class PlayerActivity : AppCompatActivity() {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             service = (binder as PlayerService.PlayerBinder).getService()
             bound = true
-            service?.let { updateShuffleRepeatUi(it) }
+            updatePlayerUi()
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
@@ -170,6 +189,7 @@ class PlayerActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_player)
 
+        // Library views
         searchInput = findViewById(R.id.playerSearch)
         tabsRow = findViewById(R.id.playerTabsRow)
         tabFolders = findViewById(R.id.tabMusicFolders)
@@ -181,14 +201,47 @@ class PlayerActivity : AppCompatActivity() {
         folderHeaderName = findViewById(R.id.folderHeaderName)
         recycler = findViewById(R.id.playerRecycler)
         emptyView = findViewById(R.id.playerEmpty)
-        nowPlaying = findViewById(R.id.playerNowPlaying)
-        nowFolder = findViewById(R.id.playerNowFolder)
-        seekBar = findViewById(R.id.playerSeek)
-        timeCur = findViewById(R.id.playerTimeCur)
-        timeDur = findViewById(R.id.playerTimeDur)
-        playPause = findViewById(R.id.playerPlayPause)
-        shuffleBtn = findViewById(R.id.playerShuffle)
-        repeatBtn = findViewById(R.id.playerRepeat)
+
+        // Mini-Player views
+        miniPlayerCard = findViewById(R.id.miniPlayerCard)
+        miniProgress = findViewById(R.id.miniProgress)
+        miniYtBanner = findViewById(R.id.miniYtBanner)
+        miniBtnOpenYoutube = findViewById(R.id.miniBtnOpenYoutube)
+        miniPlayerRow = findViewById(R.id.miniPlayerRow)
+        miniArtBox = findViewById(R.id.miniArtBox)
+        miniArt = findViewById(R.id.miniArt)
+        miniArtFallback = findViewById(R.id.miniArtFallback)
+        miniTitle = findViewById(R.id.miniTitle)
+        miniSub = findViewById(R.id.miniSub)
+        miniPlayPause = findViewById(R.id.miniPlayPause)
+        miniNext = findViewById(R.id.miniNext)
+
+        // Full-Screen Now Playing views
+        nowPlayingSheet = findViewById(R.id.nowPlayingSheet)
+        npTopBar = findViewById(R.id.npTopBar)
+        npSourceLabel = findViewById(R.id.npSourceLabel)
+        npYoutubeBar = findViewById(R.id.npYoutubeBar)
+        npBtnOpenYoutube = findViewById(R.id.npBtnOpenYoutube)
+        npArtBox = findViewById(R.id.npArtBox)
+        npArt = findViewById(R.id.npArt)
+        npArtFallback = findViewById(R.id.npArtFallback)
+        npTitle = findViewById(R.id.npTitle)
+        npArtist = findViewById(R.id.npArtist)
+        npSeek = findViewById(R.id.npSeek)
+        npTimeCur = findViewById(R.id.npTimeCur)
+        npTimeDur = findViewById(R.id.npTimeDur)
+        npShuffle = findViewById(R.id.npShuffle)
+        npPrev = findViewById(R.id.npPrev)
+        npPlayPause = findViewById(R.id.npPlayPause)
+        npNext = findViewById(R.id.npNext)
+        npRepeat = findViewById(R.id.npRepeat)
+        npBtnAddPlaylist = findViewById(R.id.npBtnAddPlaylist)
+
+        // Hardware-rounded clipping for both album art cards (API 21+)
+        miniArtBox.outlineProvider = ViewOutlineProvider.BACKGROUND
+        miniArtBox.clipToOutline = true
+        npArtBox.outlineProvider = ViewOutlineProvider.BACKGROUND
+        npArtBox.clipToOutline = true
 
         // Bottom nav
         findViewById<LinearLayout>(R.id.navGrab).setOnClickListener {
@@ -219,7 +272,7 @@ class PlayerActivity : AppCompatActivity() {
             overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
         }
 
-        // Tabs & header controls
+        // Tabs & library header controls
         tabFolders.setOnClickListener {
             viewMode = ViewMode.FOLDERS
             openFolderPath = null
@@ -238,9 +291,7 @@ class PlayerActivity : AppCompatActivity() {
             openPlaylistName = null
             renderCurrentView()
         }
-        btnNewPlaylist.setOnClickListener {
-            showCreatePlaylistDialog(initialTrack = null)
-        }
+        btnNewPlaylist.setOnClickListener { showCreatePlaylistDialog(initialTrack = null) }
         btnFolderBack.setOnClickListener {
             if (viewMode == ViewMode.PLAYLIST_SONGS) {
                 viewMode = ViewMode.PLAYLISTS
@@ -261,12 +312,8 @@ class PlayerActivity : AppCompatActivity() {
                 if (folder.tracks.isNotEmpty()) playFolderTracks(folder.tracks, 0, folder.name)
             }
         }
-        findViewById<TextView>(R.id.btnEqualizer).setOnClickListener {
-            openSystemEqualizer()
-        }
-        findViewById<TextView>(R.id.btnManageFolders).setOnClickListener {
-            showManageFoldersDialog()
-        }
+        findViewById<TextView>(R.id.btnEqualizer).setOnClickListener { openSystemEqualizer() }
+        findViewById<TextView>(R.id.btnManageFolders).setOnClickListener { showManageFoldersDialog() }
 
         searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -277,25 +324,28 @@ class PlayerActivity : AppCompatActivity() {
             override fun afterTextChanged(s: Editable?) {}
         })
 
-        // Transport controls
-        findViewById<TextView>(R.id.playerPrev).setOnClickListener { sendControl(PlayerService.ACTION_PREV) }
-        findViewById<TextView>(R.id.playerNext).setOnClickListener { sendControl(PlayerService.ACTION_NEXT) }
-        findViewById<TextView>(R.id.playerStop).setOnClickListener { sendControl(PlayerService.ACTION_STOP) }
-        playPause.setOnClickListener {
-            val svc = service
-            if (bound && svc != null) {
-                if (svc.isPlaying()) svc.pause() else svc.resume()
-            } else {
-                sendControl(PlayerService.ACTION_RESUME)
-            }
-        }
-        shuffleBtn.setOnClickListener {
+        // Mini-player interactions
+        miniPlayerRow.setOnClickListener { openNowPlayingSheet() }
+        miniPlayPause.setOnClickListener { handlePlayPause() }
+        miniNext.setOnClickListener { handleNext() }
+        miniBtnOpenYoutube.setOnClickListener { openCurrentYouTubeVideo() }
+
+        // Full-Screen Now Playing interactions
+        findViewById<TextView>(R.id.npCollapse).setOnClickListener { closeNowPlayingSheet() }
+        findViewById<TextView>(R.id.npBtnQueue).setOnClickListener { showQueueDialog() }
+        npBtnOpenYoutube.setOnClickListener { openCurrentYouTubeVideo() }
+        npPrev.setOnClickListener { handlePrev() }
+        npPlayPause.setOnClickListener { handlePlayPause() }
+        npNext.setOnClickListener { handleNext() }
+        npShuffle.setOnClickListener {
+            if (resolveActiveSource() != ActiveSource.LOCAL) return@setOnClickListener
             val svc = service ?: return@setOnClickListener
             val on = svc.toggleShuffle()
             updateShuffleRepeatUi(svc)
             Toast.makeText(this, if (on) "Shuffle ON" else "Shuffle OFF", Toast.LENGTH_SHORT).show()
         }
-        repeatBtn.setOnClickListener {
+        npRepeat.setOnClickListener {
+            if (resolveActiveSource() != ActiveSource.LOCAL) return@setOnClickListener
             val svc = service ?: return@setOnClickListener
             val mode = svc.cycleRepeatMode()
             updateShuffleRepeatUi(svc)
@@ -306,19 +356,48 @@ class PlayerActivity : AppCompatActivity() {
             }
             Toast.makeText(this, label, Toast.LENGTH_SHORT).show()
         }
+        findViewById<TextView>(R.id.npBtnEq).setOnClickListener { openSystemEqualizer() }
+        npBtnAddPlaylist.setOnClickListener {
+            val file = service?.currentFile() ?: return@setOnClickListener
+            val track = tracksByPath[file.absolutePath] ?: AudioTrack(
+                file = file,
+                folderPath = file.parentFile?.absolutePath ?: "",
+                folderName = file.parentFile?.name ?: "Storage",
+                isSdCard = false,
+                durationMs = service?.duration()?.toLong() ?: 0L
+            )
+            showAddToPlaylistDialog(track)
+        }
+        findViewById<TextView>(R.id.npBtnStop).setOnClickListener {
+            when (resolveActiveSource()) {
+                ActiveSource.YOUTUBE -> YouTubePlaybackService.instance?.stopPlayback()
+                ActiveSource.LOCAL -> sendControl(PlayerService.ACTION_STOP)
+                ActiveSource.NONE -> Unit
+            }
+            closeNowPlayingSheet()
+            updatePlayerUi()
+        }
 
-        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+        npSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seek: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) timeCur.text = formatTime(progress)
+                if (fromUser) npTimeCur.text = formatTime(progress)
             }
             override fun onStartTrackingTouch(seek: SeekBar) {
-                dragging = true
+                draggingSeek = true
             }
             override fun onStopTrackingTouch(seek: SeekBar) {
-                dragging = false
-                service?.seekTo(seek.progress)
+                draggingSeek = false
+                when (resolveActiveSource()) {
+                    ActiveSource.YOUTUBE -> YouTubePlaybackService.instance?.seekTo(seek.progress.toLong())
+                    ActiveSource.LOCAL -> service?.seekTo(seek.progress)
+                    ActiveSource.NONE -> Unit
+                }
             }
         })
+
+        // Swipe down on artwork or top bar to collapse Now Playing cleanly
+        setupSwipeDownToCollapse(npTopBar)
+        setupSwipeDownToCollapse(npArtBox)
 
         adapter = MusicRowAdapter()
         recycler.layoutManager = LinearLayoutManager(this)
@@ -331,6 +410,18 @@ class PlayerActivity : AppCompatActivity() {
         } else {
             permissionLauncher.launch(audioReadPermission())
         }
+
+        if (intent?.getBooleanExtra("open_now_playing", false) == true) {
+            openNowPlayingSheet(animate = false)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra("open_now_playing", false)) {
+            openNowPlayingSheet(animate = true)
+        }
     }
 
     override fun onResume() {
@@ -338,6 +429,7 @@ class PlayerActivity : AppCompatActivity() {
         bindService(
             Intent(this, PlayerService::class.java), connection, Context.BIND_AUTO_CREATE
         )
+        YouTubePlaybackService.addListener(ytStateListener)
         handler.post(poller)
         if (ContextCompat.checkSelfPermission(this, audioReadPermission()) == PackageManager.PERMISSION_GRANTED) {
             loadLibrary()
@@ -347,6 +439,7 @@ class PlayerActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(poller)
+        YouTubePlaybackService.removeListener(ytStateListener)
         if (bound) {
             unbindService(connection)
             bound = false
@@ -356,18 +449,380 @@ class PlayerActivity : AppCompatActivity() {
 
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
-        when (viewMode) {
-            ViewMode.FOLDER_SONGS -> {
+        when {
+            isNowPlayingOpen -> closeNowPlayingSheet()
+            viewMode == ViewMode.FOLDER_SONGS -> {
                 viewMode = ViewMode.FOLDERS
                 openFolderPath = null
                 renderCurrentView()
             }
-            ViewMode.PLAYLIST_SONGS -> {
+            viewMode == ViewMode.PLAYLIST_SONGS -> {
                 viewMode = ViewMode.PLAYLISTS
                 openPlaylistName = null
                 renderCurrentView()
             }
             else -> super.onBackPressed()
+        }
+    }
+
+    // ---- Active Source Coordination (Local Music vs YouTube Audio) ----
+
+    private fun resolveActiveSource(): ActiveSource {
+        val localFile = if (bound) service?.currentFile() else null
+        val localPlaying = if (bound) service?.isPlaying() == true else false
+        val ytState = YouTubePlaybackService.currentState
+        val ytItem = ytState.currentItem
+        val ytAudioActive = ytItem != null && (ytState.isAudioOnly || ytState.isPlaying)
+
+        return when {
+            localFile != null && localPlaying -> ActiveSource.LOCAL
+            ytAudioActive -> ActiveSource.YOUTUBE
+            localFile != null -> ActiveSource.LOCAL
+            ytItem != null -> ActiveSource.YOUTUBE
+            else -> ActiveSource.NONE
+        }
+    }
+
+    private fun updatePlayerUi() {
+        val source = resolveActiveSource()
+        when (source) {
+            ActiveSource.LOCAL -> bindLocalPlayerUi()
+            ActiveSource.YOUTUBE -> bindYouTubePlayerUi()
+            ActiveSource.NONE -> bindIdlePlayerUi()
+        }
+    }
+
+    private fun bindLocalPlayerUi() {
+        val svc = service ?: return
+        val current = svc.currentFile() ?: return
+
+        if (current.absolutePath != lastMetaPath) {
+            lastMetaPath = current.absolutePath
+            cachedLocalMeta = svc.currentTrackMeta() ?: AlbumArtLoader.getCachedMeta(current)
+            AlbumArtLoader.loadMetaAsync(current) { meta ->
+                if (lastMetaPath == current.absolutePath) {
+                    cachedLocalMeta = meta
+                }
+            }
+        }
+        val meta = svc.currentTrackMeta() ?: cachedLocalMeta
+        val title = meta?.title?.takeIf { it.isNotBlank() } ?: current.nameWithoutExtension
+        val folderLbl = svc.currentFolderLabel()
+        val sub = buildString {
+            if (!meta?.artist.isNullOrBlank()) {
+                append(meta!!.artist)
+                if (folderLbl.isNotBlank()) append(" · ").append(folderLbl)
+            } else if (folderLbl.isNotBlank()) {
+                append("📁 ").append(folderLbl)
+            } else {
+                append("Local Music")
+            }
+        }
+
+        // Mini-player
+        miniYtBanner.visibility = View.GONE
+        miniTitle.text = title
+        miniSub.text = sub
+        val playing = svc.isPlaying()
+        miniPlayPause.text = if (playing) "⏸" else "▶"
+
+        // Full-Screen Now Playing
+        npSourceLabel.text = if (folderLbl.isNotBlank()) {
+            "PLAYING FROM · ${folderLbl.uppercase()}"
+        } else {
+            "LOCAL MUSIC"
+        }
+        npYoutubeBar.visibility = View.GONE
+        npTitle.text = title
+        npArtist.text = sub
+        npPlayPause.text = if (playing) "⏸" else "▶"
+        npShuffle.visibility = View.VISIBLE
+        npRepeat.visibility = View.VISIBLE
+        npBtnAddPlaylist.visibility = View.VISIBLE
+        updateShuffleRepeatUi(svc)
+
+        // Progress & SeekBar
+        val dur = svc.duration()
+        val pos = svc.position()
+        updateProgressBars(pos, dur)
+
+        // Album Art (only triggers when active track changes)
+        val artKey = "local:${current.absolutePath}"
+        if (artKey != lastArtKey) {
+            lastArtKey = artKey
+            AlbumArtLoader.loadInto(current, miniArt, miniArtFallback, targetPx = 160)
+            AlbumArtLoader.loadInto(current, npArt, npArtFallback, targetPx = 640)
+        }
+
+        if (current != lastTrack) {
+            lastTrack = current
+            adapter.setActiveFile(current)
+        }
+    }
+
+    private fun bindYouTubePlayerUi() {
+        val ytState = YouTubePlaybackService.currentState
+        val ytSvc = YouTubePlaybackService.instance
+        val item = ytState.currentItem ?: return
+        val info = ytState.streamInfo
+
+        val title = info?.title?.takeIf { it.isNotBlank() } ?: item.title
+        val channel = info?.channel?.takeIf { it.isNotBlank() }
+            ?: item.channel.ifBlank { "YouTube Audio" }
+        val playing = ytState.isPlaying
+
+        // Mini-player with small YouTube Audio indicator + direct "Watch Video ↗" button
+        miniYtBanner.visibility = View.VISIBLE
+        miniTitle.text = title
+        miniSub.text = channel
+        miniPlayPause.text = if (playing) "⏸" else "▶"
+
+        // Full-Screen Now Playing with YouTube Audio field
+        npSourceLabel.text = "🎧 YOUTUBE AUDIO MODE"
+        npYoutubeBar.visibility = View.VISIBLE
+        npTitle.text = title
+        npArtist.text = channel
+        npPlayPause.text = if (playing) "⏸" else "▶"
+        npShuffle.visibility = View.INVISIBLE
+        npRepeat.visibility = View.INVISIBLE
+        npBtnAddPlaylist.visibility = View.GONE
+
+        // Live ExoPlayer progress
+        val dur = ytSvc?.durationMs()?.toInt() ?: 0
+        val pos = ytSvc?.positionMs()?.toInt() ?: 0
+        updateProgressBars(pos, dur)
+
+        // YouTube Thumbnail as Album Art (reuses existing disk-cached ThumbnailLoader)
+        val thumbUrl = info?.thumbnailUrl?.takeIf { it.isNotBlank() } ?: item.thumbnailUrl
+        val artKey = "yt:$thumbUrl"
+        if (artKey != lastArtKey) {
+            lastArtKey = artKey
+            if (thumbUrl.isNotBlank()) {
+                miniArt.visibility = View.VISIBLE
+                miniArtFallback.visibility = View.GONE
+                npArt.visibility = View.VISIBLE
+                npArtFallback.visibility = View.GONE
+                ThumbnailLoader.load(thumbUrl, miniArt, targetWidthPx = 200)
+                ThumbnailLoader.load(thumbUrl, npArt, targetWidthPx = 640)
+            } else {
+                clearArtwork()
+            }
+        }
+
+        if (lastTrack != null) {
+            lastTrack = null
+            adapter.setActiveFile(null)
+        }
+    }
+
+    private fun bindIdlePlayerUi() {
+        miniYtBanner.visibility = View.GONE
+        miniTitle.text = getString(R.string.player_tap_to_play)
+        miniSub.text = "Voice notes & call recordings auto-hidden"
+        miniPlayPause.text = "▶"
+        miniProgress.progress = 0
+
+        npYoutubeBar.visibility = View.GONE
+        npSourceLabel.text = "NOW PLAYING"
+        npTitle.text = getString(R.string.player_tap_to_play)
+        npArtist.text = "Pick a song from Folders or Playlists"
+        npPlayPause.text = "▶"
+        npShuffle.visibility = View.VISIBLE
+        npRepeat.visibility = View.VISIBLE
+        npBtnAddPlaylist.visibility = View.GONE
+        updateProgressBars(0, 0)
+
+        if (lastArtKey != null) {
+            lastArtKey = null
+            clearArtwork()
+        }
+    }
+
+    private fun clearArtwork() {
+        miniArt.setImageDrawable(null)
+        miniArt.visibility = View.GONE
+        miniArtFallback.visibility = View.VISIBLE
+        npArt.setImageDrawable(null)
+        npArt.visibility = View.GONE
+        npArtFallback.visibility = View.VISIBLE
+    }
+
+    private fun updateProgressBars(posMs: Int, durMs: Int) {
+        if (durMs > 0) {
+            npSeek.max = durMs
+            if (!draggingSeek) {
+                npSeek.progress = posMs.coerceIn(0, durMs)
+            }
+            npTimeCur.text = formatTime(posMs)
+            npTimeDur.text = formatTime(durMs)
+            miniProgress.max = durMs
+            miniProgress.progress = posMs.coerceIn(0, durMs)
+        } else {
+            npSeek.max = 100
+            if (!draggingSeek) npSeek.progress = 0
+            npTimeCur.text = "0:00"
+            npTimeDur.text = "0:00"
+            miniProgress.progress = 0
+        }
+    }
+
+    // ---- Transport Actions ----
+
+    private fun handlePlayPause() {
+        when (resolveActiveSource()) {
+            ActiveSource.YOUTUBE -> YouTubePlaybackService.instance?.togglePlayPause()
+            ActiveSource.LOCAL -> {
+                val svc = service
+                if (bound && svc != null) {
+                    if (svc.isPlaying()) svc.pause() else svc.resume()
+                } else {
+                    sendControl(PlayerService.ACTION_RESUME)
+                }
+            }
+            ActiveSource.NONE -> {
+                Toast.makeText(this, "Tap any song or folder to start playing", Toast.LENGTH_SHORT).show()
+            }
+        }
+        updatePlayerUi()
+    }
+
+    private fun handleNext() {
+        when (resolveActiveSource()) {
+            ActiveSource.YOUTUBE -> YouTubePlaybackService.instance?.playNext()
+            ActiveSource.LOCAL -> sendControl(PlayerService.ACTION_NEXT)
+            ActiveSource.NONE -> Unit
+        }
+    }
+
+    private fun handlePrev() {
+        when (resolveActiveSource()) {
+            ActiveSource.YOUTUBE -> YouTubePlaybackService.instance?.playPrevious()
+            ActiveSource.LOCAL -> sendControl(PlayerService.ACTION_PREV)
+            ActiveSource.NONE -> Unit
+        }
+    }
+
+    private fun openCurrentYouTubeVideo() {
+        val intent = Intent(this, YouTubePlayerActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra("restore_video", true)
+        }
+        startActivity(intent)
+        @Suppress("DEPRECATION")
+        overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+    }
+
+    // ---- Full-Screen Now Playing Sheet Open / Close / Swipe ----
+
+    private fun openNowPlayingSheet(animate: Boolean = true) {
+        if (resolveActiveSource() == ActiveSource.NONE) {
+            Toast.makeText(this, "Tap a song first to open Now Playing", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (isNowPlayingOpen) return
+        isNowPlayingOpen = true
+        nowPlayingSheet.visibility = View.VISIBLE
+        if (animate) {
+            nowPlayingSheet.translationY = resources.displayMetrics.heightPixels.toFloat() * 0.25f
+            nowPlayingSheet.alpha = 0f
+            nowPlayingSheet.animate()
+                .translationY(0f)
+                .alpha(1f)
+                .setDuration(220L)
+                .start()
+        } else {
+            nowPlayingSheet.translationY = 0f
+            nowPlayingSheet.alpha = 1f
+        }
+        updatePlayerUi()
+    }
+
+    private fun closeNowPlayingSheet() {
+        if (!isNowPlayingOpen) return
+        isNowPlayingOpen = false
+        nowPlayingSheet.animate()
+            .translationY(resources.displayMetrics.heightPixels.toFloat() * 0.22f)
+            .alpha(0f)
+            .setDuration(180L)
+            .withEndAction {
+                nowPlayingSheet.visibility = View.GONE
+                nowPlayingSheet.translationY = 0f
+                nowPlayingSheet.alpha = 1f
+            }
+            .start()
+    }
+
+    private fun setupSwipeDownToCollapse(target: View) {
+        var downY = 0f
+        val threshold = 72f * resources.displayMetrics.density
+        target.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downY = event.rawY
+                    false
+                }
+                MotionEvent.ACTION_UP -> {
+                    val dy = event.rawY - downY
+                    if (dy > threshold) {
+                        closeNowPlayingSheet()
+                        true
+                    } else {
+                        false
+                    }
+                }
+                else -> false
+            }
+        }
+    }
+
+    // ---- Up Next Queue Dialog (Local + YouTube) ----
+
+    private fun showQueueDialog() {
+        when (resolveActiveSource()) {
+            ActiveSource.LOCAL -> {
+                val svc = service ?: return
+                val list = svc.currentPlaylist()
+                if (list.isEmpty()) {
+                    Toast.makeText(this, "Queue is empty", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                val curIdx = svc.currentIndex()
+                val labels = list.mapIndexed { idx, file ->
+                    val prefix = if (idx == curIdx) "▶ " else "${idx + 1}. "
+                    "$prefix${file.nameWithoutExtension}"
+                }.toTypedArray()
+                AlertDialog.Builder(this)
+                    .setTitle("Up Next (${list.size})")
+                    .setItems(labels) { _, which ->
+                        svc.playAtIndex(which)
+                        updatePlayerUi()
+                    }
+                    .setNegativeButton("Close", null)
+                    .show()
+            }
+            ActiveSource.YOUTUBE -> {
+                val ytState = YouTubePlaybackService.currentState
+                val q = ytState.queue
+                if (q.isEmpty()) {
+                    Toast.makeText(this, "YouTube queue is empty", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                val curIdx = ytState.queueIndex
+                val labels = q.mapIndexed { idx, item ->
+                    val prefix = if (idx == curIdx) "▶ " else "${idx + 1}. "
+                    "$prefix${item.title}"
+                }.toTypedArray()
+                AlertDialog.Builder(this)
+                    .setTitle("YouTube Queue (${q.size})")
+                    .setItems(labels) { _, which ->
+                        YouTubePlaybackService.instance?.playQueue(q, which, audioOnly = ytState.isAudioOnly)
+                    }
+                    .setNegativeButton("Close", null)
+                    .show()
+            }
+            ActiveSource.NONE -> {
+                Toast.makeText(this, "Nothing in queue", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -379,11 +834,14 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    // ---- Equalizer ----
+    // ---- Equalizer (works for BOTH local music & YouTube audio!) ----
 
     private fun openSystemEqualizer() {
+        val session = when (resolveActiveSource()) {
+            ActiveSource.YOUTUBE -> YouTubePlaybackService.instance?.audioSessionId() ?: 0
+            else -> service?.audioSessionId() ?: 0
+        }
         val intent = Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).apply {
-            val session = service?.audioSessionId() ?: 0
             if (session != 0) {
                 putExtra(AudioEffect.EXTRA_AUDIO_SESSION, session)
             }
@@ -678,7 +1136,6 @@ class PlayerActivity : AppCompatActivity() {
         val internalRoot = Environment.getExternalStorageDirectory().absolutePath
         val byPath = LinkedHashMap<String, AudioTrack>()
 
-        // 1) MediaStore scans BOTH internal storage AND external SD card automatically
         try {
             val projection = arrayOf(
                 MediaStore.Audio.Media.DATA,
@@ -712,7 +1169,6 @@ class PlayerActivity : AppCompatActivity() {
         } catch (_: Exception) {
         }
 
-        // 2) Direct walk of Downloads/GrabAll on EVERY volume (internal + SD card)
         val volumeRoots = mutableSetOf(Environment.getExternalStorageDirectory())
         for (dir in getExternalFilesDirs(null)) {
             if (dir == null) continue
@@ -741,7 +1197,6 @@ class PlayerActivity : AppCompatActivity() {
 
         tracksByPath = byPath
 
-        // Group tracks by folder path
         val grouped = byPath.values.groupBy { it.folderPath }
         allFolders = grouped.map { (path, tracks) ->
             val first = tracks.first()
@@ -967,6 +1422,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun playFolderTracks(tracks: List<AudioTrack>, startIndex: Int, folderLabel: String) {
         if (tracks.isEmpty()) return
+        YouTubePlaybackService.instance?.pauseIfPlaying()
         startService(
             Intent(this, PlayerService::class.java).apply {
                 action = PlayerService.ACTION_PLAY
@@ -985,10 +1441,10 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun updateShuffleRepeatUi(svc: PlayerService) {
-        shuffleBtn.setBackgroundResource(
+        npShuffle.setBackgroundResource(
             if (svc.isShuffleEnabled()) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
         )
-        shuffleBtn.setTextColor(
+        npShuffle.setTextColor(
             ContextCompat.getColor(
                 this,
                 if (svc.isShuffleEnabled()) R.color.graball_text else R.color.graball_subtext
@@ -996,19 +1452,19 @@ class PlayerActivity : AppCompatActivity() {
         )
         when (svc.getRepeatMode()) {
             PlayerService.RepeatMode.OFF -> {
-                repeatBtn.text = "🔁"
-                repeatBtn.setBackgroundResource(R.drawable.yt_chip_bg)
-                repeatBtn.setTextColor(ContextCompat.getColor(this, R.color.graball_subtext))
+                npRepeat.text = "🔁"
+                npRepeat.setBackgroundResource(R.drawable.yt_chip_bg)
+                npRepeat.setTextColor(ContextCompat.getColor(this, R.color.graball_subtext))
             }
             PlayerService.RepeatMode.ALL -> {
-                repeatBtn.text = "🔁"
-                repeatBtn.setBackgroundResource(R.drawable.yt_chip_selected)
-                repeatBtn.setTextColor(ContextCompat.getColor(this, R.color.graball_text))
+                npRepeat.text = "🔁"
+                npRepeat.setBackgroundResource(R.drawable.yt_chip_selected)
+                npRepeat.setTextColor(ContextCompat.getColor(this, R.color.graball_text))
             }
             PlayerService.RepeatMode.ONE -> {
-                repeatBtn.text = "🔂"
-                repeatBtn.setBackgroundResource(R.drawable.yt_chip_selected)
-                repeatBtn.setTextColor(ContextCompat.getColor(this, R.color.graball_text))
+                npRepeat.text = "🔂"
+                npRepeat.setBackgroundResource(R.drawable.yt_chip_selected)
+                npRepeat.setTextColor(ContextCompat.getColor(this, R.color.graball_text))
             }
         }
     }

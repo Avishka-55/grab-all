@@ -221,13 +221,26 @@ class YouTubePlayerActivity : AppCompatActivity() {
         registerPipReceiver()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra("restore_video", false)) {
+            intent.removeExtra("restore_video")
+            YouTubePlaybackService.instance?.setAudioOnlyMode(false)
+        }
+    }
+
     override fun onStart() {
         super.onStart()
         explicitBgAudioRequested = false
         val svc = YouTubePlaybackService.instance
         if (svc != null) {
             playerView.player = svc.getPlayer()
-            if (autoDisabledVideoForScreenOff) {
+            val switchToVideo = intent?.getBooleanExtra("restore_video", false) == true
+            if (switchToVideo) {
+                intent?.removeExtra("restore_video")
+            }
+            if (autoDisabledVideoForScreenOff || switchToVideo) {
                 autoDisabledVideoForScreenOff = false
                 svc.setAudioOnlyMode(false)
             }

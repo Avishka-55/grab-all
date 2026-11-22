@@ -1,336 +1,137 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modern folder-aware Music Player: browse by music folder across internal
-     storage & SD card (voice notes / call recordings auto-hidden), search,
-     folder-scoped playback, shuffle/repeat, and modern now-playing card. -->
-<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- Modern folder-aware Music Player with compact Mini-Player bar,
+     expandable full-screen Now Playing screen (album art + ID3 tags +
+     Queue + EQ), and seamless YouTube Audio Mode controller integration. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/graball_bg">
 
-    <LinearLayout
-        android:id="@+id/bottomNav"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:background="@color/graball_nav"
-        android:orientation="horizontal"
-        android:paddingTop="12dp"
-        android:paddingBottom="12dp"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
+    <!-- Main Library + Compact Mini-Player + Bottom Nav -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
 
         <LinearLayout
-            android:id="@+id/navGrab"
+            android:id="@+id/bottomNav"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@android:drawable/ic_menu_add"
-                android:tint="@color/graball_tab_text" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/nav_grab"
-                android:textColor="@color/graball_tab_text"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/navDownloads"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@android:drawable/stat_sys_download"
-                android:tint="@color/graball_tab_text" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/nav_downloads"
-                android:textColor="@color/graball_tab_text"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/navPlayer"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@android:drawable/ic_media_play"
-                android:tint="@color/graball_orange" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/nav_player"
-                android:textColor="@color/graball_orange"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/navSettings"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@android:drawable/ic_menu_preferences"
-                android:tint="@color/graball_tab_text" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/nav_settings"
-                android:textColor="@color/graball_tab_text"
-                android:textSize="12sp" />
-        </LinearLayout>
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:orientation="vertical"
-        android:paddingStart="16dp"
-        android:paddingTop="14dp"
-        android:paddingEnd="16dp"
-        android:paddingBottom="10dp"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toTopOf="@id/bottomNav"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
-
-        <!-- Header Row: Title + Folder Filter Manager -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <TextView
-                android:id="@+id/playerHeaderTitle"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/player_title"
-                android:textColor="@color/graball_text"
-                android:textSize="26sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/btnEqualizer"
-                android:layout_width="wrap_content"
-                android:layout_height="34dp"
-                android:layout_marginEnd="6dp"
-                android:background="@drawable/yt_chip_bg"
-                android:gravity="center"
-                android:paddingStart="10dp"
-                android:paddingEnd="10dp"
-                android:text="🎚 EQ"
-                android:textColor="@color/graball_text"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/btnManageFolders"
-                android:layout_width="wrap_content"
-                android:layout_height="34dp"
-                android:background="@drawable/yt_chip_bg"
-                android:gravity="center"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp"
-                android:text="⚙ Filter"
-                android:textColor="@color/graball_text"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <!-- Search Input -->
-        <EditText
-            android:id="@+id/playerSearch"
-            android:layout_width="match_parent"
-            android:layout_height="40dp"
-            android:layout_marginTop="10dp"
-            android:background="@drawable/input_bg"
-            android:hint="Search folders, playlists or songs…"
-            android:inputType="text"
-            android:maxLines="1"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:textColor="@color/graball_text"
-            android:textColorHint="@color/graball_tab_text"
-            android:textSize="13sp" />
-
-        <!-- Tabs: Folders | Playlists | All Music -->
-        <LinearLayout
-            android:id="@+id/playerTabsRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:orientation="horizontal">
-
-            <TextView
-                android:id="@+id/tabMusicFolders"
-                android:layout_width="0dp"
-                android:layout_height="34dp"
-                android:layout_marginEnd="6dp"
-                android:layout_weight="1"
-                android:background="@drawable/yt_chip_selected"
-                android:gravity="center"
-                android:text="📁 Folders"
-                android:textColor="@color/graball_text"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/tabMusicPlaylists"
-                android:layout_width="0dp"
-                android:layout_height="34dp"
-                android:layout_marginEnd="6dp"
-                android:layout_weight="1"
-                android:background="@drawable/yt_chip_bg"
-                android:gravity="center"
-                android:text="📋 Playlists"
-                android:textColor="@color/graball_subtext"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/tabMusicAll"
-                android:layout_width="0dp"
-                android:layout_height="34dp"
-                android:layout_weight="1"
-                android:background="@drawable/yt_chip_bg"
-                android:gravity="center"
-                android:text="🎵 All Music"
-                android:textColor="@color/graball_subtext"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <!-- New Playlist Action Bar (visible only in Playlists tab) -->
-        <TextView
-            android:id="@+id/btnNewPlaylist"
-            android:layout_width="match_parent"
-            android:layout_height="36dp"
-            android:layout_marginTop="8dp"
-            android:background="@drawable/yt_chip_bg"
-            android:gravity="center"
-            android:text="+ New Playlist"
-            android:textColor="@color/graball_orange"
-            android:textSize="13sp"
-            android:textStyle="bold"
-            android:visibility="gone" />
-
-        <!-- Folder Header when browsing inside a specific folder -->
-        <LinearLayout
-            android:id="@+id/folderHeaderBar"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:background="@drawable/card_bg"
-            android:gravity="center_vertical"
+            android:background="@color/graball_nav"
             android:orientation="horizontal"
-            android:padding="10dp"
-            android:visibility="gone">
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent">
 
-            <TextView
-                android:id="@+id/btnFolderBack"
-                android:layout_width="wrap_content"
-                android:layout_height="32dp"
-                android:background="@drawable/yt_chip_bg"
-                android:gravity="center"
-                android:paddingStart="10dp"
-                android:paddingEnd="10dp"
-                android:text="← Folders"
-                android:textColor="@color/graball_text"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/folderHeaderName"
+            <LinearLayout
+                android:id="@+id/navGrab"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="10dp"
                 android:layout_weight="1"
-                android:ellipsize="end"
-                android:maxLines="1"
-                android:textColor="@color/graball_text"
-                android:textSize="14sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/btnFolderPlayAll"
-                android:layout_width="wrap_content"
-                android:layout_height="32dp"
-                android:background="@drawable/yt_chip_selected"
                 android:gravity="center"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp"
-                android:text="▶ Play"
-                android:textColor="@color/graball_text"
-                android:textSize="12sp"
-                android:textStyle="bold" />
+                android:orientation="vertical">
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:src="@android:drawable/ic_menu_add"
+                    android:tint="@color/graball_tab_text" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/nav_grab"
+                    android:textColor="@color/graball_tab_text"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/navDownloads"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:src="@android:drawable/stat_sys_download"
+                    android:tint="@color/graball_tab_text" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/nav_downloads"
+                    android:textColor="@color/graball_tab_text"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/navPlayer"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:src="@android:drawable/ic_media_play"
+                    android:tint="@color/graball_orange" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/nav_player"
+                    android:textColor="@color/graball_orange"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/navSettings"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:src="@android:drawable/ic_menu_preferences"
+                    android:tint="@color/graball_tab_text" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/nav_settings"
+                    android:textColor="@color/graball_tab_text"
+                    android:textSize="12sp" />
+            </LinearLayout>
         </LinearLayout>
 
-        <!-- Main RecyclerView + Empty State -->
-        <FrameLayout
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_marginTop="10dp"
-            android:layout_weight="1">
-
-            <androidx.recyclerview.widget.RecyclerView
-                android:id="@+id/playerRecycler"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:clipToPadding="false"
-                android:paddingBottom="6dp" />
-
-            <TextView
-                android:id="@+id/playerEmpty"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:gravity="center"
-                android:padding="20dp"
-                android:text="@string/player_empty"
-                android:textColor="@color/graball_subtext"
-                android:textSize="14sp"
-                android:visibility="gone" />
-        </FrameLayout>
-
-        <!-- Modern Now-Playing Card -->
         <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:background="@drawable/card_bg"
-            android:elevation="6dp"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
             android:orientation="vertical"
-            android:padding="12dp">
+            android:paddingStart="16dp"
+            android:paddingTop="14dp"
+            android:paddingEnd="16dp"
+            android:paddingBottom="8dp"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toTopOf="@id/bottomNav"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent">
 
+            <!-- Header Row: Title + Equalizer + Folder Filter -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -338,149 +139,657 @@
                 android:orientation="horizontal">
 
                 <TextView
-                    android:layout_width="38dp"
-                    android:layout_height="38dp"
+                    android:id="@+id/playerHeaderTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/player_title"
+                    android:textColor="@color/graball_text"
+                    android:textSize="26sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnEqualizer"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:layout_marginEnd="6dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp"
+                    android:text="🎚 EQ"
+                    android:textColor="@color/graball_text"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/btnManageFolders"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="⚙ Filter"
+                    android:textColor="@color/graball_text"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- Search Input -->
+            <EditText
+                android:id="@+id/playerSearch"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/input_bg"
+                android:hint="Search folders, playlists or songs…"
+                android:inputType="text"
+                android:maxLines="1"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:textColor="@color/graball_text"
+                android:textColorHint="@color/graball_tab_text"
+                android:textSize="13sp" />
+
+            <!-- Tabs: Folders | Playlists | All Music -->
+            <LinearLayout
+                android:id="@+id/playerTabsRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tabMusicFolders"
+                    android:layout_width="0dp"
+                    android:layout_height="34dp"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1"
                     android:background="@drawable/yt_chip_selected"
                     android:gravity="center"
-                    android:text="♫"
+                    android:text="📁 Folders"
                     android:textColor="@color/graball_text"
-                    android:textSize="18sp"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tabMusicPlaylists"
+                    android:layout_width="0dp"
+                    android:layout_height="34dp"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:text="📋 Playlists"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tabMusicAll"
+                    android:layout_width="0dp"
+                    android:layout_height="34dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:text="🎵 All Music"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- New Playlist Action Bar (visible only in Playlists tab) -->
+            <TextView
+                android:id="@+id/btnNewPlaylist"
+                android:layout_width="match_parent"
+                android:layout_height="36dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/yt_chip_bg"
+                android:gravity="center"
+                android:text="+ New Playlist"
+                android:textColor="@color/graball_orange"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+            <!-- Folder / Playlist Breadcrumb Bar -->
+            <LinearLayout
+                android:id="@+id/folderHeaderBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/card_bg"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="10dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/btnFolderBack"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp"
+                    android:text="← Folders"
+                    android:textColor="@color/graball_text"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/folderHeaderName"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="@color/graball_text"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnFolderPlayAll"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:background="@drawable/yt_chip_selected"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="▶ Play"
+                    android:textColor="@color/graball_text"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Main RecyclerView + Empty State -->
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="10dp"
+                android:layout_weight="1">
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/playerRecycler"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:paddingBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/playerEmpty"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:gravity="center"
+                    android:padding="20dp"
+                    android:text="@string/player_empty"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="14sp"
+                    android:visibility="gone" />
+            </FrameLayout>
+
+            <!-- Compact Expandable Mini-Player Bar -->
+            <LinearLayout
+                android:id="@+id/miniPlayerCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/card_bg"
+                android:elevation="6dp"
+                android:orientation="vertical"
+                android:padding="10dp">
+
+                <!-- Thin live progress indicator -->
+                <ProgressBar
+                    android:id="@+id/miniProgress"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginBottom="8dp"
+                    android:max="1000"
+                    android:progress="0"
+                    android:progressTint="@color/graball_orange"
+                    android:progressBackgroundTint="@color/graball_stroke" />
+
+                <!-- Small YouTube Audio Indicator + Direct Video Jump -->
+                <LinearLayout
+                    android:id="@+id/miniYtBanner"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="6dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="🎧 YouTube Audio Playing"
+                        android:textColor="@color/graball_orange"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/miniBtnOpenYoutube"
+                        android:layout_width="wrap_content"
+                        android:layout_height="24dp"
+                        android:background="@drawable/yt_chip_selected"
+                        android:gravity="center"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:text="📺 Watch Video ↗"
+                        android:textColor="@color/graball_text"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Mini-Player Content Row (tap anywhere to open Full-Screen Player) -->
+                <LinearLayout
+                    android:id="@+id/miniPlayerRow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <FrameLayout
+                        android:id="@+id/miniArtBox"
+                        android:layout_width="46dp"
+                        android:layout_height="46dp"
+                        android:background="@drawable/album_art_bg">
+
+                        <ImageView
+                            android:id="@+id/miniArt"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:scaleType="centerCrop"
+                            android:visibility="gone" />
+
+                        <TextView
+                            android:id="@+id/miniArtFallback"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:gravity="center"
+                            android:text="♫"
+                            android:textColor="@color/graball_orange"
+                            android:textSize="20sp"
+                            android:textStyle="bold" />
+                    </FrameLayout>
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:layout_marginEnd="8dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/miniTitle"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:text="@string/player_tap_to_play"
+                            android:textColor="@color/graball_text"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/miniSub"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:text="Tap to open player · Voice notes hidden"
+                            android:textColor="@color/graball_subtext"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/miniPlayPause"
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:background="@drawable/play_circle_bg"
+                        android:gravity="center"
+                        android:text="▶"
+                        android:textColor="@color/graball_text"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/miniNext"
+                        android:layout_width="36dp"
+                        android:layout_height="36dp"
+                        android:layout_marginStart="6dp"
+                        android:background="@drawable/yt_chip_bg"
+                        android:gravity="center"
+                        android:text="⏭"
+                        android:textColor="@color/graball_text"
+                        android:textSize="15sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <!-- Full-Screen Expandable "Now Playing" Pro Audio Player Overlay -->
+    <ScrollView
+        android:id="@+id/nowPlayingSheet"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/graball_bg"
+        android:clickable="true"
+        android:fillViewport="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:paddingStart="22dp"
+            android:paddingTop="14dp"
+            android:paddingEnd="22dp"
+            android:paddingBottom="24dp">
+
+            <!-- Top Bar: Collapse · Source Label · Queue -->
+            <LinearLayout
+                android:id="@+id/npTopBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/npCollapse"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:text="⌄"
+                    android:textColor="@color/graball_text"
+                    android:textSize="22sp"
                     android:textStyle="bold" />
 
                 <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
                     android:layout_weight="1"
-                    android:orientation="vertical">
+                    android:gravity="center"
+                    android:orientation="vertical"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp">
 
                     <TextView
-                        android:id="@+id/playerNowPlaying"
-                        android:layout_width="match_parent"
+                        android:id="@+id/npSourceLabel"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:ellipsize="end"
                         android:maxLines="1"
-                        android:text="@string/player_tap_to_play"
-                        android:textColor="@color/graball_text"
-                        android:textSize="14sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/playerNowFolder"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:ellipsize="end"
-                        android:maxLines="1"
-                        android:text="Voice notes &amp; call recordings auto-hidden"
+                        android:text="NOW PLAYING"
                         android:textColor="@color/graball_subtext"
-                        android:textSize="11sp" />
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
                 </LinearLayout>
 
                 <TextView
-                    android:id="@+id/playerStop"
-                    android:layout_width="32dp"
-                    android:layout_height="32dp"
+                    android:id="@+id/npBtnQueue"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
-                    android:text="⏹"
-                    android:textColor="@color/graball_subtext"
-                    android:textSize="13sp" />
+                    android:text="📋"
+                    android:textColor="@color/graball_text"
+                    android:textSize="16sp" />
             </LinearLayout>
 
-            <SeekBar
-                android:id="@+id/playerSeek"
+            <!-- YouTube Audio Indicator Field with 1-Tap Direct Open Video -->
+            <LinearLayout
+                android:id="@+id/npYoutubeBar"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp" />
+                android:layout_marginTop="12dp"
+                android:background="@drawable/card_bg"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingTop="8dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="8dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="🎧 Playing YouTube Audio"
+                    android:textColor="@color/graball_orange"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/npBtnOpenYoutube"
+                    android:layout_width="wrap_content"
+                    android:layout_height="30dp"
+                    android:background="@drawable/yt_chip_selected"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="📺 Watch Video ↗"
+                    android:textColor="@color/graball_text"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Flexible top spacer -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:minHeight="16dp" />
+
+            <!-- Large Rounded Album Art Card -->
+            <FrameLayout
+                android:id="@+id/npArtBox"
+                android:layout_width="264dp"
+                android:layout_height="264dp"
+                android:background="@drawable/album_art_bg"
+                android:elevation="12dp">
+
+                <ImageView
+                    android:id="@+id/npArt"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:scaleType="centerCrop"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/npArtFallback"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:text="♫"
+                    android:textColor="@color/graball_orange"
+                    android:textSize="76sp"
+                    android:textStyle="bold" />
+            </FrameLayout>
+
+            <!-- Track Title & Artist / Channel -->
+            <TextView
+                android:id="@+id/npTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="2"
+                android:text="@string/player_tap_to_play"
+                android:textColor="@color/graball_text"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/npArtist"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="1"
+                android:textColor="@color/graball_subtext"
+                android:textSize="13sp" />
+
+            <!-- Flexible mid spacer -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:minHeight="18dp" />
+
+            <!-- SeekBar + Elapsed / Duration -->
+            <SeekBar
+                android:id="@+id/npSeek"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
                 android:orientation="horizontal"
-                android:paddingStart="4dp"
-                android:paddingEnd="4dp">
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp">
 
                 <TextView
-                    android:id="@+id/playerTimeCur"
+                    android:id="@+id/npTimeCur"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="0:00"
                     android:textColor="@color/graball_subtext"
-                    android:textSize="11sp" />
+                    android:textSize="12sp" />
 
                 <TextView
-                    android:id="@+id/playerTimeDur"
+                    android:id="@+id/npTimeDur"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="0:00"
                     android:textColor="@color/graball_subtext"
-                    android:textSize="11sp" />
+                    android:textSize="12sp" />
             </LinearLayout>
 
+            <!-- Primary Transport Controls -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="16dp"
                 android:gravity="center"
                 android:orientation="horizontal">
 
                 <TextView
-                    android:id="@+id/playerShuffle"
-                    android:layout_width="40dp"
-                    android:layout_height="36dp"
+                    android:id="@+id/npShuffle"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
                     android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
                     android:text="🔀"
                     android:textColor="@color/graball_subtext"
-                    android:textSize="14sp" />
+                    android:textSize="16sp" />
 
                 <TextView
-                    android:id="@+id/playerPrev"
-                    android:layout_width="44dp"
-                    android:layout_height="40dp"
-                    android:layout_marginStart="12dp"
+                    android:id="@+id/npPrev"
+                    android:layout_width="50dp"
+                    android:layout_height="50dp"
+                    android:layout_marginStart="14dp"
                     android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
                     android:text="⏮"
                     android:textColor="@color/graball_text"
-                    android:textSize="17sp" />
+                    android:textSize="20sp" />
 
                 <TextView
-                    android:id="@+id/playerPlayPause"
-                    android:layout_width="56dp"
-                    android:layout_height="44dp"
-                    android:layout_marginStart="14dp"
-                    android:layout_marginEnd="14dp"
-                    android:background="@drawable/yt_chip_selected"
+                    android:id="@+id/npPlayPause"
+                    android:layout_width="66dp"
+                    android:layout_height="66dp"
+                    android:layout_marginStart="16dp"
+                    android:layout_marginEnd="16dp"
+                    android:background="@drawable/play_circle_bg"
+                    android:elevation="6dp"
                     android:gravity="center"
                     android:text="▶"
                     android:textColor="@color/graball_text"
-                    android:textSize="20sp"
+                    android:textSize="26sp"
                     android:textStyle="bold" />
 
                 <TextView
-                    android:id="@+id/playerNext"
-                    android:layout_width="44dp"
-                    android:layout_height="40dp"
-                    android:layout_marginEnd="12dp"
+                    android:id="@+id/npNext"
+                    android:layout_width="50dp"
+                    android:layout_height="50dp"
+                    android:layout_marginEnd="14dp"
                     android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
                     android:text="⏭"
                     android:textColor="@color/graball_text"
-                    android:textSize="17sp" />
+                    android:textSize="20sp" />
 
                 <TextView
-                    android:id="@+id/playerRepeat"
-                    android:layout_width="40dp"
-                    android:layout_height="36dp"
+                    android:id="@+id/npRepeat"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
                     android:background="@drawable/yt_chip_selected"
                     android:gravity="center"
                     android:text="🔁"
                     android:textColor="@color/graball_text"
-                    android:textSize="14sp" />
+                    android:textSize="16sp" />
+            </LinearLayout>
+
+            <!-- Bottom Quick Actions: Equalizer · Add to Playlist · Stop -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/npBtnEq"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="10dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:text="🎚 Equalizer"
+                    android:textColor="@color/graball_text"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/npBtnAddPlaylist"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="10dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:text="➕ Playlist"
+                    android:textColor="@color/graball_text"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/npBtnStop"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:text="⏹ Stop"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="12sp" />
             </LinearLayout>
         </LinearLayout>
-    </LinearLayout>
+    </ScrollView>
 
-</androidx.constraintlayout.widget.ConstraintLayout>
+</FrameLayout>
