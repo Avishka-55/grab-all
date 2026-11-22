@@ -58,6 +58,9 @@ object YouTubeInnerTube {
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
+    @Volatile
+    private var cachedVisitorData: String? = null
+
     enum class SearchFilter(val params: String?) {
         ALL(null),
         VIDEOS("EgIQAQ%3D%3D"),
@@ -176,14 +179,17 @@ object YouTubeInnerTube {
         onStatus: ((String) -> Unit)? = null
     ): ResolveResult {
         onStatus?.invoke("Connecting to YouTube…")
+        val visitorData = ensureVisitorData()
 
-        // Tier 1: Fast direct InnerTube /player clients (~300ms each)
+        // Tier 1: Fast direct InnerTube /player clients (~300ms each) with
+        // real session visitorData + X-Goog-Visitor-Id (same headers yt-dlp sends).
         val visionOs = resolveViaClient(
             videoId = videoId,
             clientName = "VISIONOS",
             clientVersion = VISIONOS_CLIENT_VERSION,
             clientNameId = "101",
             userAgent = VISIONOS_UA,
+            visitorData = visitorData,
             extraClientFields = mapOf(
                 "deviceMake" to "Apple",
                 "deviceModel" to "RealityDevice17,1",
@@ -199,6 +205,7 @@ object YouTubeInnerTube {
             clientVersion = ANDROID_VR_CLIENT_VERSION,
             clientNameId = "28",
             userAgent = ANDROID_VR_UA,
+            visitorData = visitorData,
             extraClientFields = mapOf(
                 "deviceMake" to "Oculus",
                 "deviceModel" to "Quest 3",
@@ -215,6 +222,7 @@ object YouTubeInnerTube {
             clientVersion = IOS_CLIENT_VERSION,
             clientNameId = "5",
             userAgent = IOS_UA,
+            visitorData = visitorData,
             extraClientFields = mapOf(
                 "deviceMake" to "Apple",
                 "deviceModel" to "iPhone16,2",
@@ -236,12 +244,20 @@ object YouTubeInnerTube {
         return ResolveResult(null, reason)
     }
 
+    private fun ensureVisitorData(): String? {
+        cachedVisitorData?.takeIf { it.isNotBlank() }?.let { return it }
+        val body = JSONObject().apply { put("context", webContext()) }
+        postInnerTube("https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false", body)
+        return cachedVisitorData
+    }
+
     private fun resolveViaClient(
         videoId: String,
         clientName: String,
         clientVersion: String,
         clientNameId: String,
         userAgent: String,
+        visitorData: String?,
         extraClientFields: Map<String, Any>
     ): ResolveResult {
         val clientObj = JSONObject().apply {
@@ -249,6 +265,9 @@ object YouTubeInnerTube {
             put("clientVersion", clientVersion)
             put("hl", "en")
             put("gl", "US")
+            if (!visitorData.isNullOrBlank()) {
+                put("visitorData", visitorData)
+            }
             extraClientFields.forEach { (k, v) -> put(k, v) }
         }
         val body = JSONObject().apply {
@@ -262,7 +281,8 @@ object YouTubeInnerTube {
             body = body,
             userAgent = userAgent,
             clientNameId = clientNameId,
-            clientVersion = clientVersion
+            clientVersion = clientVersion,
+            visitorData = visitorData
         ) ?: return ResolveResult(null, "Network error reaching YouTube")
 
         val playStatus = root.optJSONObject("playabilityStatus")
@@ -395,7 +415,10 @@ object YouTubeInnerTube {
                 if (!ua.isNullOrBlank()) detectedUa = ua
 
                 if (proto == "m3u8_native" || proto == "m3u8") {
-                    if (hlsUrl == null && vcodec != "none" && acodec != "none") {
+                    val master = f.optString("manifest_url")
+                    if (hlsUrl == null && master.startsWith("http")) {
+                        hlsUrl = master
+                    } else if (hlsUrl == null && vcodec != "none" && acodec != "none") {
                         hlsUrl = url
                     }
                     continue
@@ -472,21 +495,31 @@ object YouTubeInnerTube {
         body: JSONObject,
         userAgent: String = WEB_UA,
         clientNameId: String = "1",
-        clientVersion: String = WEB_CLIENT_VERSION
+        clientVersion: String = WEB_CLIENT_VERSION,
+        visitorData: String? = cachedVisitorData
     ): JSONObject? {
         return try {
-            val req = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url(url)
                 .header("User-Agent", userAgent)
                 .header("Origin", "https://www.youtube.com")
                 .header("X-YouTube-Client-Name", clientNameId)
                 .header("X-YouTube-Client-Version", clientVersion)
+            if (!visitorData.isNullOrBlank()) {
+                reqBuilder.header("X-Goog-Visitor-Id", visitorData)
+            }
+            val req = reqBuilder
                 .post(body.toString().toRequestBody(JSON_MEDIA))
                 .build()
             client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 val txt = resp.body?.string() ?: return null
-                JSONObject(txt)
+                val json = JSONObject(txt)
+                val vd = json.optJSONObject("responseContext")?.optString("visitorData")
+                if (!vd.isNullOrBlank()) {
+                    cachedVisitorData = vd
+                }
+                json
             }
         } catch (e: Exception) {
             Log.w(TAG, "InnerTube request failed: ${e.message}")

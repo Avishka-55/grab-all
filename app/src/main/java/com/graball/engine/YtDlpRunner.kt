@@ -281,13 +281,38 @@ class YtDlpRunner(
      * Drains stderr on a helper thread (preventing pipe buffer deadlock) and
      * enforces a hard timeout so a stalled process can never spin forever.
      */
-    fun extractInfoJson(url: String, timeoutSec: Long = 35L): Pair<String?, String> {
+    fun extractInfoJson(url: String, timeoutSec: Long = 25L): Pair<String?, String> {
         if (!RuntimeExtractor.ensureExecutable(pythonBinary)) {
             return null to "Python runtime not executable"
         }
         if (quickJsBinary != null && quickJsBinary.exists()) {
             RuntimeExtractor.ensureExecutable(quickJsBinary)
         }
+        // Same fast JS-free visionos path that download() uses: skips the slow
+        // 2024 QuickJS challenge (~1.5s instead of timing out at 35s with "Read interrupted").
+        val fastAttempts = if (isYouTubeUrl(url)) {
+            listOf(
+                listOf("--extractor-args", "youtube:player_client=visionos"),
+                emptyList()
+            )
+        } else {
+            listOf(emptyList())
+        }
+
+        var lastErr = "yt-dlp returned no stream info"
+        for (extraClientArgs in fastAttempts) {
+            val (json, err) = runExtractOnce(url, extraClientArgs, timeoutSec)
+            if (json != null) return json to ""
+            if (err.isNotBlank()) lastErr = err
+        }
+        return null to lastErr
+    }
+
+    private fun runExtractOnce(
+        url: String,
+        extraArgs: List<String>,
+        timeoutSec: Long
+    ): Pair<String?, String> {
         var proc: Process? = null
         return try {
             val cmd = mutableListOf(
@@ -299,6 +324,7 @@ class YtDlpRunner(
                 "--skip-download",
                 "--socket-timeout", "15"
             )
+            cmd += extraArgs
             if (quickJsBinary != null && quickJsBinary.exists()) {
                 cmd += listOf("--js-runtimes", "quickjs:" + quickJsBinary.absolutePath)
             }
