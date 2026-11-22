@@ -132,7 +132,7 @@ class YouTubeActivity : AppCompatActivity() {
             playlistBanner.visibility = View.GONE
             refreshRecentChips()
             if (currentTab == Tab.EXPLORE) {
-                loadExplore(currentFilter == YouTubeInnerTube.SearchFilter.MUSIC)
+                loadExploreForCurrentFilter()
             }
         }
         findViewById<TextView>(R.id.ytSearchGo).setOnClickListener {
@@ -163,7 +163,7 @@ class YouTubeActivity : AppCompatActivity() {
                 if (!q.isNullOrBlank()) {
                     runSearch(q)
                 } else {
-                    loadExplore(filter == YouTubeInnerTube.SearchFilter.MUSIC)
+                    loadExploreForCurrentFilter()
                 }
             }
         }
@@ -475,6 +475,26 @@ class YouTubeActivity : AppCompatActivity() {
                 lastExploreItems = results
                 showItems(results, "No results for \"$query\"")
             }
+        }
+    }
+
+    private fun loadExploreForCurrentFilter() {
+        if (currentFilter == YouTubeInnerTube.SearchFilter.PLAYLISTS) {
+            val gen = ++requestGen
+            setLoading(true)
+            io.execute {
+                val results = YouTubeInnerTube.explorePlaylists()
+                runOnUiThread {
+                    if (gen != requestGen || isFinishing) return@runOnUiThread
+                    setLoading(false)
+                    lastExploreItems = results
+                    if (currentTab == Tab.EXPLORE && openPlaylist == null) {
+                        showItems(results, "Search above to find any YouTube playlist")
+                    }
+                }
+            }
+        } else {
+            loadExplore(currentFilter == YouTubeInnerTube.SearchFilter.MUSIC)
         }
     }
 

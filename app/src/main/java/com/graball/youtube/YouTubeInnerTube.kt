@@ -63,8 +63,8 @@ object YouTubeInnerTube {
 
     enum class SearchFilter(val params: String?) {
         ALL(null),
-        VIDEOS("EgIQAQ%3D%3D"),
-        PLAYLISTS("EgIQAw%3D%3D"),
+        VIDEOS("EgIQAQ=="),
+        PLAYLISTS("EgIQAw=="),
         MUSIC(null)
     }
 
@@ -156,30 +156,67 @@ object YouTubeInnerTube {
         return items.filter { !it.isPlaylist }
     }
 
+    fun explorePlaylists(): List<YtItem> {
+        val playlists = search("top music hits playlist 2026", SearchFilter.PLAYLISTS)
+        if (playlists.isNotEmpty()) return playlists
+        return search("popular music playlist", SearchFilter.PLAYLISTS)
+    }
+
     fun fetchPlaylist(playlistId: String): PlaylistDetails? {
-        val browseId = if (playlistId.startsWith("VL")) playlistId else "VL$playlistId"
+        val cleanId = playlistId.removePrefix("VL")
+        val browseId = "VL$cleanId"
         val body = JSONObject().apply {
             put("context", webContext())
             put("browseId", browseId)
         }
         val root = postInnerTube("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false", body)
-            ?: return null
 
-        val header = root.optJSONObject("header")
-        val title = header?.optJSONObject("playlistHeaderRenderer")
-            ?.let { extractText(it.optJSONObject("title")) }
-            ?: root.optJSONObject("metadata")
-                ?.optJSONObject("playlistMetadataRenderer")
-                ?.optString("title")
-            ?: "Playlist"
-        val channel = header?.optJSONObject("playlistHeaderRenderer")
-            ?.let { extractText(it.optJSONObject("ownerText")) }
-            ?: ""
-
+        var title = ""
+        var channel = ""
         val items = mutableListOf<YtItem>()
-        collectPlaylistVideos(root, items, seen = mutableSetOf())
+
+        if (root != null) {
+            val header = root.optJSONObject("header")
+            title = header?.optJSONObject("playlistHeaderRenderer")
+                ?.let { extractText(it.optJSONObject("title")) }
+                ?.takeIf { it.isNotBlank() }
+                ?: header?.optJSONObject("pageHeaderRenderer")
+                    ?.optString("pageTitle")
+                    ?.takeIf { it.isNotBlank() }
+                ?: root.optJSONObject("metadata")
+                    ?.optJSONObject("playlistMetadataRenderer")
+                    ?.optString("title")
+                    .orEmpty()
+            channel = header?.optJSONObject("playlistHeaderRenderer")
+                ?.let { extractText(it.optJSONObject("ownerText")) }
+                .orEmpty()
+            collectPlaylistVideos(root, items, seen = mutableSetOf())
+        }
+
+        // Fallback to /next (handles YouTube Mix / Radio RD... playlists and
+        // any playlists where /browse omits items).
+        if (items.isEmpty()) {
+            val nextBody = JSONObject().apply {
+                put("context", webContext())
+                put("playlistId", cleanId)
+            }
+            val nextRoot = postInnerTube("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", nextBody)
+            if (nextRoot != null) {
+                if (title.isBlank()) {
+                    title = nextRoot.optJSONObject("contents")
+                        ?.optJSONObject("twoColumnWatchNextResults")
+                        ?.optJSONObject("playlist")
+                        ?.optJSONObject("playlist")
+                        ?.optString("title")
+                        .orEmpty()
+                }
+                collectPlaylistVideos(nextRoot, items, seen = mutableSetOf())
+            }
+        }
+
+        if (items.isEmpty()) return null
         return PlaylistDetails(
-            playlistId = playlistId.removePrefix("VL"),
+            playlistId = cleanId,
             title = title.ifBlank { "Playlist" },
             channel = channel,
             items = items
@@ -606,6 +643,10 @@ object YouTubeInnerTube {
                         parseVideoRenderer(value as? JSONObject)?.let { item ->
                             if (seen.add(item.id)) out.add(item)
                         }
+                    } else if (key == "lockupViewModel") {
+                        parseLockupViewModel(value as? JSONObject)?.let { item ->
+                            if (!item.isPlaylist && seen.add(item.id)) out.add(item)
+                        }
                     } else {
                         collectPlaylistVideos(value, out, seen)
                     }
@@ -693,14 +734,29 @@ object YouTubeInnerTube {
             .orEmpty()
 
         val imgView = obj.optJSONObject("contentImage")
-        val sources = imgView?.optJSONObject("collectionThumbnailViewModel")
+        val thumbModel = imgView?.optJSONObject("collectionThumbnailViewModel")
             ?.optJSONObject("primaryThumbnail")
             ?.optJSONObject("thumbnailViewModel")
-            ?.optJSONObject("image")
-            ?.optJSONArray("sources")
             ?: imgView?.optJSONObject("thumbnailViewModel")
-                ?.optJSONObject("image")
-                ?.optJSONArray("sources")
+        val sources = thumbModel?.optJSONObject("image")?.optJSONArray("sources")
+        var badgeText = ""
+        val overlays = thumbModel?.optJSONArray("overlays")
+        if (overlays != null) {
+            for (i in 0 until overlays.length()) {
+                val badges = overlays.optJSONObject(i)
+                    ?.optJSONObject("thumbnailOverlayBadgeViewModel")
+                    ?.optJSONArray("thumbnailBadges")
+                    ?: continue
+                val t = badges.optJSONObject(0)
+                    ?.optJSONObject("thumbnailBadgeViewModel")
+                    ?.optString("text")
+                    .orEmpty()
+                if (t.isNotBlank()) {
+                    badgeText = t
+                    break
+                }
+            }
+        }
         var thumb = ""
         if (sources != null && sources.length() > 0) {
             thumb = sources.optJSONObject(sources.length() - 1)?.optString("url").orEmpty()
@@ -713,9 +769,10 @@ object YouTubeInnerTube {
             id = id,
             title = title,
             channel = channel,
+            duration = if (!isPlaylist) badgeText else "",
             thumbnailUrl = thumb,
             isPlaylist = isPlaylist,
-            videoCount = if (isPlaylist) "Playlist" else ""
+            videoCount = if (isPlaylist) badgeText.ifBlank { "Playlist" } else ""
         )
     }
 
