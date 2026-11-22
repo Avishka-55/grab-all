@@ -566,15 +566,16 @@ class PlayerActivity : AppCompatActivity() {
     // ---- Active Source Coordination (Local Music vs YouTube Audio) ----
 
     private fun resolveActiveSource(): ActiveSource {
-        val localFile = if (bound) service?.currentFile() else null
-        val localPlaying = if (bound) service?.isPlaying() == true else false
+        val svc = if (bound) service else null
+        val localFile = svc?.currentFile()
+        val localActive = svc?.isActiveOrPreparing() == true
         val ytState = YouTubePlaybackService.currentState
         val ytItem = ytState.currentItem
-        val ytAudioActive = ytItem != null && (ytState.isAudioOnly || ytState.isPlaying)
 
         return when {
-            localFile != null && localPlaying -> ActiveSource.LOCAL
-            ytAudioActive -> ActiveSource.YOUTUBE
+            ytItem != null && ytState.isPlaying -> ActiveSource.YOUTUBE
+            localFile != null && localActive -> ActiveSource.LOCAL
+            ytItem != null && ytState.isAudioOnly && localFile == null -> ActiveSource.YOUTUBE
             localFile != null -> ActiveSource.LOCAL
             ytItem != null -> ActiveSource.YOUTUBE
             else -> ActiveSource.NONE

@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import androidx.core.content.ContextCompat
 import com.graball.youtube.YouTubePlaybackService
 import java.io.File
@@ -59,6 +60,9 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     private val artExecutor = Executors.newSingleThreadExecutor()
 
     private var player: MediaPlayer? = null
+    private var isPrepared = false
+    private var playbackGen = 0
+    private var hasAudioFocus = false
     private var playlist: List<File> = emptyList()
     private var index = -1
     private var folderLabel: String = ""
@@ -116,7 +120,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     override fun onDestroy() {
-        releasePlayer()
+        releasePlayer(abandonAudioFocus = true)
         artExecutor.shutdownNow()
         if (instance === this) instance = null
         super.onDestroy()
@@ -129,10 +133,23 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     fun currentIndex(): Int = index
     fun currentFolderLabel(): String = folderLabel
     fun currentTrackMeta(): AlbumArtLoader.TrackMeta? = currentMeta
-    fun isPlaying(): Boolean = try { player?.isPlaying == true } catch (_: Exception) { false }
-    fun position(): Int = try { player?.currentPosition ?: 0 } catch (_: Exception) { 0 }
-    fun duration(): Int = try { player?.duration ?: 0 } catch (_: Exception) { 0 }
-    fun audioSessionId(): Int = try { player?.audioSessionId ?: 0 } catch (_: Exception) { 0 }
+
+    fun isPlaying(): Boolean =
+        if (!isPrepared) false else try { player?.isPlaying == true } catch (_: Exception) { false }
+
+    fun isActiveOrPreparing(): Boolean = isPlaying() || (!isPrepared && player != null)
+
+    // Guarding with isPrepared prevents calling getCurrentPosition()/getDuration()
+    // during MediaPlayer.Preparing state, which otherwise triggers native error (-38, 0)!
+    fun position(): Int =
+        if (!isPrepared) 0 else try { player?.currentPosition ?: 0 } catch (_: Exception) { 0 }
+
+    fun duration(): Int =
+        if (!isPrepared) 0 else try { player?.duration ?: 0 } catch (_: Exception) { 0 }
+
+    fun audioSessionId(): Int =
+        try { player?.audioSessionId ?: 0 } catch (_: Exception) { 0 }
+
     fun isShuffleEnabled(): Boolean = shuffleEnabled
     fun getRepeatMode(): RepeatMode = repeatMode
 
@@ -164,11 +181,14 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     fun seekTo(ms: Int) {
-        try { player?.seekTo(ms) } catch (_: Exception) { }
+        if (!isPrepared) return
+        try { player?.seekTo(ms.coerceAtLeast(0)) } catch (_: Exception) { }
     }
 
     fun pause() {
-        try { player?.pause() } catch (_: Exception) { }
+        if (isPrepared) {
+            try { player?.pause() } catch (_: Exception) { }
+        }
         @Suppress("DEPRECATION")
         stopForeground(false)
         updateNotification()
@@ -176,11 +196,16 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     fun resume() {
         YouTubePlaybackService.instance?.pauseIfPlaying()
-        if (requestFocus()) {
-            try { player?.start() } catch (_: Exception) { }
-            if (player != null) {
-                startForegroundCompat(buildNotification())
+        if (player == null) {
+            if (currentFile() != null) {
+                startPlayback()
             }
+            return
+        }
+        if (!isPrepared) return
+        if (ensureAudioFocus()) {
+            try { player?.start() } catch (_: Exception) { }
+            startForegroundCompat(buildNotification())
         }
         updateNotification()
     }
@@ -224,13 +249,17 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     private fun startPlayback() {
         val file = currentFile() ?: return
+        val gen = ++playbackGen
         // Ensure YouTube background audio pauses so both never play together
         YouTubePlaybackService.instance?.pauseIfPlaying()
-        releasePlayer()
-        requestFocus()
+        // Keep AudioFocus held across track transitions so abandoning + immediately
+        // re-requesting focus never triggers a stale AUDIOFOCUS_LOSS pause race!
+        releasePlayer(abandonAudioFocus = false)
+        ensureAudioFocus()
         loadTrackArtAndMetaAsync(file)
         try {
             val mp = MediaPlayer().apply {
+                setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -239,17 +268,35 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 )
                 setDataSource(file.absolutePath)
                 setOnCompletionListener(this@PlayerService)
-                setOnErrorListener { _, _, _ ->
-                    releasePlayer()
-                    true
+                setOnErrorListener { failedMp, what, _ ->
+                    // Ignore stale players or benign -38 state-query errors
+                    if (gen != playbackGen || failedMp !== player || what == -38) {
+                        true
+                    } else {
+                        isPrepared = false
+                        releasePlayer(abandonAudioFocus = false)
+                        true
+                    }
                 }
-                setOnPreparedListener { it.start(); updateNotification() }
+                setOnPreparedListener { readyMp ->
+                    if (gen != playbackGen || readyMp !== player) {
+                        try { readyMp.release() } catch (_: Exception) { }
+                        return@setOnPreparedListener
+                    }
+                    isPrepared = true
+                    try {
+                        readyMp.start()
+                        startForegroundCompat(buildNotification())
+                    } catch (_: Exception) {
+                    }
+                    updateNotification()
+                }
                 prepareAsync()
             }
             player = mp
             startForegroundCompat(buildNotification())
         } catch (_: Exception) {
-            releasePlayer()
+            releasePlayer(abandonAudioFocus = false)
         }
     }
 
@@ -285,7 +332,8 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     private fun stopPlayback() {
-        releasePlayer()
+        playbackGen++
+        releasePlayer(abandonAudioFocus = true)
         index = -1
         currentArtPath = null
         currentArt = null
@@ -295,13 +343,25 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         stopSelf()
     }
 
-    private fun releasePlayer() {
-        try { player?.release() } catch (_: Exception) { }
+    private fun releasePlayer(abandonAudioFocus: Boolean) {
+        isPrepared = false
+        val old = player
         player = null
-        abandonFocus()
+        if (old != null) {
+            try { old.setOnPreparedListener(null) } catch (_: Exception) { }
+            try { old.setOnCompletionListener(null) } catch (_: Exception) { }
+            try { old.setOnErrorListener(null) } catch (_: Exception) { }
+            try { old.stop() } catch (_: Exception) { }
+            try { old.reset() } catch (_: Exception) { }
+            try { old.release() } catch (_: Exception) { }
+        }
+        if (abandonAudioFocus) {
+            abandonFocus()
+        }
     }
 
     override fun onCompletion(mp: MediaPlayer) {
+        if (mp !== player) return
         when (repeatMode) {
             RepeatMode.ONE -> startPlayback()
             RepeatMode.ALL -> playNext()
@@ -318,9 +378,10 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         }
     }
 
-    private fun requestFocus(): Boolean {
+    private fun ensureAudioFocus(): Boolean {
+        if (hasAudioFocus) return true
         val am = audioManager ?: return false
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setOnAudioFocusChangeListener(this)
                 .setAudioAttributes(
@@ -337,9 +398,12 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN
             ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         }
+        hasAudioFocus = granted
+        return granted
     }
 
     private fun abandonFocus() {
+        hasAudioFocus = false
         val am = audioManager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             focusRequest?.let { am.abandonAudioFocusRequest(it) }
@@ -354,10 +418,12 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                hasAudioFocus = false
                 wasPlayingBeforeFocusLoss = isPlaying()
                 pause()
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
+                hasAudioFocus = true
                 if (wasPlayingBeforeFocusLoss) {
                     wasPlayingBeforeFocusLoss = false
                     resume()
@@ -398,7 +464,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         val displayTitle = meta?.title?.takeIf { it.isNotBlank() }
             ?: file?.nameWithoutExtension
             ?: "GrabAll Music"
-        val playing = isPlaying()
+        val playing = isPlaying() || (!isPrepared && player != null)
         val sub = buildString {
             if (!meta?.artist.isNullOrBlank()) {
                 append(meta!!.artist)
