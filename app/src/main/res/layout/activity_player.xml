@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modern folder-aware Music Player with compact Mini-Player bar,
-     expandable full-screen Now Playing screen (album art + ID3 tags +
-     Queue + EQ), and seamless YouTube Audio Mode controller integration. -->
+<!-- Modern Music Player:
+     - Library tabs: All Music (default) | Folders | Playlists
+     - Bottom nav: Grab | Music | Downloads | Settings
+     - Compact expandable Mini-Player bar
+     - Full-bleed Dynamic Album-Art Now Playing UI with mirrored AudioWaveView
+     - Full-Screen Live Synced Lyrics with dynamic album-color backdrop -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
@@ -49,29 +52,6 @@
             </LinearLayout>
 
             <LinearLayout
-                android:id="@+id/navDownloads"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:gravity="center"
-                android:orientation="vertical">
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:src="@android:drawable/stat_sys_download"
-                    android:tint="@color/graball_tab_text" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/nav_downloads"
-                    android:textColor="@color/graball_tab_text"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <LinearLayout
                 android:id="@+id/navPlayer"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
@@ -91,6 +71,29 @@
                     android:layout_marginTop="4dp"
                     android:text="@string/nav_player"
                     android:textColor="@color/graball_orange"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/navDownloads"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:src="@android:drawable/stat_sys_download"
+                    android:tint="@color/graball_tab_text" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/nav_downloads"
+                    android:textColor="@color/graball_tab_text"
                     android:textSize="12sp" />
             </LinearLayout>
 
@@ -181,7 +184,7 @@
                 android:layout_height="40dp"
                 android:layout_marginTop="10dp"
                 android:background="@drawable/input_bg"
-                android:hint="Search folders, playlists or songs…"
+                android:hint="Search songs, folders or playlists…"
                 android:inputType="text"
                 android:maxLines="1"
                 android:paddingStart="14dp"
@@ -190,7 +193,7 @@
                 android:textColorHint="@color/graball_tab_text"
                 android:textSize="13sp" />
 
-            <!-- Tabs: Folders | Playlists | All Music -->
+            <!-- Tabs: All Music (Default) | Folders | Playlists -->
             <LinearLayout
                 android:id="@+id/playerTabsRow"
                 android:layout_width="match_parent"
@@ -199,38 +202,38 @@
                 android:orientation="horizontal">
 
                 <TextView
-                    android:id="@+id/tabMusicFolders"
+                    android:id="@+id/tabMusicAll"
                     android:layout_width="0dp"
                     android:layout_height="34dp"
                     android:layout_marginEnd="6dp"
                     android:layout_weight="1"
                     android:background="@drawable/yt_chip_selected"
                     android:gravity="center"
-                    android:text="📁 Folders"
+                    android:text="🎵 All Music"
                     android:textColor="@color/graball_text"
                     android:textSize="12sp"
                     android:textStyle="bold" />
 
                 <TextView
-                    android:id="@+id/tabMusicPlaylists"
+                    android:id="@+id/tabMusicFolders"
                     android:layout_width="0dp"
                     android:layout_height="34dp"
                     android:layout_marginEnd="6dp"
                     android:layout_weight="1"
                     android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
-                    android:text="📋 Playlists"
+                    android:text="📁 Folders"
                     android:textColor="@color/graball_subtext"
                     android:textSize="12sp" />
 
                 <TextView
-                    android:id="@+id/tabMusicAll"
+                    android:id="@+id/tabMusicPlaylists"
                     android:layout_width="0dp"
                     android:layout_height="34dp"
                     android:layout_weight="1"
                     android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
-                    android:text="🎵 All Music"
+                    android:text="📋 Playlists"
                     android:textColor="@color/graball_subtext"
                     android:textSize="12sp" />
             </LinearLayout>
@@ -313,17 +316,40 @@
                     android:clipToPadding="false"
                     android:paddingBottom="6dp" />
 
-                <TextView
-                    android:id="@+id/playerEmpty"
+                <LinearLayout
+                    android:id="@+id/playerEmptyBox"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_gravity="center"
                     android:gravity="center"
+                    android:orientation="vertical"
                     android:padding="20dp"
-                    android:text="@string/player_empty"
-                    android:textColor="@color/graball_subtext"
-                    android:textSize="14sp"
-                    android:visibility="gone" />
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/playerEmpty"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:text="@string/player_empty"
+                        android:textColor="@color/graball_subtext"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:id="@+id/btnSearchOnYoutube"
+                        android:layout_width="wrap_content"
+                        android:layout_height="38dp"
+                        android:layout_marginTop="14dp"
+                        android:background="@drawable/yt_chip_selected"
+                        android:gravity="center"
+                        android:paddingStart="18dp"
+                        android:paddingEnd="18dp"
+                        android:text="🔍 Search on YouTube ↗"
+                        android:textColor="@color/graball_text"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+                </LinearLayout>
             </FrameLayout>
 
             <!-- Compact Expandable Mini-Player Bar -->
@@ -337,7 +363,6 @@
                 android:orientation="vertical"
                 android:padding="10dp">
 
-                <!-- Thin live progress indicator -->
                 <ProgressBar
                     android:id="@+id/miniProgress"
                     style="?android:attr/progressBarStyleHorizontal"
@@ -349,7 +374,6 @@
                     android:progressTint="@color/graball_orange"
                     android:progressBackgroundTint="@color/graball_stroke" />
 
-                <!-- Small YouTube Audio Indicator + Direct Video Jump -->
                 <LinearLayout
                     android:id="@+id/miniYtBanner"
                     android:layout_width="match_parent"
@@ -382,7 +406,6 @@
                         android:textStyle="bold" />
                 </LinearLayout>
 
-                <!-- Mini-Player Content Row (tap anywhere to open Full-Screen Player) -->
                 <LinearLayout
                     android:id="@+id/miniPlayerRow"
                     android:layout_width="match_parent"
@@ -471,43 +494,76 @@
         </LinearLayout>
     </androidx.constraintlayout.widget.ConstraintLayout>
 
-    <!-- Full-Screen Expandable "Now Playing" Pro Audio Player Overlay -->
-    <ScrollView
+    <!-- Full-Screen Dynamic Album-Art Now Playing Overlay (Immersive Edge-to-Edge) -->
+    <LinearLayout
         android:id="@+id/nowPlayingSheet"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="@color/graball_bg"
+        android:background="#1A172B"
         android:clickable="true"
-        android:fillViewport="true"
         android:focusable="true"
+        android:orientation="vertical"
         android:visibility="gone">
 
-        <LinearLayout
+        <!-- Top Half: Full-Bleed Edge-to-Edge Album Cover + Gradient Melt + Sound Wave -->
+        <FrameLayout
+            android:id="@+id/npArtBox"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_horizontal"
-            android:orientation="vertical"
-            android:paddingStart="22dp"
-            android:paddingTop="14dp"
-            android:paddingEnd="22dp"
-            android:paddingBottom="24dp">
+            android:layout_height="0dp"
+            android:layout_weight="1.08">
 
-            <!-- Top Bar: Collapse · Source Label · Queue -->
+            <ImageView
+                android:id="@+id/npArt"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scaleType="centerCrop"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/npArtFallback"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:text="♫"
+                android:textColor="#44FFFFFF"
+                android:textSize="96sp"
+                android:textStyle="bold" />
+
+            <!-- Smooth bottom melt from full-bleed cover into dynamic album color -->
+            <View
+                android:id="@+id/npArtFade"
+                android:layout_width="match_parent"
+                android:layout_height="150dp"
+                android:layout_gravity="bottom" />
+
+            <!-- Mirrored Translucent Sound Wave Horizon (Option A, 0 permissions) -->
+            <com.graball.AudioWaveView
+                android:id="@+id/npWave"
+                android:layout_width="match_parent"
+                android:layout_height="74dp"
+                android:layout_gravity="bottom" />
+
+            <!-- Floating Translucent Top Bar -->
             <LinearLayout
                 android:id="@+id/npTopBar"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_gravity="top"
                 android:gravity="center_vertical"
-                android:orientation="horizontal">
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="10dp">
 
                 <TextView
                     android:id="@+id/npCollapse"
                     android:layout_width="40dp"
                     android:layout_height="40dp"
-                    android:background="@drawable/yt_chip_bg"
+                    android:background="@drawable/circle_translucent_bg"
                     android:gravity="center"
                     android:text="⌄"
-                    android:textColor="@color/graball_text"
+                    android:textColor="#FFFFFF"
                     android:textSize="22sp"
                     android:textStyle="bold" />
 
@@ -516,7 +572,6 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:gravity="center"
-                    android:orientation="vertical"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp">
 
@@ -524,11 +579,16 @@
                         android:id="@+id/npSourceLabel"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:background="@drawable/pill_translucent_bg"
                         android:ellipsize="end"
                         android:maxLines="1"
+                        android:paddingStart="12dp"
+                        android:paddingTop="4dp"
+                        android:paddingEnd="12dp"
+                        android:paddingBottom="4dp"
                         android:text="NOW PLAYING"
-                        android:textColor="@color/graball_subtext"
-                        android:textSize="11sp"
+                        android:textColor="#E6FFFFFF"
+                        android:textSize="10sp"
                         android:textStyle="bold" />
                 </LinearLayout>
 
@@ -536,95 +596,36 @@
                     android:id="@+id/npBtnQueue"
                     android:layout_width="40dp"
                     android:layout_height="40dp"
-                    android:background="@drawable/yt_chip_bg"
+                    android:background="@drawable/circle_translucent_bg"
                     android:gravity="center"
                     android:text="📋"
-                    android:textColor="@color/graball_text"
+                    android:textColor="#FFFFFF"
                     android:textSize="16sp" />
             </LinearLayout>
+        </FrameLayout>
 
-            <!-- YouTube Audio Indicator Field with 1-Tap Direct Open Video -->
-            <LinearLayout
-                android:id="@+id/npYoutubeBar"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:background="@drawable/card_bg"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingStart="12dp"
-                android:paddingTop="8dp"
-                android:paddingEnd="10dp"
-                android:paddingBottom="8dp"
-                android:visibility="gone">
+        <!-- Bottom Half: Dynamic Color Control Deck -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1.0"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:paddingStart="22dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="22dp"
+            android:paddingBottom="22dp">
 
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="🎧 Playing YouTube Audio"
-                    android:textColor="@color/graball_orange"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/npBtnOpenYoutube"
-                    android:layout_width="wrap_content"
-                    android:layout_height="30dp"
-                    android:background="@drawable/yt_chip_selected"
-                    android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="📺 Watch Video ↗"
-                    android:textColor="@color/graball_text"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <!-- Flexible top spacer -->
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1"
-                android:minHeight="16dp" />
-
-            <!-- Large Rounded Album Art Card -->
-            <FrameLayout
-                android:id="@+id/npArtBox"
-                android:layout_width="264dp"
-                android:layout_height="264dp"
-                android:background="@drawable/album_art_bg"
-                android:elevation="12dp">
-
-                <ImageView
-                    android:id="@+id/npArt"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:scaleType="centerCrop"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/npArtFallback"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:gravity="center"
-                    android:text="♫"
-                    android:textColor="@color/graball_orange"
-                    android:textSize="76sp"
-                    android:textStyle="bold" />
-            </FrameLayout>
-
-            <!-- Track Title & Artist / Channel -->
+            <!-- Song Title & Artist / Channel -->
             <TextView
                 android:id="@+id/npTitle"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
                 android:ellipsize="end"
                 android:gravity="center"
                 android:maxLines="2"
                 android:text="@string/player_tap_to_play"
-                android:textColor="@color/graball_text"
+                android:textColor="#FFFFFF"
                 android:textSize="20sp"
                 android:textStyle="bold" />
 
@@ -632,53 +633,158 @@
                 android:id="@+id/npArtist"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="4dp"
                 android:ellipsize="end"
                 android:gravity="center"
                 android:maxLines="1"
-                android:textColor="@color/graball_subtext"
+                android:textColor="#CCFFFFFF"
                 android:textSize="13sp" />
 
-            <!-- Flexible mid spacer -->
+            <!-- YouTube Audio Direct Jump Pill (shown only in YouTube Audio Mode) -->
+            <LinearLayout
+                android:id="@+id/npYoutubeBar"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center"
+                android:orientation="horizontal"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/npBtnOpenYoutube"
+                    android:layout_width="wrap_content"
+                    android:layout_height="30dp"
+                    android:background="@drawable/pill_translucent_bg"
+                    android:gravity="center"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:text="📺 Watch Video on YouTube ↗"
+                    android:textColor="#FFFFFF"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
             <View
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
-                android:layout_weight="1"
-                android:minHeight="18dp" />
+                android:layout_weight="1" />
 
-            <!-- SeekBar + Elapsed / Duration -->
-            <SeekBar
-                android:id="@+id/npSeek"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content" />
-
+            <!-- Action Pills Strip: Lyrics · EQ · Playlist / Download · Stop -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:orientation="horizontal"
-                android:paddingStart="6dp"
-                android:paddingEnd="6dp">
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/npBtnLyrics"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/pill_translucent_bg"
+                    android:gravity="center"
+                    android:paddingStart="13dp"
+                    android:paddingEnd="13dp"
+                    android:text="🎤 Lyrics"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/npBtnEq"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/pill_translucent_bg"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="🎚 EQ"
+                    android:textColor="#E6FFFFFF"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/npBtnAddPlaylist"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/pill_translucent_bg"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="➕ Playlist"
+                    android:textColor="#E6FFFFFF"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/npBtnDownload"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/pill_translucent_bg"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="⬇ Save"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/npBtnStop"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:background="@drawable/pill_translucent_bg"
+                    android:gravity="center"
+                    android:paddingStart="11dp"
+                    android:paddingEnd="11dp"
+                    android:text="⏹"
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="0.8" />
+
+            <!-- Inline SeekBar Row: 00:04 ──●── 03:29 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
                 <TextView
                     android:id="@+id/npTimeCur"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="start"
+                    android:text="0:00"
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="11sp" />
+
+                <SeekBar
+                    android:id="@+id/npSeek"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="0:00"
-                    android:textColor="@color/graball_subtext"
-                    android:textSize="12sp" />
+                    android:progressTint="#FFFFFF"
+                    android:progressBackgroundTint="#44FFFFFF"
+                    android:thumbTint="#FFFFFF" />
 
                 <TextView
                     android:id="@+id/npTimeDur"
-                    android:layout_width="wrap_content"
+                    android:layout_width="40dp"
                     android:layout_height="wrap_content"
+                    android:gravity="end"
                     android:text="0:00"
-                    android:textColor="@color/graball_subtext"
-                    android:textSize="12sp" />
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="11sp" />
             </LinearLayout>
 
-            <!-- Primary Transport Controls -->
+            <!-- Minimalist Transport Controls -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -690,153 +796,72 @@
                     android:id="@+id/npShuffle"
                     android:layout_width="42dp"
                     android:layout_height="42dp"
-                    android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
                     android:text="🔀"
-                    android:textColor="@color/graball_subtext"
-                    android:textSize="16sp" />
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="17sp" />
 
                 <TextView
                     android:id="@+id/npPrev"
-                    android:layout_width="50dp"
-                    android:layout_height="50dp"
-                    android:layout_marginStart="14dp"
-                    android:background="@drawable/yt_chip_bg"
+                    android:layout_width="54dp"
+                    android:layout_height="54dp"
+                    android:layout_marginStart="12dp"
                     android:gravity="center"
                     android:text="⏮"
-                    android:textColor="@color/graball_text"
-                    android:textSize="20sp" />
+                    android:textColor="#FFFFFF"
+                    android:textSize="26sp" />
 
                 <TextView
                     android:id="@+id/npPlayPause"
-                    android:layout_width="66dp"
-                    android:layout_height="66dp"
+                    android:layout_width="70dp"
+                    android:layout_height="70dp"
                     android:layout_marginStart="16dp"
                     android:layout_marginEnd="16dp"
-                    android:background="@drawable/play_circle_bg"
-                    android:elevation="6dp"
+                    android:background="@drawable/circle_translucent_bg"
                     android:gravity="center"
                     android:text="▶"
-                    android:textColor="@color/graball_text"
-                    android:textSize="26sp"
+                    android:textColor="#FFFFFF"
+                    android:textSize="32sp"
                     android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/npNext"
-                    android:layout_width="50dp"
-                    android:layout_height="50dp"
-                    android:layout_marginEnd="14dp"
-                    android:background="@drawable/yt_chip_bg"
+                    android:layout_width="54dp"
+                    android:layout_height="54dp"
+                    android:layout_marginEnd="12dp"
                     android:gravity="center"
                     android:text="⏭"
-                    android:textColor="@color/graball_text"
-                    android:textSize="20sp" />
+                    android:textColor="#FFFFFF"
+                    android:textSize="26sp" />
 
                 <TextView
                     android:id="@+id/npRepeat"
                     android:layout_width="42dp"
                     android:layout_height="42dp"
-                    android:background="@drawable/yt_chip_selected"
                     android:gravity="center"
                     android:text="🔁"
-                    android:textColor="@color/graball_text"
-                    android:textSize="16sp" />
-            </LinearLayout>
-
-            <!-- Bottom Quick Actions: Lyrics · Equalizer · Add to Playlist · Stop -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:gravity="center"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:id="@+id/npBtnLyrics"
-                    android:layout_width="wrap_content"
-                    android:layout_height="36dp"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/yt_chip_selected"
-                    android:gravity="center"
-                    android:paddingStart="13dp"
-                    android:paddingEnd="13dp"
-                    android:text="🎤 Lyrics"
-                    android:textColor="@color/graball_text"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/npBtnEq"
-                    android:layout_width="wrap_content"
-                    android:layout_height="36dp"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/yt_chip_bg"
-                    android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="🎚 EQ"
-                    android:textColor="@color/graball_text"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/npBtnAddPlaylist"
-                    android:layout_width="wrap_content"
-                    android:layout_height="36dp"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/yt_chip_bg"
-                    android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="➕ Playlist"
-                    android:textColor="@color/graball_text"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/npBtnDownload"
-                    android:layout_width="wrap_content"
-                    android:layout_height="36dp"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/yt_chip_bg"
-                    android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="⬇ Download"
-                    android:textColor="@color/graball_orange"
-                    android:textSize="12sp"
-                    android:textStyle="bold"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/npBtnStop"
-                    android:layout_width="wrap_content"
-                    android:layout_height="36dp"
-                    android:background="@drawable/yt_chip_bg"
-                    android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="⏹ Stop"
-                    android:textColor="@color/graball_subtext"
-                    android:textSize="12sp" />
+                    android:textColor="#FFFFFF"
+                    android:textSize="17sp" />
             </LinearLayout>
         </LinearLayout>
-    </ScrollView>
+    </LinearLayout>
 
-    <!-- Full-Screen Spotify / YouTube Music Style Live Lyrics View -->
+    <!-- Full-Screen Spotify / YouTube Music Style Live Lyrics View (Dynamic Color Backdrop) -->
     <LinearLayout
         android:id="@+id/lyricsSheet"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="@color/graball_bg"
+        android:background="#131120"
         android:clickable="true"
         android:focusable="true"
         android:orientation="vertical"
         android:visibility="gone">
 
-        <!-- Compact Header: Back · Track Info · Sync Offset Controls -->
+        <!-- Compact Header -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="@color/graball_nav"
+            android:background="#33000000"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingStart="14dp"
@@ -848,10 +873,10 @@
                 android:id="@+id/lyricsClose"
                 android:layout_width="38dp"
                 android:layout_height="38dp"
-                android:background="@drawable/yt_chip_bg"
+                android:background="@drawable/circle_translucent_bg"
                 android:gravity="center"
                 android:text="⌄"
-                android:textColor="@color/graball_text"
+                android:textColor="#FFFFFF"
                 android:textSize="22sp"
                 android:textStyle="bold" />
 
@@ -869,7 +894,7 @@
                     android:layout_height="wrap_content"
                     android:ellipsize="end"
                     android:maxLines="1"
-                    android:textColor="@color/graball_text"
+                    android:textColor="#FFFFFF"
                     android:textSize="15sp"
                     android:textStyle="bold" />
 
@@ -880,11 +905,10 @@
                     android:layout_marginTop="2dp"
                     android:ellipsize="end"
                     android:maxLines="1"
-                    android:textColor="@color/graball_subtext"
+                    android:textColor="#CCFFFFFF"
                     android:textSize="11sp" />
             </LinearLayout>
 
-            <!-- Sync nudge chips (visible when synced lyrics loaded) -->
             <LinearLayout
                 android:id="@+id/lyricsSyncRow"
                 android:layout_width="wrap_content"
@@ -895,23 +919,23 @@
 
                 <TextView
                     android:id="@+id/lyricsSyncMinus"
-                    android:layout_width="32dp"
+                    android:layout_width="34dp"
                     android:layout_height="30dp"
-                    android:background="@drawable/yt_chip_bg"
+                    android:background="@drawable/pill_translucent_bg"
                     android:gravity="center"
                     android:text="-½s"
-                    android:textColor="@color/graball_subtext"
+                    android:textColor="#E6FFFFFF"
                     android:textSize="11sp" />
 
                 <TextView
                     android:id="@+id/lyricsSyncPlus"
-                    android:layout_width="32dp"
+                    android:layout_width="34dp"
                     android:layout_height="30dp"
                     android:layout_marginStart="4dp"
-                    android:background="@drawable/yt_chip_bg"
+                    android:background="@drawable/pill_translucent_bg"
                     android:gravity="center"
                     android:text="+½s"
-                    android:textColor="@color/graball_subtext"
+                    android:textColor="#E6FFFFFF"
                     android:textSize="11sp" />
             </LinearLayout>
         </LinearLayout>
@@ -954,7 +978,7 @@
                     android:layout_marginTop="12dp"
                     android:gravity="center"
                     android:text="Finding synced lyrics…"
-                    android:textColor="@color/graball_subtext"
+                    android:textColor="#CCFFFFFF"
                     android:textSize="15sp" />
             </LinearLayout>
         </FrameLayout>
@@ -963,7 +987,7 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="@color/graball_nav"
+            android:background="#33000000"
             android:orientation="vertical"
             android:paddingStart="18dp"
             android:paddingTop="8dp"
@@ -973,7 +997,10 @@
             <SeekBar
                 android:id="@+id/lyricsSeek"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content" />
+                android:layout_height="wrap_content"
+                android:progressTint="#FFFFFF"
+                android:progressBackgroundTint="#44FFFFFF"
+                android:thumbTint="#FFFFFF" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -988,7 +1015,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="0:00"
-                    android:textColor="@color/graball_subtext"
+                    android:textColor="#CCFFFFFF"
                     android:textSize="11sp" />
 
                 <TextView
@@ -996,7 +1023,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="0:00"
-                    android:textColor="@color/graball_subtext"
+                    android:textColor="#CCFFFFFF"
                     android:textSize="11sp" />
             </LinearLayout>
 
@@ -1011,12 +1038,12 @@
                     android:id="@+id/lyricsBtnOpenYoutube"
                     android:layout_width="wrap_content"
                     android:layout_height="32dp"
-                    android:background="@drawable/yt_chip_bg"
+                    android:background="@drawable/pill_translucent_bg"
                     android:gravity="center"
                     android:paddingStart="10dp"
                     android:paddingEnd="10dp"
                     android:text="📺 Video"
-                    android:textColor="@color/graball_orange"
+                    android:textColor="#FFFFFF"
                     android:textSize="11sp"
                     android:textStyle="bold"
                     android:visibility="invisible" />
@@ -1032,11 +1059,10 @@
                         android:id="@+id/lyricsPrev"
                         android:layout_width="42dp"
                         android:layout_height="42dp"
-                        android:background="@drawable/yt_chip_bg"
                         android:gravity="center"
                         android:text="⏮"
-                        android:textColor="@color/graball_text"
-                        android:textSize="18sp" />
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp" />
 
                     <TextView
                         android:id="@+id/lyricsPlayPause"
@@ -1044,22 +1070,21 @@
                         android:layout_height="52dp"
                         android:layout_marginStart="16dp"
                         android:layout_marginEnd="16dp"
-                        android:background="@drawable/play_circle_bg"
+                        android:background="@drawable/circle_translucent_bg"
                         android:gravity="center"
                         android:text="▶"
-                        android:textColor="@color/graball_text"
-                        android:textSize="22sp"
+                        android:textColor="#FFFFFF"
+                        android:textSize="24sp"
                         android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/lyricsNext"
                         android:layout_width="42dp"
                         android:layout_height="42dp"
-                        android:background="@drawable/yt_chip_bg"
                         android:gravity="center"
                         android:text="⏭"
-                        android:textColor="@color/graball_text"
-                        android:textSize="18sp" />
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp" />
                 </LinearLayout>
 
                 <View

@@ -47,8 +47,34 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         const val EXTRA_PATHS = "paths"
         const val EXTRA_INDEX = "index"
         const val EXTRA_FOLDER_LABEL = "folder_label"
+        const val EXTRA_SEEK_MS = "seek_ms"
         const val NOTIFICATION_ID = 2
         const val CHANNEL_ID = "graball_player"
+        private const val LAST_PREFS = "graball_player_last"
+        private const val KEY_LAST_PATH = "last_path"
+        private const val KEY_LAST_FOLDER = "last_folder"
+        private const val KEY_LAST_POS_MS = "last_pos_ms"
+        private const val KEY_LAST_DUR_MS = "last_dur_ms"
+
+        data class LastPlayed(
+            val file: File,
+            val folderLabel: String,
+            val positionMs: Int,
+            val durationMs: Int
+        )
+
+        fun getLastPlayed(context: Context): LastPlayed? {
+            val prefs = context.getSharedPreferences(LAST_PREFS, Context.MODE_PRIVATE)
+            val path = prefs.getString(KEY_LAST_PATH, null) ?: return null
+            val f = File(path)
+            if (!f.isFile) return null
+            return LastPlayed(
+                file = f,
+                folderLabel = prefs.getString(KEY_LAST_FOLDER, "") ?: "",
+                positionMs = prefs.getInt(KEY_LAST_POS_MS, 0).coerceAtLeast(0),
+                durationMs = prefs.getInt(KEY_LAST_DUR_MS, 0).coerceAtLeast(0)
+            )
+        }
 
         @Volatile
         var instance: PlayerService? = null
@@ -61,6 +87,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     private var player: MediaPlayer? = null
     private var isPrepared = false
+    private var pendingSeekMs = 0
     private var playbackGen = 0
     private var hasAudioFocus = false
     private var playlist: List<File> = emptyList()
@@ -104,10 +131,11 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 val paths = intent.getStringArrayListExtra(EXTRA_PATHS) ?: arrayListOf()
                 val idx = intent.getIntExtra(EXTRA_INDEX, 0)
                 folderLabel = intent.getStringExtra(EXTRA_FOLDER_LABEL).orEmpty()
+                val seekMs = intent.getIntExtra(EXTRA_SEEK_MS, 0).coerceAtLeast(0)
                 if (paths.isNotEmpty()) {
                     playlist = paths.map { File(it) }
                     index = idx.coerceIn(0, playlist.size - 1)
-                    startPlayback()
+                    startPlayback(initialSeekMs = seekMs)
                 }
             }
             ACTION_PAUSE -> pause()
@@ -120,6 +148,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     override fun onDestroy() {
+        persistLastPlayed()
         releasePlayer(abandonAudioFocus = true)
         artExecutor.shutdownNow()
         if (instance === this) instance = null
@@ -186,6 +215,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     fun pause() {
+        persistLastPlayed()
         if (isPrepared) {
             try { player?.pause() } catch (_: Exception) { }
         }
@@ -247,9 +277,23 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     // ---- Internals ----
 
-    private fun startPlayback() {
+    private fun persistLastPlayed(overridePosMs: Int? = null) {
+        val file = currentFile() ?: return
+        val pos = overridePosMs ?: position()
+        val dur = duration()
+        getSharedPreferences(LAST_PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_LAST_PATH, file.absolutePath)
+            .putString(KEY_LAST_FOLDER, folderLabel)
+            .putInt(KEY_LAST_POS_MS, pos)
+            .putInt(KEY_LAST_DUR_MS, dur)
+            .apply()
+    }
+
+    private fun startPlayback(initialSeekMs: Int = 0) {
         val file = currentFile() ?: return
         val gen = ++playbackGen
+        pendingSeekMs = initialSeekMs
+        persistLastPlayed(overridePosMs = initialSeekMs)
         // Ensure YouTube background audio pauses so both never play together
         YouTubePlaybackService.instance?.pauseIfPlaying()
         // Keep AudioFocus held across track transitions so abandoning + immediately
@@ -285,7 +329,14 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                     }
                     isPrepared = true
                     try {
+                        val seek = pendingSeekMs
+                        pendingSeekMs = 0
+                        val dur = readyMp.duration
+                        if (seek > 1000 && (dur <= 0 || seek < dur - 2000)) {
+                            readyMp.seekTo(seek)
+                        }
                         readyMp.start()
+                        persistLastPlayed()
                         startForegroundCompat(buildNotification())
                     } catch (_: Exception) {
                     }
@@ -332,6 +383,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     private fun stopPlayback() {
+        persistLastPlayed()
         playbackGen++
         releasePlayer(abandonAudioFocus = true)
         index = -1

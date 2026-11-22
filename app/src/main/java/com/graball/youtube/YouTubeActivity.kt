@@ -237,13 +237,40 @@ class YouTubeActivity : AppCompatActivity() {
         recycler.adapter = adapter
 
         refreshRecentChips()
+        val startQuery = intent.getStringExtra("start_query")?.trim()
         val startMode = intent.getStringExtra("start_mode")
-        if (startMode == "music") {
+        if (!startQuery.isNullOrBlank()) {
+            suppressSuggestions = true
+            searchInput.setText(startQuery)
+            searchInput.setSelection(startQuery.length)
+            suppressSuggestions = false
+            YouTubeStore.recordSearch(this, startQuery)
+            refreshRecentChips()
+            currentQuery = startQuery
+            runSearch(startQuery)
+        } else if (startMode == "music") {
             currentFilter = YouTubeInnerTube.SearchFilter.MUSIC
             updateFilterChipStyles()
             loadExplore(musicMode = true)
         } else {
             loadExplore(musicMode = false)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val q = intent.getStringExtra("start_query")?.trim()
+        if (!q.isNullOrBlank()) {
+            suppressSuggestions = true
+            searchInput.setText(q)
+            searchInput.setSelection(q.length)
+            suppressSuggestions = false
+            YouTubeStore.recordSearch(this, q)
+            refreshRecentChips()
+            currentQuery = q
+            if (currentTab != Tab.EXPLORE) selectTab(Tab.EXPLORE)
+            runSearch(q)
         }
     }
 

@@ -52,24 +52,34 @@ object ThumbnailLoader {
         }
     }
 
-    fun load(url: String?, imageView: ImageView, targetWidthPx: Int = 360) {
+    fun load(
+        url: String?,
+        imageView: ImageView,
+        targetWidthPx: Int = 360,
+        onBitmapReady: ((Bitmap?) -> Unit)? = null
+    ) {
         init(imageView.context)
         imageView.tag = url
         if (url.isNullOrBlank()) {
             imageView.setImageDrawable(null)
+            onBitmapReady?.invoke(null)
             return
         }
         val cached = cache.get(url)
         if (cached != null && !cached.isRecycled) {
             imageView.setImageBitmap(cached)
+            onBitmapReady?.invoke(cached)
             return
         }
         imageView.setImageDrawable(null)
         executor.execute {
-            val bmp = loadSync(url, targetWidthPx) ?: return@execute
+            val bmp = loadSync(url, targetWidthPx)
             mainHandler.post {
                 if (imageView.tag == url) {
-                    imageView.setImageBitmap(bmp)
+                    if (bmp != null) {
+                        imageView.setImageBitmap(bmp)
+                    }
+                    onBitmapReady?.invoke(bmp)
                 }
             }
         }

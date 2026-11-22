@@ -1,6 +1,8 @@
 package com.graball
 
 import android.Manifest
+import android.animation.ArgbEvaluator
+import android.animation.ValueAnimator
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
@@ -8,6 +10,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.os.Bundle
@@ -28,7 +33,6 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -40,6 +44,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.graball.youtube.DownloadSheetHelper
 import com.graball.youtube.ThumbnailLoader
+import com.graball.youtube.YouTubeActivity
 import com.graball.youtube.YouTubePlaybackService
 import com.graball.youtube.YouTubePlaybackState
 import com.graball.youtube.YouTubePlayerActivity
@@ -95,7 +100,9 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var btnFolderBack: TextView
     private lateinit var folderHeaderName: TextView
     private lateinit var recycler: RecyclerView
+    private lateinit var emptyBox: LinearLayout
     private lateinit var emptyView: TextView
+    private lateinit var btnSearchOnYoutube: TextView
 
     // Mini-Player UI
     private lateinit var miniPlayerCard: LinearLayout
@@ -111,8 +118,8 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var miniPlayPause: TextView
     private lateinit var miniNext: TextView
 
-    // Full-Screen Now Playing UI
-    private lateinit var nowPlayingSheet: ScrollView
+    // Full-Screen Now Playing UI (Edge-to-Edge Dynamic Color + Wave)
+    private lateinit var nowPlayingSheet: LinearLayout
     private lateinit var npTopBar: LinearLayout
     private lateinit var npSourceLabel: TextView
     private lateinit var npYoutubeBar: LinearLayout
@@ -120,6 +127,8 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var npArtBox: FrameLayout
     private lateinit var npArt: ImageView
     private lateinit var npArtFallback: TextView
+    private lateinit var npArtFade: View
+    private lateinit var npWave: AudioWaveView
     private lateinit var npTitle: TextView
     private lateinit var npArtist: TextView
     private lateinit var npSeek: SeekBar
@@ -152,10 +161,13 @@ class PlayerActivity : AppCompatActivity() {
     private var allFolders: List<MusicFolder> = emptyList()
     private var tracksByPath: Map<String, AudioTrack> = emptyMap()
     private var playlists: MutableList<MusicPlaylist> = mutableListOf()
-    private var viewMode: ViewMode = ViewMode.FOLDERS
+    private var viewMode: ViewMode = ViewMode.ALL_MUSIC
     private var openFolderPath: String? = null
     private var openPlaylistName: String? = null
     private var searchQuery: String = ""
+
+    private var currentTheme: AlbumColorExtractor.ThemeColors = AlbumColorExtractor.DEFAULT
+    private var themeAnimator: ValueAnimator? = null
 
     private var service: PlayerService? = null
     private var bound = false
@@ -166,6 +178,7 @@ class PlayerActivity : AppCompatActivity() {
     private var lastArtKey: String? = null
     private var lastMetaPath: String? = null
     private var cachedLocalMeta: AlbumArtLoader.TrackMeta? = null
+    private var lastPlayedCache: PlayerService.LastPlayed? = null
 
     private var currentLyricsKey: String? = null
     private var currentLyricsResult: LyricsFetcher.LyricsResult? = null
@@ -194,8 +207,9 @@ class PlayerActivity : AppCompatActivity() {
             if (granted) {
                 loadLibrary()
             } else {
+                emptyBox.visibility = View.VISIBLE
                 emptyView.text = getString(R.string.player_need_permission)
-                emptyView.visibility = View.VISIBLE
+                btnSearchOnYoutube.visibility = View.GONE
             }
         }
 
@@ -227,7 +241,18 @@ class PlayerActivity : AppCompatActivity() {
         btnFolderBack = findViewById(R.id.btnFolderBack)
         folderHeaderName = findViewById(R.id.folderHeaderName)
         recycler = findViewById(R.id.playerRecycler)
+        emptyBox = findViewById(R.id.playerEmptyBox)
         emptyView = findViewById(R.id.playerEmpty)
+        btnSearchOnYoutube = findViewById(R.id.btnSearchOnYoutube)
+        btnSearchOnYoutube.setOnClickListener {
+            val q = searchQuery.trim()
+            if (q.isNotBlank()) {
+                startActivity(
+                    Intent(this, YouTubeActivity::class.java)
+                        .putExtra("start_query", q)
+                )
+            }
+        }
 
         // Mini-Player views
         miniPlayerCard = findViewById(R.id.miniPlayerCard)
@@ -252,6 +277,8 @@ class PlayerActivity : AppCompatActivity() {
         npArtBox = findViewById(R.id.npArtBox)
         npArt = findViewById(R.id.npArt)
         npArtFallback = findViewById(R.id.npArtFallback)
+        npArtFade = findViewById(R.id.npArtFade)
+        npWave = findViewById(R.id.npWave)
         npTitle = findViewById(R.id.npTitle)
         npArtist = findViewById(R.id.npArtist)
         npSeek = findViewById(R.id.npSeek)
@@ -280,39 +307,20 @@ class PlayerActivity : AppCompatActivity() {
         lyricsPlayPause = findViewById(R.id.lyricsPlayPause)
         lyricsBtnOpenYoutube = findViewById(R.id.lyricsBtnOpenYoutube)
 
-        // Hardware-rounded clipping for both album art cards (API 21+)
+        // Hardware-rounded clipping for mini-player album art thumb (API 21+)
         miniArtBox.outlineProvider = ViewOutlineProvider.BACKGROUND
         miniArtBox.clipToOutline = true
-        npArtBox.outlineProvider = ViewOutlineProvider.BACKGROUND
-        npArtBox.clipToOutline = true
+        applyAlbumTheme(AlbumColorExtractor.DEFAULT, animate = false)
 
-        // Bottom nav
+        // Bottom nav (smooth cross-dissolve via NavHelper)
         findViewById<LinearLayout>(R.id.navGrab).setOnClickListener {
-            startActivity(
-                Intent(this, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
-            @Suppress("DEPRECATION")
-            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            NavHelper.switchTab(this, MainActivity::class.java)
         }
         findViewById<LinearLayout>(R.id.navDownloads).setOnClickListener {
-            startActivity(
-                Intent(this, DownloadsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
-            @Suppress("DEPRECATION")
-            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            NavHelper.switchTab(this, DownloadsActivity::class.java)
         }
         findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
-            startActivity(
-                Intent(this, SettingsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
-            @Suppress("DEPRECATION")
-            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            NavHelper.switchTab(this, SettingsActivity::class.java)
         }
 
         // Tabs & library header controls
@@ -644,6 +652,7 @@ class PlayerActivity : AppCompatActivity() {
         npTitle.text = title
         npArtist.text = sub
         npPlayPause.text = if (playing) "⏸" else "▶"
+        npWave.setPlaying(playing && isNowPlayingOpen)
         npShuffle.visibility = View.VISIBLE
         npRepeat.visibility = View.VISIBLE
         npBtnAddPlaylist.visibility = View.VISIBLE
@@ -668,12 +677,16 @@ class PlayerActivity : AppCompatActivity() {
             )
         }
 
-        // Album Art (only triggers when active track changes)
+        // Album Art + Dynamic Dominant Color (only triggers when active track changes)
         val artKey = "local:${current.absolutePath}"
         if (artKey != lastArtKey) {
             lastArtKey = artKey
             AlbumArtLoader.loadInto(current, miniArt, miniArtFallback, targetPx = 160)
-            AlbumArtLoader.loadInto(current, npArt, npArtFallback, targetPx = 640)
+            AlbumArtLoader.loadInto(current, npArt, npArtFallback, targetPx = 640) { bmp ->
+                if (lastArtKey == artKey) {
+                    applyBitmapTheme(bmp)
+                }
+            }
         }
 
         if (current != lastTrack) {
@@ -705,6 +718,7 @@ class PlayerActivity : AppCompatActivity() {
         npTitle.text = title
         npArtist.text = channel
         npPlayPause.text = if (playing) "⏸" else "▶"
+        npWave.setPlaying(playing && isNowPlayingOpen)
         npShuffle.visibility = View.INVISIBLE
         npRepeat.visibility = View.INVISIBLE
         npBtnAddPlaylist.visibility = View.GONE
@@ -728,7 +742,7 @@ class PlayerActivity : AppCompatActivity() {
             )
         }
 
-        // YouTube Thumbnail as Album Art (reuses existing disk-cached ThumbnailLoader)
+        // YouTube Thumbnail as Album Art + Dynamic Dominant Color
         val thumbUrl = info?.thumbnailUrl?.takeIf { it.isNotBlank() } ?: item.thumbnailUrl
         val artKey = "yt:$thumbUrl"
         if (artKey != lastArtKey) {
@@ -739,9 +753,14 @@ class PlayerActivity : AppCompatActivity() {
                 npArt.visibility = View.VISIBLE
                 npArtFallback.visibility = View.GONE
                 ThumbnailLoader.load(thumbUrl, miniArt, targetWidthPx = 200)
-                ThumbnailLoader.load(thumbUrl, npArt, targetWidthPx = 640)
+                ThumbnailLoader.load(thumbUrl, npArt, targetWidthPx = 640) { bmp ->
+                    if (lastArtKey == artKey) {
+                        applyBitmapTheme(bmp)
+                    }
+                }
             } else {
                 clearArtwork()
+                applyAlbumTheme(AlbumColorExtractor.DEFAULT, animate = true)
             }
         }
 
@@ -754,26 +773,120 @@ class PlayerActivity : AppCompatActivity() {
     private fun bindIdlePlayerUi() {
         if (isLyricsOpen) closeLyricsSheet()
         miniYtBanner.visibility = View.GONE
+        npYoutubeBar.visibility = View.GONE
+        npWave.setPlaying(false)
+        npBtnDownload.visibility = View.GONE
+
+        val last = PlayerService.getLastPlayed(this).also { lastPlayedCache = it }
+        if (last != null) {
+            val file = last.file
+            if (file.absolutePath != lastMetaPath) {
+                lastMetaPath = file.absolutePath
+                cachedLocalMeta = AlbumArtLoader.getCachedMeta(file)
+                AlbumArtLoader.loadMetaAsync(file) { meta ->
+                    if (lastMetaPath == file.absolutePath) cachedLocalMeta = meta
+                }
+            }
+            val meta = cachedLocalMeta
+            val title = meta?.title?.takeIf { it.isNotBlank() } ?: file.nameWithoutExtension
+            val sub = buildString {
+                if (!meta?.artist.isNullOrBlank()) {
+                    append(meta!!.artist)
+                    if (last.folderLabel.isNotBlank()) append(" · ").append(last.folderLabel)
+                } else if (last.folderLabel.isNotBlank()) {
+                    append("📁 ").append(last.folderLabel)
+                } else {
+                    append("Resume where you left off")
+                }
+            }
+            miniTitle.text = title
+            miniSub.text = sub
+            miniPlayPause.text = "▶"
+            npSourceLabel.text = if (last.folderLabel.isNotBlank()) {
+                "RESUME · ${last.folderLabel.uppercase()}"
+            } else {
+                "RESUME LAST SONG"
+            }
+            npTitle.text = title
+            npArtist.text = sub
+            npPlayPause.text = "▶"
+            npShuffle.visibility = View.VISIBLE
+            npRepeat.visibility = View.VISIBLE
+            npBtnAddPlaylist.visibility = View.GONE
+            updateProgressBars(last.positionMs, last.durationMs)
+
+            val artKey = "last:${file.absolutePath}"
+            if (artKey != lastArtKey) {
+                lastArtKey = artKey
+                AlbumArtLoader.loadInto(file, miniArt, miniArtFallback, targetPx = 160)
+                AlbumArtLoader.loadInto(file, npArt, npArtFallback, targetPx = 640) { bmp ->
+                    if (lastArtKey == artKey) applyBitmapTheme(bmp)
+                }
+            }
+            return
+        }
+
         miniTitle.text = getString(R.string.player_tap_to_play)
         miniSub.text = "Voice notes & call recordings auto-hidden"
         miniPlayPause.text = "▶"
         miniProgress.progress = 0
 
-        npYoutubeBar.visibility = View.GONE
         npSourceLabel.text = "NOW PLAYING"
         npTitle.text = getString(R.string.player_tap_to_play)
-        npArtist.text = "Pick a song from Folders or Playlists"
+        npArtist.text = "Pick a song from All Music, Folders or Playlists"
         npPlayPause.text = "▶"
         npShuffle.visibility = View.VISIBLE
         npRepeat.visibility = View.VISIBLE
         npBtnAddPlaylist.visibility = View.GONE
-        npBtnDownload.visibility = View.GONE
         updateProgressBars(0, 0)
 
         if (lastArtKey != null) {
             lastArtKey = null
             clearArtwork()
+            applyAlbumTheme(AlbumColorExtractor.DEFAULT, animate = true)
         }
+    }
+
+    // ---- Dynamic Album-Art Color Theme ----
+
+    private fun applyBitmapTheme(bitmap: Bitmap?) {
+        val extracted = AlbumColorExtractor.extract(bitmap)
+        applyAlbumTheme(extracted, animate = true)
+    }
+
+    private fun applyAlbumTheme(theme: AlbumColorExtractor.ThemeColors, animate: Boolean) {
+        themeAnimator?.cancel()
+        val startBg = currentTheme.backdrop
+        val endBg = theme.backdrop
+        val startLyrics = currentTheme.lyricsBackdrop
+        val endLyrics = theme.lyricsBackdrop
+        currentTheme = theme
+        npWave.setWaveColor(theme.waveAccent)
+
+        if (!animate || startBg == endBg) {
+            setBackdropColorImmediate(endBg, endLyrics)
+            return
+        }
+        val eval = ArgbEvaluator()
+        themeAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 380L
+            addUpdateListener { anim ->
+                val f = anim.animatedValue as Float
+                val cBg = eval.evaluate(f, startBg, endBg) as Int
+                val cLyr = eval.evaluate(f, startLyrics, endLyrics) as Int
+                setBackdropColorImmediate(cBg, cLyr)
+            }
+            start()
+        }
+    }
+
+    private fun setBackdropColorImmediate(backdropColor: Int, lyricsBackdropColor: Int) {
+        nowPlayingSheet.setBackgroundColor(backdropColor)
+        npArtFade.background = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(Color.TRANSPARENT, Color.argb(145, Color.red(backdropColor), Color.green(backdropColor), Color.blue(backdropColor)), backdropColor)
+        )
+        lyricsSheet.setBackgroundColor(lyricsBackdropColor)
     }
 
     private fun clearArtwork() {
@@ -952,10 +1065,53 @@ class PlayerActivity : AppCompatActivity() {
                 }
             }
             ActiveSource.NONE -> {
-                Toast.makeText(this, "Tap any song or folder to start playing", Toast.LENGTH_SHORT).show()
+                val last = lastPlayedCache ?: PlayerService.getLastPlayed(this)
+                if (last != null) {
+                    resumeLastPlayed(last)
+                } else {
+                    val firstAll = allFolders.filter { isFolderVisible(it) }
+                        .flatMap { it.tracks }
+                        .sortedByDescending { it.file.lastModified() }
+                    if (firstAll.isNotEmpty()) {
+                        playFolderTracks(firstAll, 0, "All Music")
+                    } else {
+                        Toast.makeText(this, "No music files found yet", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }
         updatePlayerUi()
+    }
+
+    private fun resumeLastPlayed(last: PlayerService.LastPlayed) {
+        val visibleFolders = allFolders.filter { isFolderVisible(it) }
+        val matchingFolder = visibleFolders.firstOrNull { f ->
+            f.tracks.any { it.file.absolutePath == last.file.absolutePath }
+        }
+        val scopeTracks = when {
+            last.folderLabel.equals("All Music", ignoreCase = true) -> {
+                visibleFolders.flatMap { it.tracks }.sortedByDescending { it.file.lastModified() }
+            }
+            matchingFolder != null -> matchingFolder.tracks
+            else -> emptyList()
+        }
+        val idx = scopeTracks.indexOfFirst { it.file.absolutePath == last.file.absolutePath }
+        val paths = if (idx >= 0) {
+            ArrayList(scopeTracks.map { it.file.absolutePath })
+        } else {
+            arrayListOf(last.file.absolutePath)
+        }
+        val startIdx = if (idx >= 0) idx else 0
+        YouTubePlaybackService.instance?.pauseIfPlaying()
+        startService(
+            Intent(this, PlayerService::class.java).apply {
+                action = PlayerService.ACTION_PLAY
+                putStringArrayListExtra(PlayerService.EXTRA_PATHS, paths)
+                putExtra(PlayerService.EXTRA_INDEX, startIdx)
+                putExtra(PlayerService.EXTRA_FOLDER_LABEL, last.folderLabel.ifBlank { "All Music" })
+                putExtra(PlayerService.EXTRA_SEEK_MS, last.positionMs)
+            }
+        )
     }
 
     private fun handleNext() {
@@ -987,7 +1143,8 @@ class PlayerActivity : AppCompatActivity() {
     // ---- Full-Screen Now Playing Sheet Open / Close / Swipe ----
 
     private fun openNowPlayingSheet(animate: Boolean = true) {
-        if (resolveActiveSource() == ActiveSource.NONE) {
+        val hasLast = lastPlayedCache != null || PlayerService.getLastPlayed(this) != null
+        if (resolveActiveSource() == ActiveSource.NONE && !hasLast) {
             Toast.makeText(this, "Tap a song first to open Now Playing", Toast.LENGTH_SHORT).show()
             return
         }
@@ -1012,6 +1169,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun closeNowPlayingSheet() {
         if (!isNowPlayingOpen) return
         isNowPlayingOpen = false
+        npWave.setPlaying(false)
         nowPlayingSheet.animate()
             .translationY(resources.displayMetrics.heightPixels.toFloat() * 0.22f)
             .alpha(0f)
@@ -1685,10 +1843,19 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun showEmptyIfNeeded(isEmpty: Boolean, message: String) {
         if (isEmpty) {
-            emptyView.text = message
-            emptyView.visibility = View.VISIBLE
+            emptyBox.visibility = View.VISIBLE
+            val q = searchQuery.trim()
+            if (q.isNotBlank()) {
+                emptyView.text = "No local music matching \"$q\""
+                btnSearchOnYoutube.text = "🔍 Search \"$q\" on YouTube ↗"
+                btnSearchOnYoutube.visibility = View.VISIBLE
+            } else {
+                emptyView.text = message
+                btnSearchOnYoutube.visibility = View.GONE
+            }
         } else {
-            emptyView.visibility = View.GONE
+            emptyBox.visibility = View.GONE
+            btnSearchOnYoutube.visibility = View.GONE
         }
     }
 
@@ -1713,30 +1880,24 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun updateShuffleRepeatUi(svc: PlayerService) {
-        npShuffle.setBackgroundResource(
-            if (svc.isShuffleEnabled()) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
-        )
-        npShuffle.setTextColor(
-            ContextCompat.getColor(
-                this,
-                if (svc.isShuffleEnabled()) R.color.graball_text else R.color.graball_subtext
-            )
-        )
+        val shufOn = svc.isShuffleEnabled()
+        npShuffle.setBackgroundResource(if (shufOn) R.drawable.circle_translucent_bg else 0)
+        npShuffle.alpha = if (shufOn) 1.0f else 0.55f
         when (svc.getRepeatMode()) {
             PlayerService.RepeatMode.OFF -> {
                 npRepeat.text = "🔁"
-                npRepeat.setBackgroundResource(R.drawable.yt_chip_bg)
-                npRepeat.setTextColor(ContextCompat.getColor(this, R.color.graball_subtext))
+                npRepeat.setBackgroundResource(0)
+                npRepeat.alpha = 0.55f
             }
             PlayerService.RepeatMode.ALL -> {
                 npRepeat.text = "🔁"
-                npRepeat.setBackgroundResource(R.drawable.yt_chip_selected)
-                npRepeat.setTextColor(ContextCompat.getColor(this, R.color.graball_text))
+                npRepeat.setBackgroundResource(R.drawable.circle_translucent_bg)
+                npRepeat.alpha = 1.0f
             }
             PlayerService.RepeatMode.ONE -> {
                 npRepeat.text = "🔂"
-                npRepeat.setBackgroundResource(R.drawable.yt_chip_selected)
-                npRepeat.setTextColor(ContextCompat.getColor(this, R.color.graball_text))
+                npRepeat.setBackgroundResource(R.drawable.circle_translucent_bg)
+                npRepeat.alpha = 1.0f
             }
         }
     }

@@ -57,21 +57,13 @@ class DownloadsActivity : AppCompatActivity() {
         setContentView(R.layout.activity_downloads)
         queueContainer = findViewById(R.id.queueContainer)
         findViewById<LinearLayout>(R.id.navGrab).setOnClickListener {
-            navigateHome()
+            NavHelper.switchTab(this, MainActivity::class.java)
         }
-                findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
-            startActivity(
-                Intent(this, PlayerActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
+        findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
+            NavHelper.switchTab(this, PlayerActivity::class.java)
         }
-findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
-            startActivity(
-                Intent(this, SettingsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
+        findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
+            NavHelper.switchTab(this, SettingsActivity::class.java)
         }
         // Past downloads survive restarts: reload them as rows
         // (no cancel button — they are finished, not running).

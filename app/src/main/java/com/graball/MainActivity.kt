@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -138,35 +139,17 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, SitesActivity::class.java))
         }
         findViewById<LinearLayout>(R.id.navDownloads).setOnClickListener {
-            startActivity(
-                Intent(this, DownloadsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
-            @Suppress("DEPRECATION")
-            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            NavHelper.switchTab(this, DownloadsActivity::class.java)
         }
         findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
-            startActivity(
-                Intent(this, PlayerActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
-            @Suppress("DEPRECATION")
-            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            NavHelper.switchTab(this, PlayerActivity::class.java)
         }
         findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
-            startActivity(
-                Intent(this, SettingsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
-            @Suppress("DEPRECATION")
-            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            NavHelper.switchTab(this, SettingsActivity::class.java)
         }
-        findViewById<Button>(R.id.grabButton).setOnClickListener {
-            var url = linkInput.text.toString().trim()
-            if (url.isEmpty()) {
+        fun handleSmartGrabOrSearch() {
+            var input = linkInput.text.toString().trim()
+            if (input.isEmpty()) {
                 // Empty box + a link on the clipboard: Grab pulls it
                 // in first, so the button is one tap, not two.
                 val clip = (getSystemService(Context.CLIPBOARD_SERVICE)
@@ -175,20 +158,39 @@ class MainActivity : AppCompatActivity() {
                 val found = Regex("https?://\\S+").find(clip)?.value
                     ?.trimEnd('.', ',', ';', '!', '?', ')', ']')
                 if (found != null) {
-                    url = found
-                    linkInput.setText(url)
+                    input = found
+                    linkInput.setText(input)
                 }
             }
-            if (url.isEmpty()) {
-                Toast.makeText(this, "Paste a video link first", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
+            if (input.isEmpty()) {
+                Toast.makeText(this, "Type a search or paste a video link", Toast.LENGTH_SHORT).show()
+                return
             }
-            val kind = LinkDetector.detect(url)
-            if (kind == LinkKind.UNKNOWN) {
-                Toast.makeText(this, "That doesn't look like a link", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
+            val kind = LinkDetector.detect(input)
+            if (kind != LinkKind.UNKNOWN) {
+                showGrabPanel(input, kind)
+            } else {
+                // Keywords detected -> jump directly into YouTube search!
+                grabPanel.visibility = android.view.View.GONE
+                startActivity(
+                    Intent(this, YouTubeActivity::class.java)
+                        .putExtra("start_query", input)
+                )
             }
-            showGrabPanel(url, kind)
+        }
+        findViewById<Button>(R.id.grabButton).setOnClickListener {
+            handleSmartGrabOrSearch()
+        }
+        linkInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH ||
+                actionId == EditorInfo.IME_ACTION_GO ||
+                actionId == EditorInfo.IME_ACTION_DONE
+            ) {
+                handleSmartGrabOrSearch()
+                true
+            } else {
+                false
+            }
         }
         findViewById<Button>(R.id.downloadButton).setOnClickListener {
             val url = linkInput.text.toString().trim()

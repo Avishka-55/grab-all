@@ -106,32 +106,16 @@ class StatusActivity : AppCompatActivity() {
         grantBtn.setOnClickListener { openWhatsAppSafPicker() }
 
         findViewById<LinearLayout>(R.id.navGrab).setOnClickListener {
-            startActivity(
-                Intent(this, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
+            NavHelper.switchTab(this, MainActivity::class.java)
         }
         findViewById<LinearLayout>(R.id.navDownloads).setOnClickListener {
-            startActivity(
-                Intent(this, DownloadsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
+            NavHelper.switchTab(this, DownloadsActivity::class.java)
         }
         findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
-            startActivity(
-                Intent(this, PlayerActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
+            NavHelper.switchTab(this, PlayerActivity::class.java)
         }
         findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
-            startActivity(
-                Intent(this, SettingsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
+            NavHelper.switchTab(this, SettingsActivity::class.java)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

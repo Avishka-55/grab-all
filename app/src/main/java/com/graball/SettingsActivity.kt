@@ -66,31 +66,13 @@ class SettingsActivity : AppCompatActivity() {
             finish()
         }
         findViewById<LinearLayout>(R.id.navGrab).setOnClickListener {
-            startActivity(
-                Intent(this, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
-            @Suppress("DEPRECATION")
-            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            NavHelper.switchTab(this, MainActivity::class.java)
         }
         findViewById<LinearLayout>(R.id.navDownloads).setOnClickListener {
-            startActivity(
-                Intent(this, DownloadsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
-            @Suppress("DEPRECATION")
-            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            NavHelper.switchTab(this, DownloadsActivity::class.java)
         }
         findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
-            startActivity(
-                Intent(this, PlayerActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
-            @Suppress("DEPRECATION")
-            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            NavHelper.switchTab(this, PlayerActivity::class.java)
         }
         findViewById<Button>(R.id.settingsImportButton).setOnClickListener {
             importLauncher.launch("*/*")

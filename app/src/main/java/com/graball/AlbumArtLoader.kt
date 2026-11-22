@@ -101,7 +101,8 @@ object AlbumArtLoader {
         file: File?,
         imageView: ImageView,
         fallbackView: View? = null,
-        targetPx: Int = 512
+        targetPx: Int = 512,
+        onBitmapReady: ((Bitmap?) -> Unit)? = null
     ) {
         val tagKey = file?.let { "${it.absolutePath}@$targetPx" }
         imageView.tag = tagKey
@@ -109,6 +110,7 @@ object AlbumArtLoader {
             imageView.setImageDrawable(null)
             imageView.visibility = View.GONE
             fallbackView?.visibility = View.VISIBLE
+            onBitmapReady?.invoke(null)
             return
         }
         val cached = artCache.get(tagKey)
@@ -116,12 +118,14 @@ object AlbumArtLoader {
             imageView.setImageBitmap(cached)
             imageView.visibility = View.VISIBLE
             fallbackView?.visibility = View.GONE
+            onBitmapReady?.invoke(cached)
             return
         }
         if (file.absolutePath in noArtPaths) {
             imageView.setImageDrawable(null)
             imageView.visibility = View.GONE
             fallbackView?.visibility = View.VISIBLE
+            onBitmapReady?.invoke(null)
             return
         }
         // Show fallback while decoding on background thread
@@ -136,10 +140,12 @@ object AlbumArtLoader {
                     imageView.setImageBitmap(bmp)
                     imageView.visibility = View.VISIBLE
                     fallbackView?.visibility = View.GONE
+                    onBitmapReady?.invoke(bmp)
                 } else {
                     imageView.setImageDrawable(null)
                     imageView.visibility = View.GONE
                     fallbackView?.visibility = View.VISIBLE
+                    onBitmapReady?.invoke(null)
                 }
             }
         }
