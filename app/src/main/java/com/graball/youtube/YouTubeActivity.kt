@@ -2,6 +2,8 @@ package com.graball.youtube
 
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
@@ -35,6 +37,9 @@ class YouTubeActivity : AppCompatActivity() {
 
     private lateinit var searchInput: EditText
     private lateinit var searchClear: TextView
+    private lateinit var suggestionsBox: LinearLayout
+    private lateinit var recentRow: HorizontalScrollView
+    private lateinit var recentContainer: LinearLayout
     private lateinit var filterRow: HorizontalScrollView
     private lateinit var playlistBanner: LinearLayout
     private lateinit var playlistTitle: TextView
@@ -55,6 +60,10 @@ class YouTubeActivity : AppCompatActivity() {
     private lateinit var adapter: YtItemAdapter
 
     private val io = Executors.newSingleThreadExecutor()
+    private val suggestIo = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var suggestRunnable: Runnable? = null
+    private var suppressSuggestions = false
     private var currentTab = Tab.EXPLORE
     private var currentFilter = YouTubeInnerTube.SearchFilter.ALL
     private var currentQuery: String? = null
@@ -76,6 +85,9 @@ class YouTubeActivity : AppCompatActivity() {
 
         searchInput = findViewById(R.id.ytSearchInput)
         searchClear = findViewById(R.id.ytSearchClear)
+        suggestionsBox = findViewById(R.id.ytSuggestionsBox)
+        recentRow = findViewById(R.id.ytRecentRow)
+        recentContainer = findViewById(R.id.ytRecentContainer)
         filterRow = findViewById(R.id.ytFilterRow)
         playlistBanner = findViewById(R.id.ytPlaylistBanner)
         playlistTitle = findViewById(R.id.ytPlaylistTitle)
@@ -97,7 +109,10 @@ class YouTubeActivity : AppCompatActivity() {
         searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                searchClear.visibility = if (s.isNullOrEmpty()) View.GONE else View.VISIBLE
+                val text = s?.toString().orEmpty()
+                searchClear.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+                if (suppressSuggestions) return
+                scheduleSuggestions(text)
             }
             override fun afterTextChanged(s: Editable?) {}
         })
@@ -110,10 +125,12 @@ class YouTubeActivity : AppCompatActivity() {
             }
         }
         searchClear.setOnClickListener {
+            hideSuggestions()
             searchInput.setText("")
             currentQuery = null
             openPlaylist = null
             playlistBanner.visibility = View.GONE
+            refreshRecentChips()
             if (currentTab == Tab.EXPLORE) {
                 loadExplore(currentFilter == YouTubeInnerTube.SearchFilter.MUSIC)
             }
@@ -219,6 +236,7 @@ class YouTubeActivity : AppCompatActivity() {
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
 
+        refreshRecentChips()
         val startMode = intent.getStringExtra("start_mode")
         if (startMode == "music") {
             currentFilter = YouTubeInnerTube.SearchFilter.MUSIC
@@ -240,7 +258,9 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        suggestRunnable?.let { mainHandler.removeCallbacks(it) }
         io.shutdownNow()
+        suggestIo.shutdownNow()
         super.onDestroy()
     }
 
@@ -313,6 +333,7 @@ class YouTubeActivity : AppCompatActivity() {
     private fun triggerSearch() {
         val q = searchInput.text.toString().trim()
         if (q.isEmpty()) return
+        hideSuggestions()
         hideKeyboard()
         // If the user pasted a YouTube video or playlist link directly into
         // the search box, open it immediately instead of running a text search.
@@ -336,11 +357,97 @@ class YouTubeActivity : AppCompatActivity() {
             return
         }
         YouTubeStore.recordSearch(this, q)
+        refreshRecentChips()
         currentQuery = q
         if (currentTab != Tab.EXPLORE) {
             selectTab(Tab.EXPLORE)
         }
         runSearch(q)
+    }
+
+    // ---- Debounced Search Autocomplete & Recent Search Chips ----
+
+    private fun scheduleSuggestions(raw: String) {
+        suggestRunnable?.let { mainHandler.removeCallbacks(it) }
+        val q = raw.trim()
+        if (q.length < 2 || q.startsWith("http", ignoreCase = true)) {
+            hideSuggestions()
+            return
+        }
+        val task = Runnable {
+            suggestIo.execute {
+                val list = YouTubeInnerTube.fetchSearchSuggestions(q)
+                runOnUiThread {
+                    if (isFinishing || searchInput.text.toString().trim() != q) return@runOnUiThread
+                    renderSuggestions(list)
+                }
+            }
+        }
+        suggestRunnable = task
+        mainHandler.postDelayed(task, 250L)
+    }
+
+    private fun renderSuggestions(suggestions: List<String>) {
+        suggestionsBox.removeAllViews()
+        if (suggestions.isEmpty()) {
+            suggestionsBox.visibility = View.GONE
+            return
+        }
+        val dp = resources.displayMetrics.density
+        suggestions.forEach { text ->
+            val row = TextView(this).apply {
+                this.text = "🔍  $text"
+                textSize = 13f
+                setTextColor(ContextCompat.getColor(this@YouTubeActivity, R.color.graball_text))
+                setPadding((8 * dp).toInt(), (9 * dp).toInt(), (8 * dp).toInt(), (9 * dp).toInt())
+                setOnClickListener {
+                    suppressSuggestions = true
+                    searchInput.setText(text)
+                    searchInput.setSelection(text.length)
+                    suppressSuggestions = false
+                    triggerSearch()
+                }
+            }
+            suggestionsBox.addView(row)
+        }
+        suggestionsBox.visibility = View.VISIBLE
+    }
+
+    private fun hideSuggestions() {
+        suggestRunnable?.let { mainHandler.removeCallbacks(it) }
+        suggestionsBox.visibility = View.GONE
+    }
+
+    private fun refreshRecentChips() {
+        val recents = YouTubeStore.getRecentSearches(this).take(8)
+        recentContainer.removeAllViews()
+        if (recents.isEmpty()) {
+            recentRow.visibility = View.GONE
+            return
+        }
+        val dp = resources.displayMetrics.density
+        recents.forEach { q ->
+            val chip = TextView(this).apply {
+                text = "↺ $q"
+                textSize = 11f
+                setTextColor(ContextCompat.getColor(this@YouTubeActivity, R.color.graball_subtext))
+                setBackgroundResource(R.drawable.yt_chip_bg)
+                setPadding((10 * dp).toInt(), (4 * dp).toInt(), (10 * dp).toInt(), (4 * dp).toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { rightMargin = (6 * dp).toInt() }
+                setOnClickListener {
+                    suppressSuggestions = true
+                    searchInput.setText(q)
+                    searchInput.setSelection(q.length)
+                    suppressSuggestions = false
+                    triggerSearch()
+                }
+            }
+            recentContainer.addView(chip)
+        }
+        recentRow.visibility = View.VISIBLE
     }
 
     private fun extractVideoId(input: String): String? {

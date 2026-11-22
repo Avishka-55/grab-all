@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FileProvider paths (v0.7.5): the Downloads screen's Open button
-     hands finished downloads to the device's default player through
-     here. Only the public Downloads folder is exposed. -->
+<!-- FileProvider paths: exposes Downloads and storage volumes for opening
+     finished downloads and sharing music tracks. -->
 <paths>
     <external-path name="downloads" path="Download/" />
+    <external-path name="external" path="." />
+    <root-path name="root" path="." />
 </paths>

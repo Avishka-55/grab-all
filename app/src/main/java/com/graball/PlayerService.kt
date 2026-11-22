@@ -107,6 +107,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     fun isPlaying(): Boolean = try { player?.isPlaying == true } catch (_: Exception) { false }
     fun position(): Int = try { player?.currentPosition ?: 0 } catch (_: Exception) { 0 }
     fun duration(): Int = try { player?.duration ?: 0 } catch (_: Exception) { 0 }
+    fun audioSessionId(): Int = try { player?.audioSessionId ?: 0 } catch (_: Exception) { 0 }
     fun isShuffleEnabled(): Boolean = shuffleEnabled
     fun getRepeatMode(): RepeatMode = repeatMode
 

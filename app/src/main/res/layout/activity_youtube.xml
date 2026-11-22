@@ -77,6 +77,38 @@
         </LinearLayout>
     </LinearLayout>
 
+    <!-- Live Search Autocomplete Dropdown (shown while typing) -->
+    <LinearLayout
+        android:id="@+id/ytSuggestionsBox"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#1B1B2E"
+        android:elevation="6dp"
+        android:orientation="vertical"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="6dp"
+        android:visibility="gone" />
+
+    <!-- Recent Search Chips (tappable quick searches) -->
+    <HorizontalScrollView
+        android:id="@+id/ytRecentRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/graball_nav"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="6dp"
+        android:scrollbars="none"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/ytRecentContainer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal" />
+    </HorizontalScrollView>
+
     <!-- Main Section Tabs (Explore / Bookmarks / History / Queue) -->
     <LinearLayout
         android:layout_width="match_parent"

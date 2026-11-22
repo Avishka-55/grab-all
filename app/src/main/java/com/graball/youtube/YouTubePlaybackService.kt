@@ -54,6 +54,7 @@ data class YouTubePlaybackState(
     val loadingStatus: String? = null,
     val isPlaying: Boolean = false,
     val isAudioOnly: Boolean = false,
+    val captionsEnabled: Boolean = false,
     val selectedHeight: Int? = null,
     val playbackSpeed: Float = 1.0f,
     val error: String? = null,
@@ -95,6 +96,7 @@ class YouTubePlaybackService : MediaSessionService() {
     private var isLoading = false
     private var loadingStatus: String? = null
     private var isAudioOnly = false
+    private var captionsEnabled = false
     private var selectedHeight: Int? = null
     private var playbackSpeed = 1.0f
     private var lastError: String? = null
@@ -405,6 +407,13 @@ class YouTubePlaybackService : MediaSessionService() {
         broadcastState()
     }
 
+    fun setCaptionsEnabled(enabled: Boolean) {
+        if (captionsEnabled == enabled) return
+        captionsEnabled = enabled
+        applyTrackSelection()
+        broadcastState()
+    }
+
     fun setQuality(height: Int?) {
         selectedHeight = height
         YouTubeStore.setDefaultHeight(this, height ?: 0)
@@ -648,11 +657,15 @@ class YouTubePlaybackService : MediaSessionService() {
     private fun applyTrackSelection() {
         val p = player ?: return
         val maxH = selectedHeight ?: 720
-        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+        val builder = p.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, isAudioOnly)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !captionsEnabled)
             .setPreferredVideoMimeType("video/avc")
             .setMaxVideoSize(Int.MAX_VALUE, maxH)
-            .build()
+        if (captionsEnabled) {
+            builder.setPreferredTextLanguage("en")
+        }
+        p.trackSelectionParameters = builder.build()
     }
 
     private fun applyVideoTrackEnabled(enabled: Boolean) {
@@ -685,6 +698,7 @@ class YouTubePlaybackService : MediaSessionService() {
             loadingStatus = loadingStatus,
             isPlaying = player?.isPlaying == true,
             isAudioOnly = isAudioOnly,
+            captionsEnabled = captionsEnabled,
             selectedHeight = selectedHeight,
             playbackSpeed = playbackSpeed,
             error = lastError,

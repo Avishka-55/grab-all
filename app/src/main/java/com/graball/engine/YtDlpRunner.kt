@@ -59,7 +59,10 @@ class YtDlpRunner(
     private val cookiesFile: File?,
     private val cacheDir: File? = null,
     private val homeDir: File? = null,
-    private val certFile: File? = null
+    private val certFile: File? = null,
+    private val pythonHomeDir: File? = null,
+    private val pythonLibDir: File? = null,
+    private val pythonPathDir: File? = null
 ) {
     @Volatile
     private var process: Process? = null
@@ -68,24 +71,26 @@ class YtDlpRunner(
     private var cancelled: Boolean = false
 
     /**
-     * CPython is built --enable-shared, so the interpreter itself and
-     * ctypes both need libpython3.13.so. The loader finds it via
-     * LD_LIBRARY_PATH pointing at the extracted python lib dir; without
-     * it the process dies at startup (and ctypes dies with
-     * "libpython3.13.so not found", as seen on device in v0.2.4).
-     *
-     * Also sets PYTHONHOME (so Python never looks at CI's build prefix),
-     * TMPDIR/HOME (Android has no writable /tmp), and SSL_CERT_FILE
-     * (so stdlib ssl/urllib uses bundled certifi certs even on old
-     * Android 5-7 devices with expired system root CAs).
+     * Configures environment for our bundled CPython 3.13 runtime:
+     * - LD_LIBRARY_PATH -> nativeLibraryDir (or runtime/python/lib) for libpython3.13.so
+     * - PYTHONHOME      -> runtime/python so stdlib resolves even when bin lives in nativeLibraryDir
+     * - PYTHONPATH      -> runtime/ytdlp so an updated yt-dlp zipapp still sees certifi/mutagen/requests
+     * - TMPDIR / HOME   -> app private dirs (Android has no writable /tmp)
+     * - SSL_CERT_FILE   -> bundled certifi/cacert.pem (works on Android 5-16)
      */
     private fun pythonProcessBuilder(command: List<String>): ProcessBuilder {
         val builder = ProcessBuilder(command)
         val env = builder.environment()
-        val pythonDir = pythonBinary.parentFile?.parentFile
-        if (pythonDir != null) {
-            env["LD_LIBRARY_PATH"] = File(pythonDir, "lib").absolutePath
-            env["PYTHONHOME"] = pythonDir.absolutePath
+        val inferredHome = pythonHomeDir ?: pythonBinary.parentFile?.parentFile
+        val inferredLib = pythonLibDir ?: inferredHome?.let { File(it, "lib") }
+        if (inferredLib != null) {
+            env["LD_LIBRARY_PATH"] = inferredLib.absolutePath
+        }
+        if (inferredHome != null) {
+            env["PYTHONHOME"] = inferredHome.absolutePath
+        }
+        if (pythonPathDir != null && pythonPathDir.exists()) {
+            env["PYTHONPATH"] = pythonPathDir.absolutePath
         }
         if (cacheDir != null) {
             if (!cacheDir.exists()) {

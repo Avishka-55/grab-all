@@ -1,15 +1,20 @@
 package com.graball
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.media.ThumbnailUtils
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.util.LruCache
 import android.util.Size
 import android.view.LayoutInflater
 import android.view.View
@@ -28,24 +33,29 @@ import com.graball.engine.MediaStorePublisher
 import java.io.File
 
 /**
- * WhatsApp Status saver, SnapTube-style (v0.6.2).
- *
- * No network, no login, no yt-dlp: WhatsApp itself saves recent
- * statuses onto the phone (its hidden .Statuses folder — synced in
- * the background, so statuses appear here even if never opened).
- * This screen just lists that folder in a grid and copies a tapped
- * file into Downloads/GrabAll via MediaStorePublisher.
- *
- * On his Android 10 phone with targetSdk 28, legacy storage applies,
- * so the folder reads directly with READ_EXTERNAL_STORAGE. Statuses
- * expire after 24h — a file saved here is gone from WhatsApp then,
- * but the copy in Downloads stays.
+ * WhatsApp Status saver:
+ * - Android 5-10 (API 21-29): direct filesystem scan of WhatsApp/.Statuses
+ *   across internal storage & SD card.
+ * - Android 11+ (API 30+, targetSdk 34): supports Scoped Storage via 1-time
+ *   SAF folder access (ACTION_OPEN_DOCUMENT_TREE persisted across restarts),
+ *   saving cleanly to Downloads/GrabAll via MediaStorePublisher.publishUri().
  */
 class StatusActivity : AppCompatActivity() {
 
+    private data class StatusItem(
+        val name: String,
+        val lastModified: Long,
+        val file: File? = null,
+        val uri: Uri? = null
+    ) {
+        val cacheKey: String get() = file?.absolutePath ?: uri.toString()
+    }
+
     private lateinit var grid: GridView
     private lateinit var emptyView: TextView
-    private var files: List<File> = emptyList()
+    private lateinit var grantBtn: Button
+    private var items: List<StatusItem> = emptyList()
+    private val thumbCache = LruCache<String, Bitmap>(24)
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
@@ -57,11 +67,23 @@ class StatusActivity : AppCompatActivity() {
             }
         }
 
-    /**
-     * Android 13+ (API 33+) auto-denies READ_EXTERNAL_STORAGE because of
-     * maxSdkVersion=32 in the manifest; request READ_MEDIA_IMAGES and
-     * READ_MEDIA_VIDEO there instead.
-     */
+    private val safTreeLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val treeUri = result.data?.data ?: return@registerForActivityResult
+            try {
+                contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
+            val prefs = getSharedPreferences(SAF_PREFS, Context.MODE_PRIVATE)
+            val saved = (prefs.getStringSet(KEY_TREE_URIS, emptySet()) ?: emptySet()).toMutableSet()
+            saved.add(treeUri.toString())
+            prefs.edit().putStringSet(KEY_TREE_URIS, saved).apply()
+            loadStatuses()
+        }
+
     private fun statusReadPermissions(): Array<String> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             arrayOf(
@@ -78,7 +100,11 @@ class StatusActivity : AppCompatActivity() {
         setContentView(R.layout.activity_status)
         grid = findViewById(R.id.statusGrid)
         emptyView = findViewById(R.id.statusEmpty)
+        grantBtn = findViewById(R.id.statusGrantAccess)
         grid.emptyView = emptyView
+
+        grantBtn.setOnClickListener { openWhatsAppSafPicker() }
+
         findViewById<LinearLayout>(R.id.navGrab).setOnClickListener {
             startActivity(
                 Intent(this, MainActivity::class.java).apply {
@@ -93,46 +119,67 @@ class StatusActivity : AppCompatActivity() {
                 }
             )
         }
-                findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
+        findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
             startActivity(
                 Intent(this, PlayerActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
             )
         }
-findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
+        findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
             startActivity(
                 Intent(this, SettingsActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
             )
         }
-        val perms = statusReadPermissions()
-        val hasAll = perms.all {
-            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-        }
-        if (hasAll) {
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             loadStatuses()
         } else {
-            permissionLauncher.launch(perms)
+            val perms = statusReadPermissions()
+            val hasAll = perms.all {
+                ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+            }
+            if (hasAll) {
+                loadStatuses()
+            } else {
+                permissionLauncher.launch(perms)
+            }
+        }
+    }
+
+    private fun openWhatsAppSafPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val initial = Uri.parse(
+                    "content://com.android.externalstorage.documents/document/" +
+                        "primary%3AAndroid%2Fmedia%2Fcom.whatsapp%2FWhatsApp%2FMedia%2F.Statuses"
+                )
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, initial)
+            }
+        }
+        try {
+            safTreeLauncher.launch(intent)
+        } catch (_: Exception) {
+            Toast.makeText(this, "Could not open folder picker", Toast.LENGTH_SHORT).show()
         }
     }
 
     @Suppress("DEPRECATION")
     private fun loadStatuses() {
-        // Statuses can live on internal storage OR a memory card, and
-        // WhatsApp moves its folder between locations across versions
-        // (the old one often stays behind empty). So: every storage
-        // volume Android reports for this app, times every known
-        // relative path, merged newest-first, one row per name.
+        val byName = mutableMapOf<String, StatusItem>()
+
+        // 1) Direct scan (works on Android 5-10 and occasionally legacy WhatsApp folders)
         val roots = mutableListOf<File>()
         roots.add(Environment.getExternalStorageDirectory())
         for (dir in getExternalFilesDirs(null)) {
             if (dir == null) continue
-            // dir = <volume>/Android/data/com.graball/files, so the
-            // 4th parent is the volume root. Sequence form, no mutable
-            // var: a var captured by a closure loses Kotlin smart-cast
-            // (this exact mistake failed the first v0.6.4 build).
             val volumeRoot = generateSequence(dir) { it.parentFile }.elementAtOrNull(4)
             if (volumeRoot != null && volumeRoot !in roots) {
                 roots.add(volumeRoot)
@@ -144,7 +191,6 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
             "WhatsApp Business/Media/.Statuses",
             "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses"
         )
-        val byName = mutableMapOf<String, File>()
         for (root in roots) {
             for (rel in relativePaths) {
                 val dir = File(root, rel)
@@ -152,15 +198,62 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
                 for (file in dir.listFiles() ?: emptyArray()) {
                     if (!file.isFile || !isStatusFile(file.name)) continue
                     val prev = byName[file.name]
-                    if (prev == null || file.lastModified() > prev.lastModified()) {
-                        byName[file.name] = file
+                    if (prev == null || file.lastModified() > prev.lastModified) {
+                        byName[file.name] = StatusItem(file.name, file.lastModified(), file = file)
                     }
                 }
             }
         }
-        files = byName.values.sortedByDescending { it.lastModified() }
-        if (files.isEmpty()) {
-            emptyView.text = getString(R.string.status_empty)
+
+        // 2) SAF persisted tree URIs (Android 11+ Scoped Storage)
+        val prefs = getSharedPreferences(SAF_PREFS, Context.MODE_PRIVATE)
+        val savedTrees = prefs.getStringSet(KEY_TREE_URIS, emptySet()) ?: emptySet()
+        for (treeStr in savedTrees) {
+            try {
+                val treeUri = Uri.parse(treeStr)
+                val docId = DocumentsContract.getTreeDocumentId(treeUri)
+                val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+                val projection = arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED
+                )
+                contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                    val idCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val nameCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val modCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                    while (cursor.moveToNext()) {
+                        val childId = if (idCol >= 0) cursor.getString(idCol) else null
+                        val name = if (nameCol >= 0) cursor.getString(nameCol) else null
+                        val mod = if (modCol >= 0) cursor.getLong(modCol) else 0L
+                        if (childId.isNullOrBlank() || name.isNullOrBlank() || !isStatusFile(name)) continue
+                        val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
+                        val prev = byName[name]
+                        if (prev == null || mod > prev.lastModified) {
+                            byName[name] = StatusItem(name, mod, uri = docUri)
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        items = byName.values.sortedByDescending { it.lastModified }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            grantBtn.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
+            if (items.isEmpty()) {
+                emptyView.text = if (savedTrees.isEmpty()) {
+                    "Tap the button above and select \"Use this folder\" on WhatsApp's .Statuses folder (one-time Android 11+ permission)."
+                } else {
+                    getString(R.string.status_empty)
+                }
+            }
+        } else {
+            grantBtn.visibility = View.GONE
+            if (items.isEmpty()) {
+                emptyView.text = getString(R.string.status_empty)
+            }
         }
         grid.adapter = StatusAdapter()
     }
@@ -184,25 +277,27 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
     }
 
     private inner class StatusAdapter : BaseAdapter() {
-        override fun getCount(): Int = files.size
-        override fun getItem(position: Int): File = files[position]
+        override fun getCount(): Int = items.size
+        override fun getItem(position: Int): StatusItem = items[position]
         override fun getItemId(position: Int): Long = position.toLong()
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val view = convertView ?: LayoutInflater.from(this@StatusActivity)
                 .inflate(R.layout.item_status, parent, false)
-            val file = files[position]
+            val item = items[position]
             val thumb = view.findViewById<ImageView>(R.id.statusThumb)
             val save = view.findViewById<Button>(R.id.statusSave)
-            val bmp = thumbnailFor(file)
+            val bmp = thumbCache.get(item.cacheKey) ?: thumbnailFor(item)?.also {
+                thumbCache.put(item.cacheKey, it)
+            }
             if (bmp != null) {
                 thumb.setImageBitmap(bmp)
-            } else if (isVideo(file.name)) {
+            } else if (isVideo(item.name)) {
                 thumb.setImageResource(android.R.drawable.ic_media_play)
             } else {
                 thumb.setImageResource(android.R.drawable.ic_menu_gallery)
             }
-            val alreadySaved = File(downloadsGrabAllDir(), file.name).exists()
+            val alreadySaved = File(downloadsGrabAllDir(), item.name).exists()
             save.text = if (alreadySaved) {
                 getString(R.string.status_saved_btn)
             } else {
@@ -210,7 +305,11 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
             }
             save.isEnabled = !alreadySaved
             save.setOnClickListener {
-                val uri = MediaStorePublisher.publish(this@StatusActivity, file, file.name)
+                val uri = when {
+                    item.file != null -> MediaStorePublisher.publish(this@StatusActivity, item.file, item.name)
+                    item.uri != null -> MediaStorePublisher.publishUri(this@StatusActivity, item.uri, item.name)
+                    else -> null
+                }
                 if (uri != null) {
                     Toast.makeText(
                         this@StatusActivity, getString(R.string.status_saved),
@@ -228,34 +327,75 @@ findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
             return view
         }
 
-        private fun thumbnailFor(file: File): Bitmap? {
+        private fun thumbnailFor(item: StatusItem): Bitmap? {
             return try {
-                if (isVideo(file.name)) {
-                    // createVideoThumbnail(File, Size, CancellationSignal) is
-                    // API 29+ (Android 10+); older Android 5-9 devices throw
-                    // NoSuchMethodError unless we use the legacy overload.
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        ThumbnailUtils.createVideoThumbnail(file, Size(400, 400), null)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        ThumbnailUtils.createVideoThumbnail(
-                            file.absolutePath,
-                            MediaStore.Images.Thumbnails.MINI_KIND
-                        )
-                    }
+                if (item.file != null) {
+                    thumbnailForFile(item.file)
+                } else if (item.uri != null) {
+                    thumbnailForUri(item.uri, item.name)
                 } else {
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeFile(file.absolutePath, bounds)
-                    var sample = 1
-                    while (bounds.outWidth / sample > 400 || bounds.outHeight / sample > 400) {
-                        sample *= 2
-                    }
-                    BitmapFactory.Options().apply { inSampleSize = sample }
-                        .let { BitmapFactory.decodeFile(file.absolutePath, it) }
+                    null
                 }
             } catch (_: Throwable) {
                 null
             }
         }
+
+        private fun thumbnailForFile(file: File): Bitmap? {
+            return if (isVideo(file.name)) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ThumbnailUtils.createVideoThumbnail(file, Size(400, 400), null)
+                } else {
+                    @Suppress("DEPRECATION")
+                    ThumbnailUtils.createVideoThumbnail(
+                        file.absolutePath,
+                        MediaStore.Images.Thumbnails.MINI_KIND
+                    )
+                }
+            } else {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.absolutePath, bounds)
+                var sample = 1
+                while (bounds.outWidth / sample > 400 || bounds.outHeight / sample > 400) {
+                    sample *= 2
+                }
+                BitmapFactory.Options().apply { inSampleSize = sample }
+                    .let { BitmapFactory.decodeFile(file.absolutePath, it) }
+            }
+        }
+
+        private fun thumbnailForUri(uri: Uri, name: String): Bitmap? {
+            return if (isVideo(name)) {
+                val mmr = MediaMetadataRetriever()
+                try {
+                    mmr.setDataSource(this@StatusActivity, uri)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        mmr.getScaledFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 400, 400)
+                    } else {
+                        mmr.frameAtTime
+                    }
+                } finally {
+                    try { mmr.release() } catch (_: Exception) { }
+                }
+            } else {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it, null, bounds)
+                }
+                var sample = 1
+                while (bounds.outWidth / sample > 400 || bounds.outHeight / sample > 400) {
+                    sample *= 2
+                }
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it, null, opts)
+                }
+            }
+        }
+    }
+
+    companion object {
+        private const val SAF_PREFS = "graball_status_saf"
+        private const val KEY_TREE_URIS = "tree_uris"
     }
 }

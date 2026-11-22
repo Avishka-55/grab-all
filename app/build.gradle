@@ -10,9 +10,9 @@ android {
     defaultConfig {
         applicationId 'com.graball'
         minSdk 21
-        targetSdk 28
-        versionCode 46
-        versionName '0.9.0'
+        targetSdk 34
+        versionCode 47
+        versionName '1.0.0'
     }
 
     // Release signing activates only when keystore properties are supplied
@@ -45,12 +45,13 @@ android {
         jvmTarget = '17'
     }
 
-    // GrabAll is sideloaded from GitHub Releases, never published on
-    // Google Play, so Play's target-API requirement does not apply.
-    // targetSdk 28 is deliberate: it is what lets Android run the
-    // bundled engine from the app's private folder.
-    lint {
-        disable 'ExpiredTargetSdkVersion'
+    // Extract native binaries (.so + python/ffmpeg/qjs executables packaged in
+    // jniLibs/<abi>/lib*.so) to nativeLibraryDir at install time so SELinux
+    // W^X on targetSdk 34+ (Android 10-16+) permits both execve() and dlopen().
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 }
 

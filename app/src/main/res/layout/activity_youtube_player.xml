@@ -289,6 +289,20 @@
                     android:textSize="12sp" />
 
                 <TextView
+                    android:id="@+id/actionCaptions"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="CC"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
                     android:id="@+id/actionBookmark"
                     android:layout_width="wrap_content"
                     android:layout_height="34dp"

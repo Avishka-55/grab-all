@@ -242,6 +242,133 @@
                     android:text="Clear Player &amp; Thumbnail Cache"
                     android:textColor="@color/graball_text" />
             </LinearLayout>
+
+            <!-- yt-dlp Engine Self-Updater -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:background="@drawable/card_bg"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="yt-dlp Engine"
+                    android:textColor="@color/graball_text"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Updates directly from the official yt-dlp GitHub repository to keep YouTube downloads and playback working without reinstalling the app."
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/settingsYtDlpVersion"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="Active: 2026.10.26 (bundled)"
+                    android:textColor="@color/graball_text"
+                    android:textSize="13sp" />
+
+                <CheckBox
+                    android:id="@+id/settingsYtDlpNightly"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Use Nightly channel (fastest YouTube fixes)"
+                    android:textColor="@color/graball_text"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/settingsYtDlpStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/graball_orange"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/settingsYtDlpUpdate"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:background="@drawable/btn_orange"
+                        android:text="Update yt-dlp"
+                        android:textColor="@color/graball_text"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/settingsYtDlpReset"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/btn_small"
+                        android:paddingStart="14dp"
+                        android:paddingEnd="14dp"
+                        android:text="Reset"
+                        android:textColor="@color/graball_text"
+                        android:visibility="gone" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- GrabAll App Update Checker -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:background="@drawable/card_bg"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="GrabAll App Updates"
+                    android:textColor="@color/graball_text"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/settingsAppVersion"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Installed version"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/settingsAppUpdateStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/graball_orange"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+                <Button
+                    android:id="@+id/settingsCheckAppUpdate"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/btn_small"
+                    android:text="Check for App Update"
+                    android:textColor="@color/graball_text" />
+            </LinearLayout>
         </LinearLayout>
     </ScrollView>
 

@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
@@ -335,7 +336,16 @@ class DownloadService : Service() {
             null
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("Preparing download…", null))
+        val prepNotif = buildNotification("Preparing download…", null)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                prepNotif,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, prepNotif)
+        }
         // The row is born NOW, not on the first progress tick minutes
         // later: the Downloads screen shows "Preparing…" at once, and
         // a screen opened mid-download replays this from the bus.
@@ -386,7 +396,10 @@ class DownloadService : Service() {
                         cookiesFile = cookies,
                         cacheDir = cacheDir,
                         homeDir = filesDir,
-                        certFile = RuntimePaths.certFile(this)
+                        certFile = RuntimePaths.certFile(this),
+                        pythonHomeDir = RuntimePaths.pythonHomeDir(this),
+                        pythonLibDir = RuntimePaths.pythonLibDir(this),
+                        pythonPathDir = RuntimePaths.ytDlpBundleDir(this)
                     )
                     session.runner = newRunner
                     newRunner.download(
@@ -678,7 +691,7 @@ class DownloadService : Service() {
         private const val NOTIFICATION_ID = 1
 
         /** Bump when the bundled native assets change, to force re-extraction. */
-        const val RUNTIME_VERSION = "python3.13-ytdlp2026.10.26-v5"
+        const val RUNTIME_VERSION = "python3.13-ytdlp2026.10.26-v6"
 
         private const val EXTRA_URL = "com.graball.engine.extra.URL"
         private const val EXTRA_OUTPUT = "com.graball.engine.extra.OUTPUT"
@@ -793,7 +806,8 @@ class DownloadService : Service() {
             if (audioOnly) {
                 return listOf(
                     "-f", "bestaudio",
-                    "--extract-audio", "--audio-format", "mp3"
+                    "--extract-audio", "--audio-format", "mp3",
+                    "--embed-metadata", "--embed-thumbnail"
                 )
             }
             val cap = if (maxHeight != null) "[height<=$maxHeight]" else ""

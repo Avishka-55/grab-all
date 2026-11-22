@@ -54,6 +54,27 @@ object MediaStorePublisher {
         }
     }
 
+    /** Publish a SAF content:// document URI (e.g. WhatsApp Status on Android 11+) into Downloads/GrabAll. */
+    fun publishUri(
+        context: Context,
+        sourceUri: Uri,
+        displayName: String,
+        subfolder: String? = null
+    ): Uri? {
+        return try {
+            val tmp = File(context.cacheDir, "status_tmp_${System.currentTimeMillis()}_$displayName")
+            context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                tmp.outputStream().use { out -> input.copyTo(out) }
+            } ?: return null
+            val res = publish(context, tmp, displayName, subfolder)
+            tmp.delete()
+            res
+        } catch (e: Exception) {
+            Log.e(TAG, "Publish URI failed", e)
+            null
+        }
+    }
+
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun publishScoped(
         context: Context,

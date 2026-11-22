@@ -82,6 +82,34 @@ object YouTubeInnerTube {
 
     // ---- Search / Explore / Playlist / Related ----
 
+    /** Lightweight YouTube autocomplete suggestions (~25ms, <1KB JSON). */
+    fun fetchSearchSuggestions(query: String): List<String> {
+        val clean = query.trim()
+        if (clean.length < 2) return emptyList()
+        return try {
+            val encoded = java.net.URLEncoder.encode(clean, "UTF-8")
+            val url = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=$encoded"
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", WEB_UA)
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return emptyList()
+                val body = resp.body?.string() ?: return emptyList()
+                val arr = JSONArray(body)
+                val suggestions = arr.optJSONArray(1) ?: return emptyList()
+                val out = mutableListOf<String>()
+                for (i in 0 until minOf(6, suggestions.length())) {
+                    val s = suggestions.optString(i).trim()
+                    if (s.isNotBlank()) out.add(s)
+                }
+                out
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     fun search(query: String, filter: SearchFilter = SearchFilter.ALL): List<YtItem> {
         val effectiveQuery = if (filter == SearchFilter.MUSIC && !query.contains("music", true)) {
             "$query music"
@@ -385,7 +413,10 @@ object YouTubeInnerTube {
             cookiesFile = cookies,
             cacheDir = context.cacheDir,
             homeDir = context.filesDir,
-            certFile = RuntimePaths.certFile(context)
+            certFile = RuntimePaths.certFile(context),
+            pythonHomeDir = RuntimePaths.pythonHomeDir(context),
+            pythonLibDir = RuntimePaths.pythonLibDir(context),
+            pythonPathDir = RuntimePaths.ytDlpBundleDir(context)
         )
         val (raw, err) = runner.extractInfoJson("https://www.youtube.com/watch?v=$videoId")
         if (raw == null) {

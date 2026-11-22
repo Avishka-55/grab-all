@@ -72,6 +72,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var actionBgAudio: TextView
     private lateinit var actionQuality: TextView
     private lateinit var actionSpeed: TextView
+    private lateinit var actionCaptions: TextView
     private lateinit var actionBookmark: TextView
     private lateinit var actionSponsorBlock: TextView
     private lateinit var relatedList: RecyclerView
@@ -128,6 +129,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         actionBgAudio = findViewById(R.id.actionBgAudio)
         actionQuality = findViewById(R.id.actionQuality)
         actionSpeed = findViewById(R.id.actionSpeed)
+        actionCaptions = findViewById(R.id.actionCaptions)
         actionBookmark = findViewById(R.id.actionBookmark)
         actionSponsorBlock = findViewById(R.id.actionSponsorBlock)
         relatedList = findViewById(R.id.relatedList)
@@ -167,6 +169,12 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         actionQuality.setOnClickListener { showQualityPicker() }
         actionSpeed.setOnClickListener { showSpeedPicker() }
+        actionCaptions.setOnClickListener {
+            val svc = YouTubePlaybackService.instance ?: return@setOnClickListener
+            val next = !YouTubePlaybackService.currentState.captionsEnabled
+            svc.setCaptionsEnabled(next)
+            showHud(if (next) "CC: ON" else "CC: OFF")
+        }
 
         actionBookmark.setOnClickListener {
             val item = YouTubePlaybackService.currentState.currentItem ?: return@setOnClickListener
@@ -341,6 +349,15 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         actionBgAudio.setBackgroundResource(
             if (state.isAudioOnly) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+        )
+        actionCaptions.setBackgroundResource(
+            if (state.captionsEnabled) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+        )
+        actionCaptions.setTextColor(
+            ContextCompat.getColor(
+                this,
+                if (state.captionsEnabled) R.color.graball_text else R.color.graball_subtext
+            )
         )
 
         if (item != null) {

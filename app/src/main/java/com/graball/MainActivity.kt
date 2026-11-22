@@ -1,12 +1,14 @@
 package com.graball
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.widget.ArrayAdapter
@@ -20,6 +22,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.graball.engine.AppUpdateChecker
 import com.graball.engine.DownloadPrefs
 import com.graball.engine.DownloadService
 import com.graball.engine.DownloadProgressBus
@@ -285,6 +288,39 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
         }
         handleShareIntent(intent)
+        maybeCheckAppUpdate()
+    }
+
+    /** Silent periodic (every 6h) check against GrabAll's public Android release mirror. */
+    private fun maybeCheckAppUpdate() {
+        if (!AppUpdateChecker.shouldAutoCheck(this)) return
+        Thread {
+            val release = AppUpdateChecker.check(applicationContext, markChecked = true)
+            if (release != null && release.isNewer) {
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    val sizeStr = if (release.sizeBytes > 0) {
+                        String.format(" (%.1f MB)", release.sizeBytes / (1024.0 * 1024.0))
+                    } else {
+                        ""
+                    }
+                    AlertDialog.Builder(this)
+                        .setTitle("GrabAll v${release.version} Available")
+                        .setMessage(
+                            "A newer Android version of GrabAll is ready$sizeStr.\n" +
+                                "Current: v${release.currentVersion} → New: v${release.version}"
+                        )
+                        .setPositiveButton("Download APK") { _, _ ->
+                            try {
+                                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(release.apkUrl)))
+                            } catch (_: Exception) {
+                            }
+                        }
+                        .setNegativeButton("Later", null)
+                        .show()
+                }
+            }
+        }.apply { isDaemon = true }.start()
     }
 
     override fun onNewIntent(intent: Intent) {
