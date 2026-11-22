@@ -468,27 +468,24 @@
                             android:textSize="11sp" />
                     </LinearLayout>
 
-                    <TextView
+                    <ImageView
                         android:id="@+id/miniPlayPause"
                         android:layout_width="40dp"
                         android:layout_height="40dp"
                         android:background="@drawable/play_circle_bg"
-                        android:gravity="center"
-                        android:text="▶"
-                        android:textColor="@color/graball_text"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
+                        android:contentDescription="Play or pause"
+                        android:padding="9dp"
+                        android:src="@drawable/ic_media_play_white" />
 
-                    <TextView
+                    <ImageView
                         android:id="@+id/miniNext"
                         android:layout_width="36dp"
                         android:layout_height="36dp"
                         android:layout_marginStart="6dp"
                         android:background="@drawable/yt_chip_bg"
-                        android:gravity="center"
-                        android:text="⏭"
-                        android:textColor="@color/graball_text"
-                        android:textSize="15sp" />
+                        android:contentDescription="Next song"
+                        android:padding="8dp"
+                        android:src="@drawable/ic_media_next_white" />
                 </LinearLayout>
             </LinearLayout>
         </LinearLayout>
@@ -556,16 +553,14 @@
                 android:paddingEnd="16dp"
                 android:paddingBottom="10dp">
 
-                <TextView
+                <ImageView
                     android:id="@+id/npCollapse"
                     android:layout_width="40dp"
                     android:layout_height="40dp"
                     android:background="@drawable/circle_translucent_bg"
-                    android:gravity="center"
-                    android:text="⌄"
-                    android:textColor="#FFFFFF"
-                    android:textSize="22sp"
-                    android:textStyle="bold" />
+                    android:contentDescription="Collapse player"
+                    android:padding="8dp"
+                    android:src="@drawable/ic_chevron_down_white" />
 
                 <LinearLayout
                     android:layout_width="0dp"
@@ -592,15 +587,14 @@
                         android:textStyle="bold" />
                 </LinearLayout>
 
-                <TextView
+                <ImageView
                     android:id="@+id/npBtnQueue"
                     android:layout_width="40dp"
                     android:layout_height="40dp"
                     android:background="@drawable/circle_translucent_bg"
-                    android:gravity="center"
-                    android:text="📋"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp" />
+                    android:contentDescription="Up next queue"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_queue_white" />
             </LinearLayout>
         </FrameLayout>
 
@@ -731,17 +725,14 @@
                     android:textStyle="bold"
                     android:visibility="gone" />
 
-                <TextView
+                <ImageView
                     android:id="@+id/npBtnStop"
-                    android:layout_width="wrap_content"
+                    android:layout_width="36dp"
                     android:layout_height="34dp"
                     android:background="@drawable/pill_translucent_bg"
-                    android:gravity="center"
-                    android:paddingStart="11dp"
-                    android:paddingEnd="11dp"
-                    android:text="⏹"
-                    android:textColor="#CCFFFFFF"
-                    android:textSize="13sp" />
+                    android:contentDescription="Stop playback"
+                    android:padding="8dp"
+                    android:src="@drawable/ic_media_stop_white" />
             </LinearLayout>
 
             <View
@@ -784,7 +775,7 @@
                     android:textSize="11sp" />
             </LinearLayout>
 
-            <!-- Minimalist Transport Controls -->
+            <!-- Minimalist Pure-White Transport Controls (zero emoji boxes, no circle) -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -792,56 +783,54 @@
                 android:gravity="center"
                 android:orientation="horizontal">
 
-                <TextView
+                <ImageView
                     android:id="@+id/npShuffle"
                     android:layout_width="42dp"
                     android:layout_height="42dp"
-                    android:gravity="center"
-                    android:text="🔀"
-                    android:textColor="#CCFFFFFF"
-                    android:textSize="17sp" />
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Shuffle"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_media_shuffle_white" />
 
-                <TextView
+                <ImageView
                     android:id="@+id/npPrev"
-                    android:layout_width="54dp"
-                    android:layout_height="54dp"
-                    android:layout_marginStart="12dp"
-                    android:gravity="center"
-                    android:text="⏮"
-                    android:textColor="#FFFFFF"
-                    android:textSize="26sp" />
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginStart="14dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Previous song"
+                    android:padding="8dp"
+                    android:src="@drawable/ic_media_prev_white" />
 
-                <TextView
+                <ImageView
                     android:id="@+id/npPlayPause"
-                    android:layout_width="70dp"
-                    android:layout_height="70dp"
-                    android:layout_marginStart="16dp"
-                    android:layout_marginEnd="16dp"
-                    android:background="@drawable/circle_translucent_bg"
-                    android:gravity="center"
-                    android:text="▶"
-                    android:textColor="#FFFFFF"
-                    android:textSize="32sp"
-                    android:textStyle="bold" />
+                    android:layout_width="64dp"
+                    android:layout_height="64dp"
+                    android:layout_marginStart="18dp"
+                    android:layout_marginEnd="18dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Play or pause"
+                    android:padding="8dp"
+                    android:src="@drawable/ic_media_play_white" />
 
-                <TextView
+                <ImageView
                     android:id="@+id/npNext"
-                    android:layout_width="54dp"
-                    android:layout_height="54dp"
-                    android:layout_marginEnd="12dp"
-                    android:gravity="center"
-                    android:text="⏭"
-                    android:textColor="#FFFFFF"
-                    android:textSize="26sp" />
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginEnd="14dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Next song"
+                    android:padding="8dp"
+                    android:src="@drawable/ic_media_next_white" />
 
-                <TextView
+                <ImageView
                     android:id="@+id/npRepeat"
                     android:layout_width="42dp"
                     android:layout_height="42dp"
-                    android:gravity="center"
-                    android:text="🔁"
-                    android:textColor="#FFFFFF"
-                    android:textSize="17sp" />
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Repeat mode"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_media_repeat_white" />
             </LinearLayout>
         </LinearLayout>
     </LinearLayout>
@@ -869,16 +858,14 @@
             android:paddingEnd="14dp"
             android:paddingBottom="12dp">
 
-            <TextView
+            <ImageView
                 android:id="@+id/lyricsClose"
                 android:layout_width="38dp"
                 android:layout_height="38dp"
                 android:background="@drawable/circle_translucent_bg"
-                android:gravity="center"
-                android:text="⌄"
-                android:textColor="#FFFFFF"
-                android:textSize="22sp"
-                android:textStyle="bold" />
+                android:contentDescription="Close lyrics"
+                android:padding="7dp"
+                android:src="@drawable/ic_chevron_down_white" />
 
             <LinearLayout
                 android:layout_width="0dp"
@@ -1055,36 +1042,34 @@
                     android:gravity="center"
                     android:orientation="horizontal">
 
-                    <TextView
+                    <ImageView
                         android:id="@+id/lyricsPrev"
-                        android:layout_width="42dp"
-                        android:layout_height="42dp"
-                        android:gravity="center"
-                        android:text="⏮"
-                        android:textColor="#FFFFFF"
-                        android:textSize="22sp" />
+                        android:layout_width="44dp"
+                        android:layout_height="44dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="Previous song"
+                        android:padding="8dp"
+                        android:src="@drawable/ic_media_prev_white" />
 
-                    <TextView
+                    <ImageView
                         android:id="@+id/lyricsPlayPause"
-                        android:layout_width="52dp"
-                        android:layout_height="52dp"
+                        android:layout_width="54dp"
+                        android:layout_height="54dp"
                         android:layout_marginStart="16dp"
                         android:layout_marginEnd="16dp"
-                        android:background="@drawable/circle_translucent_bg"
-                        android:gravity="center"
-                        android:text="▶"
-                        android:textColor="#FFFFFF"
-                        android:textSize="24sp"
-                        android:textStyle="bold" />
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="Play or pause"
+                        android:padding="7dp"
+                        android:src="@drawable/ic_media_play_white" />
 
-                    <TextView
+                    <ImageView
                         android:id="@+id/lyricsNext"
-                        android:layout_width="42dp"
-                        android:layout_height="42dp"
-                        android:gravity="center"
-                        android:text="⏭"
-                        android:textColor="#FFFFFF"
-                        android:textSize="22sp" />
+                        android:layout_width="44dp"
+                        android:layout_height="44dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="Next song"
+                        android:padding="8dp"
+                        android:src="@drawable/ic_media_next_white" />
                 </LinearLayout>
 
                 <View

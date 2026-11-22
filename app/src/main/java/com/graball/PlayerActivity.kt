@@ -115,8 +115,8 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var miniArtFallback: TextView
     private lateinit var miniTitle: TextView
     private lateinit var miniSub: TextView
-    private lateinit var miniPlayPause: TextView
-    private lateinit var miniNext: TextView
+    private lateinit var miniPlayPause: ImageView
+    private lateinit var miniNext: ImageView
 
     // Full-Screen Now Playing UI (Edge-to-Edge Dynamic Color + Wave)
     private lateinit var nowPlayingSheet: LinearLayout
@@ -134,11 +134,11 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var npSeek: SeekBar
     private lateinit var npTimeCur: TextView
     private lateinit var npTimeDur: TextView
-    private lateinit var npShuffle: TextView
-    private lateinit var npPrev: TextView
-    private lateinit var npPlayPause: TextView
-    private lateinit var npNext: TextView
-    private lateinit var npRepeat: TextView
+    private lateinit var npShuffle: ImageView
+    private lateinit var npPrev: ImageView
+    private lateinit var npPlayPause: ImageView
+    private lateinit var npNext: ImageView
+    private lateinit var npRepeat: ImageView
     private lateinit var npBtnAddPlaylist: TextView
     private lateinit var npBtnDownload: TextView
 
@@ -155,7 +155,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var lyricsSeek: SeekBar
     private lateinit var lyricsTimeCur: TextView
     private lateinit var lyricsTimeDur: TextView
-    private lateinit var lyricsPlayPause: TextView
+    private lateinit var lyricsPlayPause: ImageView
     private lateinit var lyricsBtnOpenYoutube: TextView
 
     private var allFolders: List<MusicFolder> = emptyList()
@@ -382,8 +382,8 @@ class PlayerActivity : AppCompatActivity() {
         miniBtnOpenYoutube.setOnClickListener { openCurrentYouTubeVideo() }
 
         // Full-Screen Now Playing interactions
-        findViewById<TextView>(R.id.npCollapse).setOnClickListener { closeNowPlayingSheet() }
-        findViewById<TextView>(R.id.npBtnQueue).setOnClickListener { showQueueDialog() }
+        findViewById<View>(R.id.npCollapse).setOnClickListener { closeNowPlayingSheet() }
+        findViewById<View>(R.id.npBtnQueue).setOnClickListener { showQueueDialog() }
         npBtnOpenYoutube.setOnClickListener { openCurrentYouTubeVideo() }
         npPrev.setOnClickListener { handlePrev() }
         npPlayPause.setOnClickListener { handlePlayPause() }
@@ -426,7 +426,7 @@ class PlayerActivity : AppCompatActivity() {
                 DownloadSheetHelper.show(this, item)
             }
         }
-        findViewById<TextView>(R.id.npBtnStop).setOnClickListener {
+        findViewById<View>(R.id.npBtnStop).setOnClickListener {
             when (resolveActiveSource()) {
                 ActiveSource.YOUTUBE -> YouTubePlaybackService.instance?.stopPlayback()
                 ActiveSource.LOCAL -> sendControl(PlayerService.ACTION_STOP)
@@ -454,10 +454,10 @@ class PlayerActivity : AppCompatActivity() {
         })
 
         // Full-Screen Live Lyrics interactions
-        findViewById<TextView>(R.id.lyricsClose).setOnClickListener { closeLyricsSheet() }
-        findViewById<TextView>(R.id.lyricsPrev).setOnClickListener { handlePrev() }
+        findViewById<View>(R.id.lyricsClose).setOnClickListener { closeLyricsSheet() }
+        findViewById<View>(R.id.lyricsPrev).setOnClickListener { handlePrev() }
         lyricsPlayPause.setOnClickListener { handlePlayPause() }
-        findViewById<TextView>(R.id.lyricsNext).setOnClickListener { handleNext() }
+        findViewById<View>(R.id.lyricsNext).setOnClickListener { handleNext() }
         lyricsBtnOpenYoutube.setOnClickListener { openCurrentYouTubeVideo() }
         findViewById<TextView>(R.id.lyricsSyncMinus).setOnClickListener {
             lyricsOffsetMs -= 500L
@@ -640,7 +640,8 @@ class PlayerActivity : AppCompatActivity() {
         miniTitle.text = title
         miniSub.text = sub
         val playing = svc.isPlaying()
-        miniPlayPause.text = if (playing) "⏸" else "▶"
+        val playPauseRes = if (playing) R.drawable.ic_media_pause_white else R.drawable.ic_media_play_white
+        miniPlayPause.setImageResource(playPauseRes)
 
         // Full-Screen Now Playing
         npSourceLabel.text = if (folderLbl.isNotBlank()) {
@@ -651,7 +652,7 @@ class PlayerActivity : AppCompatActivity() {
         npYoutubeBar.visibility = View.GONE
         npTitle.text = title
         npArtist.text = sub
-        npPlayPause.text = if (playing) "⏸" else "▶"
+        npPlayPause.setImageResource(playPauseRes)
         npWave.setPlaying(playing && isNowPlayingOpen)
         npShuffle.visibility = View.VISIBLE
         npRepeat.visibility = View.VISIBLE
@@ -710,14 +711,15 @@ class PlayerActivity : AppCompatActivity() {
         miniYtBanner.visibility = View.VISIBLE
         miniTitle.text = title
         miniSub.text = channel
-        miniPlayPause.text = if (playing) "⏸" else "▶"
+        val playPauseRes = if (playing) R.drawable.ic_media_pause_white else R.drawable.ic_media_play_white
+        miniPlayPause.setImageResource(playPauseRes)
 
         // Full-Screen Now Playing with YouTube Audio field
         npSourceLabel.text = "🎧 YOUTUBE AUDIO MODE"
         npYoutubeBar.visibility = View.VISIBLE
         npTitle.text = title
         npArtist.text = channel
-        npPlayPause.text = if (playing) "⏸" else "▶"
+        npPlayPause.setImageResource(playPauseRes)
         npWave.setPlaying(playing && isNowPlayingOpen)
         npShuffle.visibility = View.INVISIBLE
         npRepeat.visibility = View.INVISIBLE
@@ -801,7 +803,7 @@ class PlayerActivity : AppCompatActivity() {
             }
             miniTitle.text = title
             miniSub.text = sub
-            miniPlayPause.text = "▶"
+            miniPlayPause.setImageResource(R.drawable.ic_media_play_white)
             npSourceLabel.text = if (last.folderLabel.isNotBlank()) {
                 "RESUME · ${last.folderLabel.uppercase()}"
             } else {
@@ -809,7 +811,7 @@ class PlayerActivity : AppCompatActivity() {
             }
             npTitle.text = title
             npArtist.text = sub
-            npPlayPause.text = "▶"
+            npPlayPause.setImageResource(R.drawable.ic_media_play_white)
             npShuffle.visibility = View.VISIBLE
             npRepeat.visibility = View.VISIBLE
             npBtnAddPlaylist.visibility = View.GONE
@@ -828,13 +830,13 @@ class PlayerActivity : AppCompatActivity() {
 
         miniTitle.text = getString(R.string.player_tap_to_play)
         miniSub.text = "Voice notes & call recordings auto-hidden"
-        miniPlayPause.text = "▶"
+        miniPlayPause.setImageResource(R.drawable.ic_media_play_white)
         miniProgress.progress = 0
 
         npSourceLabel.text = "NOW PLAYING"
         npTitle.text = getString(R.string.player_tap_to_play)
         npArtist.text = "Pick a song from All Music, Folders or Playlists"
-        npPlayPause.text = "▶"
+        npPlayPause.setImageResource(R.drawable.ic_media_play_white)
         npShuffle.visibility = View.VISIBLE
         npRepeat.visibility = View.VISIBLE
         npBtnAddPlaylist.visibility = View.GONE
@@ -983,7 +985,9 @@ class PlayerActivity : AppCompatActivity() {
         localFile: File?
     ) {
         lyricsTitle.text = title
-        lyricsPlayPause.text = if (isPlaying) "⏸" else "▶"
+        lyricsPlayPause.setImageResource(
+            if (isPlaying) R.drawable.ic_media_pause_white else R.drawable.ic_media_play_white
+        )
         lyricsBtnOpenYoutube.visibility = if (isYouTube) View.VISIBLE else View.INVISIBLE
 
         if (cacheKey != currentLyricsKey) {
@@ -1881,22 +1885,18 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun updateShuffleRepeatUi(svc: PlayerService) {
         val shufOn = svc.isShuffleEnabled()
-        npShuffle.setBackgroundResource(if (shufOn) R.drawable.circle_translucent_bg else 0)
-        npShuffle.alpha = if (shufOn) 1.0f else 0.55f
+        npShuffle.alpha = if (shufOn) 1.0f else 0.45f
         when (svc.getRepeatMode()) {
             PlayerService.RepeatMode.OFF -> {
-                npRepeat.text = "🔁"
-                npRepeat.setBackgroundResource(0)
-                npRepeat.alpha = 0.55f
+                npRepeat.setImageResource(R.drawable.ic_media_repeat_white)
+                npRepeat.alpha = 0.45f
             }
             PlayerService.RepeatMode.ALL -> {
-                npRepeat.text = "🔁"
-                npRepeat.setBackgroundResource(R.drawable.circle_translucent_bg)
+                npRepeat.setImageResource(R.drawable.ic_media_repeat_white)
                 npRepeat.alpha = 1.0f
             }
             PlayerService.RepeatMode.ONE -> {
-                npRepeat.text = "🔂"
-                npRepeat.setBackgroundResource(R.drawable.circle_translucent_bg)
+                npRepeat.setImageResource(R.drawable.ic_media_repeat_one_white)
                 npRepeat.alpha = 1.0f
             }
         }
