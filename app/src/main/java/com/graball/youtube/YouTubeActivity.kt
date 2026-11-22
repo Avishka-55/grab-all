@@ -453,6 +453,8 @@ class YouTubeActivity : AppCompatActivity() {
                 addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
             }
         )
+        @Suppress("DEPRECATION")
+        overridePendingTransition(R.anim.slide_in_up, R.anim.fade_out)
     }
 
     private fun renderBookmarks() {

@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -16,19 +17,18 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import java.io.File
+import kotlin.random.Random
 
 /**
- * GrabAll's own music player (v0.7.0). Plays audio files already in
- * Downloads/GrabAll — local files only, no YouTube streaming.
- *
- * Started AND bound: startService keeps it alive in the background
- * (music keeps playing while he chats or browses), binding lets
- * PlayerActivity read position/duration and drive seek/next/prev.
- * Notification actions (prev / play-pause / next) work even when the
- * activity is gone. Audio focus pauses on calls and resumes after.
+ * GrabAll's local music player service.
+ * Plays audio strictly from the active folder/playlist passed by PlayerActivity
+ * (never jumping into unrequested folders or recordings). Supports background
+ * playback with screen off, notification controls, Shuffle, and Repeat (Off / All / One).
  */
 class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     AudioManager.OnAudioFocusChangeListener {
+
+    enum class RepeatMode { OFF, ALL, ONE }
 
     companion object {
         const val ACTION_PLAY = "com.graball.player.PLAY"
@@ -39,6 +39,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         const val ACTION_STOP = "com.graball.player.STOP"
         const val EXTRA_PATHS = "paths"
         const val EXTRA_INDEX = "index"
+        const val EXTRA_FOLDER_LABEL = "folder_label"
         const val NOTIFICATION_ID = 2
         const val CHANNEL_ID = "graball_player"
     }
@@ -47,6 +48,9 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     private var player: MediaPlayer? = null
     private var playlist: List<File> = emptyList()
     private var index = -1
+    private var folderLabel: String = ""
+    private var shuffleEnabled = false
+    private var repeatMode = RepeatMode.ALL
     private var wasPlayingBeforeFocusLoss = false
     private var audioManager: AudioManager? = null
     private var focusRequest: AudioFocusRequest? = null
@@ -63,7 +67,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID, "Player", NotificationManager.IMPORTANCE_LOW
+                CHANNEL_ID, "Music Player", NotificationManager.IMPORTANCE_LOW
             )
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .createNotificationChannel(channel)
@@ -75,6 +79,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
             ACTION_PLAY -> {
                 val paths = intent.getStringArrayListExtra(EXTRA_PATHS) ?: arrayListOf()
                 val idx = intent.getIntExtra(EXTRA_INDEX, 0)
+                folderLabel = intent.getStringExtra(EXTRA_FOLDER_LABEL).orEmpty()
                 if (paths.isNotEmpty()) {
                     playlist = paths.map { File(it) }
                     index = idx.coerceIn(0, playlist.size - 1)
@@ -97,17 +102,27 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     // ---- Activity-facing controls ----
 
-    fun playList(files: List<File>, startIndex: Int) {
-        if (files.isEmpty()) return
-        playlist = files
-        index = startIndex.coerceIn(0, files.size - 1)
-        startPlayback()
-    }
-
     fun currentFile(): File? = playlist.getOrNull(index)
+    fun currentFolderLabel(): String = folderLabel
     fun isPlaying(): Boolean = try { player?.isPlaying == true } catch (_: Exception) { false }
     fun position(): Int = try { player?.currentPosition ?: 0 } catch (_: Exception) { 0 }
     fun duration(): Int = try { player?.duration ?: 0 } catch (_: Exception) { 0 }
+    fun isShuffleEnabled(): Boolean = shuffleEnabled
+    fun getRepeatMode(): RepeatMode = repeatMode
+
+    fun toggleShuffle(): Boolean {
+        shuffleEnabled = !shuffleEnabled
+        return shuffleEnabled
+    }
+
+    fun cycleRepeatMode(): RepeatMode {
+        repeatMode = when (repeatMode) {
+            RepeatMode.OFF -> RepeatMode.ALL
+            RepeatMode.ALL -> RepeatMode.ONE
+            RepeatMode.ONE -> RepeatMode.OFF
+        }
+        return repeatMode
+    }
 
     fun seekTo(ms: Int) {
         try { player?.seekTo(ms) } catch (_: Exception) { }
@@ -115,8 +130,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     fun pause() {
         try { player?.pause() } catch (_: Exception) { }
-        // Paused, not dead: drop out of the foreground so the
-        // notification becomes swipe-dismissable instead of stuck.
+        @Suppress("DEPRECATION")
         stopForeground(false)
         updateNotification()
     }
@@ -124,26 +138,42 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     fun resume() {
         if (requestFocus()) {
             try { player?.start() } catch (_: Exception) { }
-            // Only re-enter the foreground when there is actually a
-            // player to resume — after a Stop there is none, and a
-            // stray "Paused" notification must not come back.
             if (player != null) {
-                startForeground(NOTIFICATION_ID, buildNotification())
+                startForegroundCompat(buildNotification())
             }
         }
         updateNotification()
     }
 
     fun playNext() {
+        if (playlist.isEmpty()) return
+        if (shuffleEnabled && playlist.size > 1) {
+            var next = Random.nextInt(playlist.size)
+            if (next == index) next = (index + 1) % playlist.size
+            index = next
+            startPlayback()
+            return
+        }
         if (index + 1 < playlist.size) {
             index++
+            startPlayback()
+        } else if (repeatMode == RepeatMode.ALL) {
+            index = 0
             startPlayback()
         }
     }
 
     fun playPrev() {
+        if (playlist.isEmpty()) return
+        if (position() > 4000) {
+            seekTo(0)
+            return
+        }
         if (index > 0) {
             index--
+            startPlayback()
+        } else if (repeatMode == RepeatMode.ALL) {
+            index = playlist.lastIndex
             startPlayback()
         } else {
             seekTo(0)
@@ -174,17 +204,28 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 prepareAsync()
             }
             player = mp
-            startForeground(NOTIFICATION_ID, buildNotification())
+            startForegroundCompat(buildNotification())
         } catch (_: Exception) {
             releasePlayer()
         }
     }
 
+    private fun startForegroundCompat(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
     private fun stopPlayback() {
         releasePlayer()
-        // No current track any more, so the player screen shows its
-        // idle "tap a song" line instead of the last song's name.
         index = -1
+        @Suppress("DEPRECATION")
         stopForeground(true)
         stopSelf()
     }
@@ -196,11 +237,19 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     override fun onCompletion(mp: MediaPlayer) {
-        if (index + 1 < playlist.size) {
-            index++
-            startPlayback()
-        } else {
-            stopPlayback()
+        when (repeatMode) {
+            RepeatMode.ONE -> startPlayback()
+            RepeatMode.ALL -> playNext()
+            RepeatMode.OFF -> {
+                if (shuffleEnabled && playlist.size > 1) {
+                    playNext()
+                } else if (index + 1 < playlist.size) {
+                    index++
+                    startPlayback()
+                } else {
+                    stopPlayback()
+                }
+            }
         }
     }
 
@@ -278,14 +327,17 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
             },
             pendingIntentFlags()
         )
+        val displayTitle = file?.nameWithoutExtension ?: "GrabAll Music"
+        val status = if (isPlaying()) "Playing" else "Paused"
+        val sub = if (folderLabel.isNotBlank()) "$status · $folderLabel" else status
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle(file?.name ?: "GrabAll Music")
-            .setContentText(if (isPlaying()) "Playing" else "Paused")
+            .setContentTitle(displayTitle)
+            .setContentText(sub)
             .setContentIntent(openApp)
-            // Ongoing only while playing: a paused notification can
-            // be swiped away, and the Stop action kills the service.
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOngoing(isPlaying())
+            .setOnlyAlertOnce(true)
             .addAction(android.R.drawable.ic_media_previous, "Prev", actionIntent(ACTION_PREV))
             .addAction(
                 if (isPlaying()) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,

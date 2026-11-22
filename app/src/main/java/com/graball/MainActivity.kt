@@ -140,20 +140,26 @@ class MainActivity : AppCompatActivity() {
                     addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
             )
+            @Suppress("DEPRECATION")
+            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
         }
-                findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
+        findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
             startActivity(
                 Intent(this, PlayerActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
             )
+            @Suppress("DEPRECATION")
+            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
         }
-findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
+        findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
             startActivity(
                 Intent(this, SettingsActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
             )
+            @Suppress("DEPRECATION")
+            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
         }
         findViewById<Button>(R.id.grabButton).setOnClickListener {
             var url = linkInput.text.toString().trim()

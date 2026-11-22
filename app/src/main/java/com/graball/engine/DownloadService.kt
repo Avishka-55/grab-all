@@ -97,6 +97,10 @@ class DownloadService : Service() {
     private val pausedUrls =
         Collections.synchronizedSet(mutableSetOf<String>())
 
+    /** URLs explicitly cancelled by the user (staging dir gets wiped cleanly). */
+    private val cancelledUrls =
+        Collections.synchronizedSet(mutableSetOf<String>())
+
     /** Pause reason per URL (\"Network changed\", or null for manual). */
     private val pauseReasons = mutableMapOf<String, String?>()
 
@@ -240,10 +244,21 @@ class DownloadService : Service() {
         val safeIntent = intent ?: return START_NOT_STICKY
         if (safeIntent.action == ACTION_CANCEL) {
             // Addressed by URL: cancelling one row must never kill
-            // another download that started later.
+            // another download that started later. Mark as cancelled so
+            // staging .part files are cleaned up instead of leaking disk.
             val url = safeIntent.getStringExtra(EXTRA_URL)
             if (url != null) {
-                sessions[url]?.runner?.cancel()
+                cancelledUrls.add(url)
+                pausedUrls.remove(url)
+                pauseReasons.remove(url)
+                clearSavedParams(this, url)
+                val running = sessions[url]?.runner
+                if (running != null) {
+                    running.cancel()
+                } else {
+                    // Already paused — wipe its kept staging dir now
+                    RuntimePaths.stagingDirFor(this, url).deleteRecursively()
+                }
             }
             return START_NOT_STICKY
         }
@@ -260,7 +275,7 @@ class DownloadService : Service() {
         if (safeIntent.action == ACTION_RESUME) {
             val url = safeIntent.getStringExtra(EXTRA_URL)
                 ?: return START_NOT_STICKY
-            val params = paramsByUrl[url]
+            val params = paramsByUrl[url] ?: loadSavedParams(this, url)
             if (params == null) {
                 Toast.makeText(
                     this,
@@ -297,13 +312,14 @@ class DownloadService : Service() {
         // A fresh start clears any stale pause mark, so a later real
         // failure is never misreported as a pause.
         pausedUrls.remove(url)
+        cancelledUrls.remove(url)
         pauseReasons.remove(url)
         logsByUrl.remove(url)
         val session = Session(url, outputTemplate, audioOnly)
         sessions[url] = session
-        paramsByUrl[url] = DownloadParams(
-            outputTemplate, audioOnly, maxHeight, playlistMode
-        )
+        val params = DownloadParams(outputTemplate, audioOnly, maxHeight, playlistMode)
+        paramsByUrl[url] = params
+        saveParams(this, url, params)
         // The network this download starts on: a switch away from it
         // auto-pauses (see registerNetworkCallback). activeNetwork is
         // API 23+ (Android 6.0+), so guard it to avoid NoSuchMethodError
@@ -502,6 +518,7 @@ class DownloadService : Service() {
                                     // later download of the same video can
                                     // never "skip" off a leftover.
                                     outDir?.deleteRecursively()
+                                    clearSavedParams(this@DownloadService, url)
                                     // A run that only skipped files is
                                     // still a success: everything is
                                     // already in Downloads from the
@@ -533,6 +550,21 @@ class DownloadService : Service() {
                                             )
                                         )
                                     }
+                                } else if (cancelledUrls.remove(url)) {
+                                    // Explicitly cancelled: delete the entire
+                                    // staging dir (including .part/.ytdl) so
+                                    // cancelled downloads never leak storage.
+                                    File(outputTemplate).parentFile?.deleteRecursively()
+                                    clearSavedParams(this@DownloadService, url)
+                                    this@DownloadService.updateNotification(
+                                        "Download cancelled", null
+                                    )
+                                    DownloadProgressBus.post(
+                                        DownloadProgressBus.State(
+                                            url, null, DownloadProgressBus.Status.FAILED,
+                                            "Cancelled"
+                                        )
+                                    )
                                 } else {
                                     // Failed or cancelled: finished
                                     // songs are already in Downloads
@@ -675,6 +707,48 @@ class DownloadService : Service() {
         )
 
         private val paramsByUrl = mutableMapOf<String, DownloadParams>()
+
+        private const val PARAMS_PREFS = "graball_download_params"
+
+        private fun saveParams(context: Context, url: String, p: DownloadParams) {
+            try {
+                val encoded = listOf(
+                    p.outputTemplate,
+                    p.audioOnly.toString(),
+                    (p.maxHeight ?: 0).toString(),
+                    p.playlistMode
+                ).joinToString("\n")
+                context.getSharedPreferences(PARAMS_PREFS, Context.MODE_PRIVATE)
+                    .edit().putString(url, encoded).apply()
+            } catch (_: Exception) {
+            }
+        }
+
+        private fun loadSavedParams(context: Context, url: String): DownloadParams? {
+            return try {
+                val raw = context.getSharedPreferences(PARAMS_PREFS, Context.MODE_PRIVATE)
+                    .getString(url, null) ?: return null
+                val parts = raw.split("\n")
+                if (parts.size < 4) return null
+                DownloadParams(
+                    outputTemplate = parts[0],
+                    audioOnly = parts[1] == "true",
+                    maxHeight = parts[2].toIntOrNull()?.takeIf { it > 0 },
+                    playlistMode = parts[3]
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        private fun clearSavedParams(context: Context, url: String) {
+            paramsByUrl.remove(url)
+            try {
+                context.getSharedPreferences(PARAMS_PREFS, Context.MODE_PRIVATE)
+                    .edit().remove(url).apply()
+            } catch (_: Exception) {
+            }
+        }
 
         /** Full non-progress log per URL, for the copy-log button. */
         private val logsByUrl = mutableMapOf<String, String>()

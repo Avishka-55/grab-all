@@ -8,5 +8,8 @@
          opens, windowBackground was the killer and the look stays
          (the gradient header carries the design anyway). -->
     <style name="Theme.GrabAll" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@color/graball_nav</item>
+        <item name="android:navigationBarColor">@color/graball_nav</item>
+        <item name="colorAccent">@color/graball_orange</item>
     </style>
 </resources>

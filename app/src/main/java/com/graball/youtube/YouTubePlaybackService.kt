@@ -1,13 +1,20 @@
 package com.graball.youtube
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
@@ -16,7 +23,12 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
@@ -24,6 +36,8 @@ import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.MediaStyleNotificationHelper
+import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 
@@ -85,6 +99,9 @@ class YouTubePlaybackService : MediaSessionService() {
     private var playbackSpeed = 1.0f
     private var lastError: String? = null
     private var lastSponsorSkip: String? = null
+    private var currentArtwork: Bitmap? = null
+    private var currentArtworkUrl: String? = null
+    private var isForegroundActive = false
     private var loadGeneration = 0
 
     private val sponsorTicker = object : Runnable {
@@ -114,6 +131,8 @@ class YouTubePlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        ThumbnailLoader.init(this)
+        createNotificationChannel()
         selectedHeight = YouTubeStore.getDefaultHeight(this).takeIf { it > 0 }
         playbackSpeed = YouTubeStore.getPlaybackSpeed(this)
 
@@ -234,6 +253,28 @@ class YouTubePlaybackService : MediaSessionService() {
         broadcastState()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_PLAY_PAUSE -> {
+                togglePlayPause()
+                return START_STICKY
+            }
+            ACTION_NEXT -> {
+                playNext()
+                return START_STICKY
+            }
+            ACTION_PREV -> {
+                playPrevious()
+                return START_STICKY
+            }
+            ACTION_STOP -> {
+                stopPlayback()
+                return START_NOT_STICKY
+            }
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
         mediaSession
 
@@ -247,6 +288,7 @@ class YouTubePlaybackService : MediaSessionService() {
     override fun onDestroy() {
         stopSponsorTicker()
         saveCurrentProgress()
+        stopForegroundCompat(removeNotification = true)
         mediaSession?.release()
         mediaSession = null
         player?.release()
@@ -402,9 +444,12 @@ class YouTubePlaybackService : MediaSessionService() {
         queue.clear()
         queueIndex = -1
         currentStreamInfo = null
+        currentArtwork = null
+        currentArtworkUrl = null
         sponsorSegments = emptyList()
         isLoading = false
         lastError = null
+        stopForegroundCompat(removeNotification = true)
         broadcastState()
         stopSelf()
     }
@@ -517,11 +562,20 @@ class YouTubePlaybackService : MediaSessionService() {
         playImmediately: Boolean
     ): Boolean {
         val p = player ?: return false
-        val dsFactory = DefaultHttpDataSource.Factory()
+        val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(info.userAgent)
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(12_000)
             .setReadTimeoutMs(15_000)
+
+        // Wrap upstream HTTP with a bounded 40 MB LRU disk cache so replays,
+        // loops, and backward seeks use zero extra network data.
+        val dsFactory: DataSource.Factory = getOrCreateMediaCache(applicationContext)?.let { cache ->
+            CacheDataSource.Factory()
+                .setCache(cache)
+                .setUpstreamDataSourceFactory(httpFactory)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        } ?: httpFactory
 
         val meta = MediaMetadata.Builder()
             .setTitle(info.title)
@@ -636,11 +690,208 @@ class YouTubePlaybackService : MediaSessionService() {
             error = lastError,
             lastSponsorSkip = lastSponsorSkip
         )
+        syncPlaybackNotification()
         notifyListeners()
+    }
+
+    // ---- Foreground Media Notification (always visible in BG / Audio-Only / Lock Screen) ----
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "YouTube Playback",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Controls for YouTube video & background audio playback"
+                setShowBadge(false)
+            }
+            (getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)
+                ?.createNotificationChannel(channel)
+        }
+    }
+
+    private fun syncPlaybackNotification() {
+        val item = currentState.currentItem
+        if (item == null) {
+            stopForegroundCompat(removeNotification = true)
+            return
+        }
+        // Load thumbnail bitmap asynchronously for the notification artwork
+        val thumbUrl = currentStreamInfo?.thumbnailUrl?.takeIf { it.isNotBlank() }
+            ?: item.thumbnailUrl
+        if (thumbUrl.isNotBlank() && thumbUrl != currentArtworkUrl) {
+            currentArtworkUrl = thumbUrl
+            currentArtwork = null
+            ioExecutor.execute {
+                val bmp = ThumbnailLoader.loadSync(thumbUrl, targetWidthPx = 256)
+                if (bmp != null) {
+                    mainHandler.post {
+                        if (currentArtworkUrl == thumbUrl) {
+                            currentArtwork = bmp
+                            syncPlaybackNotification()
+                        }
+                    }
+                }
+            }
+        }
+
+        val notif = buildPlaybackNotification(item)
+        val shouldForeground = currentState.isPlaying || currentState.isLoading
+        if (shouldForeground) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        YT_NOTIFICATION_ID,
+                        notif,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                    )
+                } else {
+                    startForeground(YT_NOTIFICATION_ID, notif)
+                }
+                isForegroundActive = true
+            } catch (e: Exception) {
+                Log.w(TAG, "startForeground failed: ${e.message}")
+            }
+        } else {
+            if (isForegroundActive) {
+                stopForegroundCompat(removeNotification = false)
+            }
+            try {
+                (getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)
+                    ?.notify(YT_NOTIFICATION_ID, notif)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun stopForegroundCompat(removeNotification: Boolean) {
+        if (!isForegroundActive && !removeNotification) return
+        isForegroundActive = false
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(
+                    if (removeNotification) STOP_FOREGROUND_REMOVE else STOP_FOREGROUND_DETACH
+                )
+            } else {
+                stopForeground(removeNotification)
+            }
+            if (removeNotification) {
+                (getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)
+                    ?.cancel(YT_NOTIFICATION_ID)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun buildPlaybackNotification(item: YtItem): Notification {
+        val openIntent = Intent(this, YouTubePlayerActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        val piFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val contentPi = PendingIntent.getActivity(this, 200, openIntent, piFlags)
+
+        fun svcAction(action: String, reqCode: Int): PendingIntent {
+            val i = Intent(this, YouTubePlaybackService::class.java).setAction(action)
+            return PendingIntent.getService(this, reqCode, i, piFlags)
+        }
+
+        val playing = currentState.isPlaying
+        val sub = buildString {
+            if (currentState.isAudioOnly) append("🎧 Background Audio")
+            else if (currentState.isLoading) append(currentState.loadingStatus ?: "Loading…")
+            else if (playing) append("Playing")
+            else append("Paused")
+            if (item.channel.isNotBlank()) {
+                append(" · ").append(item.channel)
+            }
+        }
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle(item.title)
+            .setContentText(sub)
+            .setContentIntent(contentPi)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(playing || currentState.isLoading)
+            .setOnlyAlertOnce(true)
+            .addAction(
+                android.R.drawable.ic_media_previous,
+                "Prev",
+                svcAction(ACTION_PREV, 201)
+            )
+            .addAction(
+                if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+                if (playing) "Pause" else "Play",
+                svcAction(ACTION_PLAY_PAUSE, 202)
+            )
+            .addAction(
+                android.R.drawable.ic_media_next,
+                "Next",
+                svcAction(ACTION_NEXT, 203)
+            )
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Stop",
+                svcAction(ACTION_STOP, 204)
+            )
+
+        currentArtwork?.let { builder.setLargeIcon(it) }
+        mediaSession?.let { session ->
+            builder.setStyle(
+                MediaStyleNotificationHelper.MediaStyle(session)
+                    .setShowActionsInCompactView(0, 1, 2)
+            )
+        }
+        return builder.build()
     }
 
     companion object {
         private const val TAG = "YouTubePlaybackService"
+        private const val CHANNEL_ID = "graball_yt_player"
+        private const val YT_NOTIFICATION_ID = 3
+        private const val MAX_MEDIA_CACHE_BYTES = 40L * 1024L * 1024L
+
+        const val ACTION_PLAY_PAUSE = "com.graball.youtube.ACTION_PLAY_PAUSE"
+        const val ACTION_NEXT = "com.graball.youtube.ACTION_NEXT"
+        const val ACTION_PREV = "com.graball.youtube.ACTION_PREV"
+        const val ACTION_STOP = "com.graball.youtube.ACTION_STOP"
+
+        @Volatile
+        private var mediaCache: SimpleCache? = null
+
+        @Synchronized
+        fun getOrCreateMediaCache(context: Context): SimpleCache? {
+            if (mediaCache != null) return mediaCache
+            return try {
+                val dir = File(context.applicationContext.cacheDir, "yt_media_cache")
+                if (!dir.exists()) dir.mkdirs()
+                val evictor = LeastRecentlyUsedCacheEvictor(MAX_MEDIA_CACHE_BYTES)
+                val db = StandaloneDatabaseProvider(context.applicationContext)
+                SimpleCache(dir, evictor, db).also { mediaCache = it }
+            } catch (e: Exception) {
+                Log.w(TAG, "Media cache init failed: ${e.message}")
+                null
+            }
+        }
+
+        @Synchronized
+        fun clearMediaCache(context: Context) {
+            try {
+                mediaCache?.release()
+            } catch (_: Exception) {
+            }
+            mediaCache = null
+            try {
+                File(context.applicationContext.cacheDir, "yt_media_cache").deleteRecursively()
+            } catch (_: Exception) {
+            }
+        }
 
         @Volatile
         var instance: YouTubePlaybackService? = null

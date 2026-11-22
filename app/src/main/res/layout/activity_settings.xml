@@ -188,6 +188,60 @@
                     android:textColor="@color/graball_text"
                     android:textStyle="bold" />
             </LinearLayout>
+
+            <!-- YouTube Player & Cache Controls -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:background="@drawable/card_bg"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="YouTube Player &amp; Cache"
+                    android:textColor="@color/graball_text"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <CheckBox
+                    android:id="@+id/settingsScreenOffAudio"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="Switch to audio-only when screen turns off (saves battery &amp; data)"
+                    android:textColor="@color/graball_text"
+                    android:textSize="13sp" />
+
+                <CheckBox
+                    android:id="@+id/settingsSponsorBlock"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="SponsorBlock: auto-skip in-video sponsors &amp; intros"
+                    android:textColor="@color/graball_text"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/settingsCacheSize"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Cache: 0 MB"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/settingsClearCache"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/btn_small"
+                    android:text="Clear Player &amp; Thumbnail Cache"
+                    android:textColor="@color/graball_text" />
+            </LinearLayout>
         </LinearLayout>
     </ScrollView>
 

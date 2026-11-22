@@ -476,11 +476,21 @@ class YouTubePlayerActivity : AppCompatActivity() {
         }
     }
 
-    // ---- Gesture Controls (Brightness / Volume / Double-Tap Seek) ----
+    // ---- Gesture Controls ----
+    // Portrait mode (like YouTube):
+    //   - Drag DOWN -> Picture-in-Picture (or mini-player on Android 5-7)
+    //   - Drag UP   -> Fullscreen landscape
+    // Fullscreen mode ONLY:
+    //   - Left vertical drag  -> Screen brightness
+    //   - Right vertical drag -> Media volume
+    // Both modes:
+    //   - Double-tap left/right -> Seek -10s / +10s
+    //   - Single tap            -> Show/hide controls
 
     private fun setupGestures() {
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        val portraitSwipeThresholdPx = 72f * resources.displayMetrics.density
 
         val detector = GestureDetector(
             this,
@@ -508,6 +518,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         var downX = 0f
         var downY = 0f
+        var lastDy = 0f
         var draggingVertical = false
         var isLeftSide = true
         var startBrightness = 0.5f
@@ -521,6 +532,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x
                     downY = event.y
+                    lastDy = 0f
                     draggingVertical = false
                     isLeftSide = event.x < playerContainer.width / 2f
                     val curB = window.attributes.screenBrightness
@@ -531,25 +543,39 @@ class YouTubePlayerActivity : AppCompatActivity() {
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.x - downX
-                    val dy = downY - event.y // upward swipe = positive
-                    if (!draggingVertical && abs(dy) > touchSlop * 2 && abs(dy) > abs(dx) * 1.5f) {
+                    val dy = downY - event.y // upward swipe = positive, downward = negative
+                    if (!draggingVertical && abs(dy) > touchSlop * 2 && abs(dy) > abs(dx) * 1.4f) {
                         draggingVertical = true
                     }
                     if (draggingVertical) {
-                        val range = (playerContainer.height * 0.75f).coerceAtLeast(120f)
-                        val fraction = dy / range
-                        if (isLeftSide) {
-                            val nextB = (startBrightness + fraction).coerceIn(0.05f, 1.0f)
-                            val attrs = window.attributes
-                            attrs.screenBrightness = nextB
-                            window.attributes = attrs
-                            showHud("☀ ${(nextB * 100).toInt()}%")
+                        lastDy = dy
+                        if (isFullscreen) {
+                            // Fullscreen ONLY: left = brightness, right = volume
+                            val range = (playerContainer.height * 0.75f).coerceAtLeast(120f)
+                            val fraction = dy / range
+                            if (isLeftSide) {
+                                val nextB = (startBrightness + fraction).coerceIn(0.05f, 1.0f)
+                                val attrs = window.attributes
+                                attrs.screenBrightness = nextB
+                                window.attributes = attrs
+                                showHud("☀ ${(nextB * 100).toInt()}%")
+                            } else {
+                                val nextVol = (startVolume + (fraction * maxVolume).toInt())
+                                    .coerceIn(0, maxVolume)
+                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, nextVol, 0)
+                                val pct = (nextVol * 100) / maxVolume
+                                showHud("🔊 $pct%")
+                            }
                         } else {
-                            val nextVol = (startVolume + (fraction * maxVolume).toInt())
-                                .coerceIn(0, maxVolume)
-                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, nextVol, 0)
-                            val pct = (nextVol * 100) / maxVolume
-                            showHud("🔊 $pct%")
+                            // Portrait mode: drag down for PiP, drag up for Fullscreen
+                            if (dy < -portraitSwipeThresholdPx * 0.5f) {
+                                showHud(
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) "↓ Release for PiP"
+                                    else "↓ Release to minimize"
+                                )
+                            } else if (dy > portraitSwipeThresholdPx * 0.5f) {
+                                showHud("↑ Release for Fullscreen")
+                            }
                         }
                         true
                     } else {
@@ -558,7 +584,15 @@ class YouTubePlayerActivity : AppCompatActivity() {
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     val consumed = draggingVertical
+                    if (draggingVertical && !isFullscreen && event.actionMasked == MotionEvent.ACTION_UP) {
+                        if (lastDy < -portraitSwipeThresholdPx) {
+                            enterPipOrMinimize()
+                        } else if (lastDy > portraitSwipeThresholdPx) {
+                            toggleFullscreen()
+                        }
+                    }
                     draggingVertical = false
+                    lastDy = 0f
                     consumed
                 }
                 else -> false
