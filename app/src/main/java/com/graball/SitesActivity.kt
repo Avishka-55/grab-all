@@ -6,6 +6,7 @@ import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.graball.youtube.YouTubeActivity
 
 /**
  * Supported sites (v0.7.4). The ten famous ones, tappable — a tap
@@ -42,11 +43,14 @@ class SitesActivity : AppCompatActivity() {
             this, android.R.layout.simple_list_item_1, sites.map { it.first }
         )
         listView.setOnItemClickListener { _, _, position, _ ->
-            startActivity(
-                Intent(this, BrowseActivity::class.java).putExtra(
-                    "start_url", sites[position].second
+            val (name, url) = sites[position]
+            if (name == "YouTube") {
+                startActivity(Intent(this, YouTubeActivity::class.java))
+            } else {
+                startActivity(
+                    Intent(this, BrowseActivity::class.java).putExtra("start_url", url)
                 )
-            )
+            }
         }
         val more = TOTAL_EXTRACTORS - sites.size
         findViewById<TextView>(R.id.sitesMore).text = getString(

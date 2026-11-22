@@ -267,6 +267,46 @@ class YtDlpRunner(
     }
 
     /**
+     * Synchronous metadata + direct stream extraction (--dump-single-json).
+     * Used as a bulletproof fallback by the native YouTube player whenever
+     * InnerTube direct extraction is restricted (e.g. Made-for-Kids, age-gated
+     * with cookies, or future YouTube client changes). Call off the main thread.
+     */
+    fun extractInfoJson(url: String): String? {
+        if (!RuntimeExtractor.ensureExecutable(pythonBinary)) return null
+        if (quickJsBinary != null && quickJsBinary.exists()) {
+            RuntimeExtractor.ensureExecutable(quickJsBinary)
+        }
+        return try {
+            val cmd = mutableListOf(
+                pythonBinary.absolutePath,
+                ytDlpScript.absolutePath,
+                "--dump-single-json",
+                "--no-playlist",
+                "--no-warnings",
+                "--skip-download",
+                "--socket-timeout", "20"
+            )
+            if (quickJsBinary != null && quickJsBinary.exists()) {
+                cmd += listOf("--js-runtimes", "quickjs:" + quickJsBinary.absolutePath)
+            }
+            if (cookiesFile != null && cookiesFile.exists()) {
+                cmd += listOf("--cookies", cookiesFile.absolutePath)
+            }
+            cmd += url
+            val proc = pythonProcessBuilder(cmd)
+                .redirectErrorStream(false)
+                .start()
+            val stdout = BufferedReader(InputStreamReader(proc.inputStream)).use { it.readText() }
+            proc.waitFor()
+            stdout.trim().takeIf { it.startsWith("{") }
+        } catch (e: Exception) {
+            Log.e(TAG, "extractInfoJson failed", e)
+            null
+        }
+    }
+
+    /**
      * Synchronous runtime health check. Returns the yt-dlp version string,
      * or null if the runtime does not run. Call off the main thread.
      */

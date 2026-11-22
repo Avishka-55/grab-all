@@ -26,6 +26,7 @@ import com.graball.engine.DownloadProgressBus
 import com.graball.engine.LinkDetector
 import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
+import com.graball.youtube.YouTubeActivity
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -91,14 +92,12 @@ class MainActivity : AppCompatActivity() {
         selectTab(mainTabs[0])
         mainTabs[1].setOnClickListener {
             selectTab(mainTabs[1])
-            startActivity(Intent(this, BrowseActivity::class.java))
+            startActivity(Intent(this, YouTubeActivity::class.java))
         }
         mainTabs[2].setOnClickListener {
             selectTab(mainTabs[2])
             startActivity(
-                Intent(this, BrowseActivity::class.java).putExtra(
-                    "start_url", "https://m.youtube.com/music"
-                )
+                Intent(this, YouTubeActivity::class.java).putExtra("start_mode", "music")
             )
         }
         mainTabs[3].setOnClickListener {
@@ -106,7 +105,7 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, SitesActivity::class.java))
         }
         findViewById<LinearLayout>(R.id.siteYoutube).setOnClickListener {
-            startActivity(Intent(this, BrowseActivity::class.java))
+            startActivity(Intent(this, YouTubeActivity::class.java))
         }
         findViewById<LinearLayout>(R.id.siteTiktok).setOnClickListener {
             startActivity(
