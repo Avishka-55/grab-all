@@ -103,6 +103,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var btnFolderBack: TextView
     private lateinit var folderHeaderName: TextView
     private lateinit var recycler: RecyclerView
+    private lateinit var fastScroller: FastScrollerView
     private lateinit var emptyBox: LinearLayout
     private lateinit var emptyView: TextView
     private lateinit var btnSearchOnYoutube: TextView
@@ -245,6 +246,7 @@ class PlayerActivity : AppCompatActivity() {
         btnFolderBack = findViewById(R.id.btnFolderBack)
         folderHeaderName = findViewById(R.id.folderHeaderName)
         recycler = findViewById(R.id.playerRecycler)
+        fastScroller = findViewById(R.id.playerFastScroller)
         emptyBox = findViewById(R.id.playerEmptyBox)
         emptyView = findViewById(R.id.playerEmpty)
         btnSearchOnYoutube = findViewById(R.id.btnSearchOnYoutube)
@@ -539,6 +541,9 @@ class PlayerActivity : AppCompatActivity() {
         adapter = MusicRowAdapter()
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
+        fastScroller.attachTo(recycler) { pos, total ->
+            adapter.fastScrollLabel(pos, total)
+        }
 
         playlists = loadPlaylists()
 
@@ -2077,6 +2082,7 @@ class PlayerActivity : AppCompatActivity() {
                 showEmptyIfNeeded(rows.isEmpty(), getString(R.string.player_empty))
             }
         }
+        fastScroller.refresh()
     }
 
     private fun showEmptyIfNeeded(isEmpty: Boolean, message: String) {
@@ -2170,6 +2176,21 @@ class PlayerActivity : AppCompatActivity() {
         fun setActiveFile(current: File?) {
             activeFile = current
             notifyDataSetChanged()
+        }
+
+        fun fastScrollLabel(position: Int, total: Int): String {
+            val row = rows.getOrNull(position) ?: return "${position + 1}/$total"
+            val name = when (row) {
+                is MusicRow.FolderRow -> row.folder.name
+                is MusicRow.PlaylistRow -> row.playlist.name
+                is MusicRow.TrackRow -> row.track.file.nameWithoutExtension
+                    .replace(Regex("""^\s*\d{1,3}\s*[-._)]\s*"""), "")
+                    .trim()
+                    .ifBlank { row.track.file.nameWithoutExtension }
+            }
+            val first = name.firstOrNull()?.uppercaseChar()
+            val initial = if (first != null && first.isLetter()) first.toString() else "#"
+            return "$initial · ${position + 1}/$total"
         }
 
         override fun getItemCount(): Int = rows.size
