@@ -36,11 +36,16 @@ object DownloadProgressBus {
          * Downloads/GrabAll ("video.mp4", "My Playlist/01 - Song.mp3").
          * Set on COMPLETE; the Downloads screen's Open button uses it.
          */
-        val output: String? = null
+        val output: String? = null,
+        /** Friendly display title (video / playlist name instead of raw URL). */
+        val title: String? = null
     )
 
     /** Mode label per URL, set at download start (see above). */
     val modes = mutableMapOf<String, String>()
+
+    /** Display title per URL (video or playlist title), updated as soon as known. */
+    val titles = mutableMapOf<String, String>()
 
     /**
      * Latest state per URL. The bus keeps no history of events, but a
@@ -52,6 +57,12 @@ object DownloadProgressBus {
     private val lastStates = mutableMapOf<String, State>()
 
     fun snapshot(): List<State> = lastStates.values.toList()
+
+    fun remove(id: String) {
+        lastStates.remove(id)
+        modes.remove(id)
+        titles.remove(id)
+    }
 
     private val listeners = CopyOnWriteArrayList<(State) -> Unit>()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -65,9 +76,14 @@ object DownloadProgressBus {
     }
 
     fun post(state: State) {
-        lastStates[state.id] = state
+        val resolvedTitle = state.title?.takeIf { it.isNotBlank() } ?: titles[state.id]
+        if (!resolvedTitle.isNullOrBlank()) {
+            titles[state.id] = resolvedTitle
+        }
+        val enriched = if (state.title == resolvedTitle) state else state.copy(title = resolvedTitle)
+        lastStates[enriched.id] = enriched
         mainHandler.post {
-            listeners.forEach { it(state) }
+            listeners.forEach { it(enriched) }
         }
     }
 }

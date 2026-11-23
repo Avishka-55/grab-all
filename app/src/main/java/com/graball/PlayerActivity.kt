@@ -21,6 +21,8 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.MediaStore
+import android.provider.OpenableColumns
+import android.net.Uri
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
@@ -546,7 +548,9 @@ class PlayerActivity : AppCompatActivity() {
             permissionLauncher.launch(audioReadPermission())
         }
 
-        if (intent?.getBooleanExtra("open_now_playing", false) == true) {
+        if (intent?.action == Intent.ACTION_VIEW && intent.data != null) {
+            handleIncomingAudioIntent(intent)
+        } else if (intent?.getBooleanExtra("open_now_playing", false) == true) {
             openNowPlayingSheet(animate = false)
         }
     }
@@ -554,9 +558,100 @@ class PlayerActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getBooleanExtra("open_now_playing", false)) {
+        if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
+            handleIncomingAudioIntent(intent)
+        } else if (intent.getBooleanExtra("open_now_playing", false)) {
             openNowPlayingSheet(animate = true)
         }
+    }
+
+    /**
+     * Handle system "Open with GrabAll Music" (ACTION_VIEW audio/&#42;) intents from
+     * File Manager, Downloads, WhatsApp, Chrome, etc. Resolves local files to a
+     * full folder queue when possible, or plays sandboxed content:// URIs directly.
+     */
+    private fun handleIncomingAudioIntent(incoming: Intent) {
+        val uri = incoming.data ?: return
+        val localFile = resolveAudioUriToFile(uri)
+        if (localFile != null && localFile.isFile && localFile.canRead()) {
+            val parent = localFile.parentFile
+            val siblings = parent?.listFiles()
+                ?.filter { it.isFile && isSupportedAudioFile(it.name) }
+                ?.sortedBy { it.name.lowercase() }
+                ?.takeIf { it.isNotEmpty() }
+                ?: listOf(localFile)
+            val startIdx = siblings.indexOfFirst { it.absolutePath == localFile.absolutePath }
+                .coerceAtLeast(0)
+            val folderName = parent?.name ?: "Audio"
+            YouTubePlaybackService.stopAndClear(this)
+            startService(
+                Intent(this, PlayerService::class.java).apply {
+                    action = PlayerService.ACTION_PLAY
+                    putStringArrayListExtra(
+                        PlayerService.EXTRA_PATHS,
+                        ArrayList(siblings.map { it.absolutePath })
+                    )
+                    putExtra(PlayerService.EXTRA_INDEX, startIdx)
+                    putExtra(PlayerService.EXTRA_FOLDER_LABEL, folderName)
+                }
+            )
+        } else {
+            val displayName = queryUriDisplayName(uri)
+                ?.substringBeforeLast('.')
+                ?.takeIf { it.isNotBlank() }
+                ?: uri.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.')
+                ?: "Audio"
+            YouTubePlaybackService.stopAndClear(this)
+            startService(
+                Intent(this, PlayerService::class.java).apply {
+                    action = PlayerService.ACTION_PLAY_URI
+                    putExtra(PlayerService.EXTRA_URI, uri.toString())
+                    putExtra(PlayerService.EXTRA_TITLE, displayName)
+                }
+            )
+        }
+        openNowPlayingSheet(animate = false, force = true)
+    }
+
+    private fun resolveAudioUriToFile(uri: Uri): File? {
+        if (uri.scheme == "file") {
+            return uri.path?.let { File(it) }
+        }
+        if (uri.scheme == "content") {
+            try {
+                @Suppress("DEPRECATION")
+                contentResolver.query(
+                    uri, arrayOf(MediaStore.Audio.Media.DATA), null, null, null
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val path = cursor.getString(0)
+                        if (!path.isNullOrBlank()) {
+                            val f = File(path)
+                            if (f.isFile && f.canRead()) return f
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    private fun queryUriDisplayName(uri: Uri): String? {
+        return try {
+            contentResolver.query(
+                uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun isSupportedAudioFile(name: String): Boolean {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return ext in setOf("mp3", "m4a", "aac", "ogg", "opus", "flac", "wav", "amr", "3gp")
     }
 
     override fun onResume() {
@@ -605,7 +700,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun resolveActiveSource(): ActiveSource {
         val svc = if (bound) service else null
-        val localFile = svc?.currentFile()
+        val hasLocal = svc?.hasLoadedTrack() == true
         val localActive = svc?.isActiveOrPreparing() == true
         val ytState = YouTubePlaybackService.currentState
         val ytItem = ytState.currentItem
@@ -614,9 +709,9 @@ class PlayerActivity : AppCompatActivity() {
 
         return when {
             ytActive -> ActiveSource.YOUTUBE
-            localFile != null && localActive -> ActiveSource.LOCAL
-            ytItem != null && ytState.isAudioOnly && localFile == null -> ActiveSource.YOUTUBE
-            localFile != null -> ActiveSource.LOCAL
+            hasLocal && localActive -> ActiveSource.LOCAL
+            ytItem != null && ytState.isAudioOnly && !hasLocal -> ActiveSource.YOUTUBE
+            hasLocal -> ActiveSource.LOCAL
             ytItem != null -> ActiveSource.YOUTUBE
             else -> ActiveSource.NONE
         }
@@ -633,19 +728,28 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun bindLocalPlayerUi() {
         val svc = service ?: return
-        val current = svc.currentFile() ?: return
+        val current = svc.currentFile()
+        val extUri = svc.currentExternalUri()
+        if (current == null && extUri == null) return
 
-        if (current.absolutePath != lastMetaPath) {
-            lastMetaPath = current.absolutePath
-            cachedLocalMeta = svc.currentTrackMeta() ?: AlbumArtLoader.getCachedMeta(current)
-            AlbumArtLoader.loadMetaAsync(current) { meta ->
-                if (lastMetaPath == current.absolutePath) {
-                    cachedLocalMeta = meta
+        if (current != null) {
+            if (current.absolutePath != lastMetaPath) {
+                lastMetaPath = current.absolutePath
+                cachedLocalMeta = svc.currentTrackMeta() ?: AlbumArtLoader.getCachedMeta(current)
+                AlbumArtLoader.loadMetaAsync(current) { meta ->
+                    if (lastMetaPath == current.absolutePath) {
+                        cachedLocalMeta = meta
+                    }
                 }
             }
+        } else {
+            cachedLocalMeta = svc.currentTrackMeta()
         }
         val meta = svc.currentTrackMeta() ?: cachedLocalMeta
-        val title = meta?.title?.takeIf { it.isNotBlank() } ?: current.nameWithoutExtension
+        val title = meta?.title?.takeIf { it.isNotBlank() }
+            ?: current?.nameWithoutExtension
+            ?: svc.currentExternalTitle().takeIf { it.isNotBlank() }
+            ?: "Audio"
         val folderLbl = svc.currentFolderLabel()
         val sub = buildString {
             if (!meta?.artist.isNullOrBlank()) {
@@ -678,9 +782,9 @@ class PlayerActivity : AppCompatActivity() {
         npArtist.text = sub
         npPlayPause.setImageResource(playPauseRes)
         npWave.setPlaying(playing && isNowPlayingOpen)
-        npShuffle.visibility = View.VISIBLE
-        npRepeat.visibility = View.VISIBLE
-        npBtnAddPlaylist.visibility = View.VISIBLE
+        npShuffle.visibility = if (current != null) View.VISIBLE else View.INVISIBLE
+        npRepeat.visibility = if (current != null) View.VISIBLE else View.INVISIBLE
+        npBtnAddPlaylist.visibility = if (current != null) View.VISIBLE else View.GONE
         npBtnDownload.visibility = View.GONE
         updateShuffleRepeatUi(svc)
 
@@ -689,8 +793,9 @@ class PlayerActivity : AppCompatActivity() {
         val pos = svc.position()
         updateProgressBars(pos, dur)
         if (isLyricsOpen) {
+            val cacheKey = current?.let { "local:${it.absolutePath}" } ?: "uri:${extUri}"
             syncLyricsUi(
-                cacheKey = "local:${current.absolutePath}",
+                cacheKey = cacheKey,
                 title = title,
                 artist = meta?.artist?.takeIf { it.isNotBlank() } ?: folderLbl,
                 subLabel = sub,
@@ -703,13 +808,33 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         // Album Art + Dynamic Dominant Color (only triggers when active track changes)
-        val artKey = "local:${current.absolutePath}"
-        if (artKey != lastArtKey) {
-            lastArtKey = artKey
-            AlbumArtLoader.loadInto(current, miniArt, miniArtFallback, targetPx = 160)
-            AlbumArtLoader.loadInto(current, npArt, npArtFallback, targetPx = 640) { bmp ->
-                if (lastArtKey == artKey) {
+        if (current != null) {
+            val artKey = "local:${current.absolutePath}"
+            if (artKey != lastArtKey) {
+                lastArtKey = artKey
+                AlbumArtLoader.loadInto(current, miniArt, miniArtFallback, targetPx = 160)
+                AlbumArtLoader.loadInto(current, npArt, npArtFallback, targetPx = 640) { bmp ->
+                    if (lastArtKey == artKey) {
+                        applyBitmapTheme(bmp)
+                    }
+                }
+            }
+        } else {
+            val bmp = svc.currentArtBitmap()
+            val artKey = "uri:$extUri:${bmp != null}"
+            if (artKey != lastArtKey) {
+                lastArtKey = artKey
+                if (bmp != null) {
+                    miniArt.setImageBitmap(bmp)
+                    miniArt.visibility = View.VISIBLE
+                    miniArtFallback.visibility = View.GONE
+                    npArt.setImageBitmap(bmp)
+                    npArt.visibility = View.VISIBLE
+                    npArtFallback.visibility = View.GONE
                     applyBitmapTheme(bmp)
+                } else {
+                    clearArtwork()
+                    applyAlbumTheme(AlbumColorExtractor.DEFAULT, animate = true)
                 }
             }
         }
@@ -1180,9 +1305,12 @@ class PlayerActivity : AppCompatActivity() {
      */
     private fun buildLocalSongYouTubeQuery(): String? {
         val svc = service ?: return null
-        val file = svc.currentFile() ?: return null
+        val file = svc.currentFile()
+        val extTitle = svc.currentExternalTitle()
+        if (file == null && extTitle.isBlank()) return null
         val meta = svc.currentTrackMeta() ?: cachedLocalMeta
-        val rawTitle = meta?.title?.takeIf { it.isNotBlank() } ?: file.nameWithoutExtension
+        val fallbackName = file?.nameWithoutExtension ?: extTitle
+        val rawTitle = meta?.title?.takeIf { it.isNotBlank() } ?: fallbackName
         val cleanTitle = rawTitle
             .replace(Regex("""^\s*\d{1,3}\s*[-._)]\s*"""), "")
             .replace(Regex("""[\(\[][^)\]]*(?:official|audio|video|lyrics?|hd|4k|hq|320|128|kbps|mp3|m4a|remaster|visualizer|download|www\.|http)[^)\]]*[\)\]]""", RegexOption.IGNORE_CASE), " ")
@@ -1190,7 +1318,7 @@ class PlayerActivity : AppCompatActivity() {
             .replace('_', ' ')
             .replace(Regex("""\s+"""), " ")
             .trim()
-            .ifBlank { file.nameWithoutExtension }
+            .ifBlank { fallbackName }
 
         val rawArtist = meta?.artist?.trim().orEmpty()
         val cleanArtist = if (rawArtist.isNotBlank() &&
@@ -1252,9 +1380,9 @@ class PlayerActivity : AppCompatActivity() {
 
     // ---- Full-Screen Now Playing Sheet Open / Close / Swipe ----
 
-    private fun openNowPlayingSheet(animate: Boolean = true) {
+    private fun openNowPlayingSheet(animate: Boolean = true, force: Boolean = false) {
         val hasLast = lastPlayedCache != null || PlayerService.getLastPlayed(this) != null
-        if (resolveActiveSource() == ActiveSource.NONE && !hasLast) {
+        if (!force && resolveActiveSource() == ActiveSource.NONE && !hasLast) {
             Toast.makeText(this, "Tap a song first to open Now Playing", Toast.LENGTH_SHORT).show()
             return
         }

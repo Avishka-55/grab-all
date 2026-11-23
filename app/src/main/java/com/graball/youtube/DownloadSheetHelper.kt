@@ -163,6 +163,9 @@ object DownloadSheetHelper {
                     )
                 )
 
+                if (item.title.isNotBlank()) {
+                    DownloadProgressBus.titles[url] = item.title
+                }
                 DownloadService.startDownload(
                     context, url, template, audioOnly, maxHeight, playlistMode
                 )

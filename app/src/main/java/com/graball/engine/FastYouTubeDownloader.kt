@@ -50,6 +50,7 @@ class FastYouTubeDownloader(
     private val concurrency: Int
 ) {
     interface Callback {
+        fun onTitleResolved(title: String) {}
         fun onProgress(percent: Float?, speed: String?, eta: String?, item: String?, detail: String?)
         fun onFileReady(file: File)
         fun onLogLine(line: String)
@@ -129,6 +130,9 @@ class FastYouTubeDownloader(
         }
 
         val parallelConns = concurrency.coerceIn(4, 6)
+        if (info.title.isNotBlank()) {
+            callback.onTitleResolved(info.title)
+        }
         val safeTitle = sanitizeFileName(info.title).ifBlank { videoId }
         val resultFile = if (audioOnly) {
             downloadAudioTrack(
@@ -217,6 +221,9 @@ class FastYouTubeDownloader(
 
         val items = details.items.take(maxItems)
         val total = items.size
+        if (details.title.isNotBlank()) {
+            callback.onTitleResolved(details.title)
+        }
         val playlistTitle = sanitizeFileName(details.title).ifBlank { "Playlist" }
         val playlistDir = File(stagingDir, playlistTitle).apply { mkdirs() }
         val completedFile = File(stagingDir, "completed_ids.txt")

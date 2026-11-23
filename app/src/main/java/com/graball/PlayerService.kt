@@ -9,10 +9,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
+import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -46,6 +49,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     companion object {
         const val ACTION_PLAY = "com.graball.player.PLAY"
+        const val ACTION_PLAY_URI = "com.graball.player.PLAY_URI"
         const val ACTION_PAUSE = "com.graball.player.PAUSE"
         const val ACTION_RESUME = "com.graball.player.RESUME"
         const val ACTION_NEXT = "com.graball.player.NEXT"
@@ -55,6 +59,8 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         const val EXTRA_INDEX = "index"
         const val EXTRA_FOLDER_LABEL = "folder_label"
         const val EXTRA_SEEK_MS = "seek_ms"
+        const val EXTRA_URI = "uri"
+        const val EXTRA_TITLE = "title"
         const val NOTIFICATION_ID = 2
         const val CHANNEL_ID = "graball_player"
         private const val LAST_PREFS = "graball_player_last"
@@ -119,6 +125,8 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     private var currentArtPath: String? = null
     private var currentArt: Bitmap? = null
     private var currentMeta: AlbumArtLoader.TrackMeta? = null
+    private var externalUri: Uri? = null
+    private var externalTitle: String = ""
 
     inner class PlayerBinder : Binder() {
         fun getService(): PlayerService = this@PlayerService
@@ -150,9 +158,24 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 folderLabel = intent.getStringExtra(EXTRA_FOLDER_LABEL).orEmpty()
                 val seekMs = intent.getIntExtra(EXTRA_SEEK_MS, 0).coerceAtLeast(0)
                 if (paths.isNotEmpty()) {
+                    externalUri = null
+                    externalTitle = ""
                     playlist = paths.map { File(it) }
                     index = idx.coerceIn(0, playlist.size - 1)
                     startPlayback(initialSeekMs = seekMs)
+                }
+            }
+            ACTION_PLAY_URI -> {
+                val uriStr = intent.getStringExtra(EXTRA_URI)
+                val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
+                if (!uriStr.isNullOrBlank()) {
+                    val uri = Uri.parse(uriStr)
+                    playlist = emptyList()
+                    index = -1
+                    folderLabel = "External Audio"
+                    externalUri = uri
+                    externalTitle = title
+                    startUriPlayback(uri)
                 }
             }
             ACTION_PAUSE -> pause()
@@ -175,10 +198,14 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     // ---- Activity-facing controls ----
 
     fun currentFile(): File? = playlist.getOrNull(index)
+    fun currentExternalUri(): Uri? = externalUri
+    fun currentExternalTitle(): String = externalTitle
+    fun hasLoadedTrack(): Boolean = currentFile() != null || externalUri != null
     fun currentPlaylist(): List<File> = playlist
     fun currentIndex(): Int = index
     fun currentFolderLabel(): String = folderLabel
     fun currentTrackMeta(): AlbumArtLoader.TrackMeta? = currentMeta
+    fun currentArtBitmap(): Bitmap? = currentArt
 
     fun isPlaying(): Boolean =
         if (!isPrepared) false else try { player?.isPlaying == true } catch (_: Exception) { false }
@@ -244,8 +271,11 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     fun resume() {
         YouTubePlaybackService.stopAndClear(applicationContext)
         if (player == null) {
+            val ext = externalUri
             if (currentFile() != null) {
                 startPlayback()
+            } else if (ext != null) {
+                startUriPlayback(ext)
             }
             return
         }
@@ -369,6 +399,101 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         }
     }
 
+    private fun startUriPlayback(uri: Uri) {
+        val gen = ++playbackGen
+        pendingSeekMs = 0
+        YouTubePlaybackService.stopAndClear(applicationContext)
+        releasePlayer(abandonAudioFocus = false)
+        ensureAudioFocus()
+        loadUriArtAndMetaAsync(uri)
+        try {
+            val mp = MediaPlayer().apply {
+                setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
+                setDataSource(applicationContext, uri)
+                setOnCompletionListener(this@PlayerService)
+                setOnErrorListener { failedMp, what, _ ->
+                    if (gen != playbackGen || failedMp !== player || what == -38) {
+                        true
+                    } else {
+                        isPrepared = false
+                        releasePlayer(abandonAudioFocus = false)
+                        true
+                    }
+                }
+                setOnPreparedListener { readyMp ->
+                    if (gen != playbackGen || readyMp !== player) {
+                        try { readyMp.release() } catch (_: Exception) { }
+                        return@setOnPreparedListener
+                    }
+                    isPrepared = true
+                    try {
+                        readyMp.start()
+                        startForegroundCompat(buildNotification())
+                    } catch (_: Exception) {
+                    }
+                    updateNotification()
+                }
+                prepareAsync()
+            }
+            player = mp
+            startForegroundCompat(buildNotification())
+        } catch (_: Exception) {
+            releasePlayer(abandonAudioFocus = false)
+        }
+    }
+
+    private fun loadUriArtAndMetaAsync(uri: Uri) {
+        val key = uri.toString()
+        if (key == currentArtPath) return
+        currentArtPath = key
+        currentArt = null
+        currentMeta = null
+        artExecutor.execute {
+            var meta: AlbumArtLoader.TrackMeta? = null
+            var art: Bitmap? = null
+            val mmr = MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(applicationContext, uri)
+                val t = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.trim().orEmpty()
+                val a = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.trim().orEmpty()
+                val alb = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.trim().orEmpty()
+                if (t.isNotBlank() || a.isNotBlank() || alb.isNotBlank()) {
+                    meta = AlbumArtLoader.TrackMeta(t, a, alb)
+                }
+                val pic = mmr.embeddedPicture
+                if (pic != null && pic.isNotEmpty()) {
+                    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(pic, 0, pic.size, opts)
+                    var sample = 1
+                    while (opts.outWidth / sample > 512 || opts.outHeight / sample > 512) {
+                        sample *= 2
+                    }
+                    val dec = BitmapFactory.Options().apply {
+                        inSampleSize = sample
+                        inPreferredConfig = Bitmap.Config.RGB_565
+                    }
+                    art = BitmapFactory.decodeByteArray(pic, 0, pic.size, dec)
+                }
+            } catch (_: Throwable) {
+            } finally {
+                try { mmr.release() } catch (_: Throwable) { }
+            }
+            mainHandler.post {
+                if (currentArtPath == key) {
+                    currentMeta = meta
+                    currentArt = art
+                    updateNotification()
+                }
+            }
+        }
+    }
+
     private fun loadTrackArtAndMetaAsync(file: File) {
         val path = file.absolutePath
         if (path == currentArtPath) return
@@ -406,6 +531,8 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         releasePlayer(abandonAudioFocus = true)
         index = -1
         playlist = emptyList()
+        externalUri = null
+        externalTitle = ""
         currentArtPath = null
         currentArt = null
         currentMeta = null
@@ -445,6 +572,16 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     override fun onCompletion(mp: MediaPlayer) {
         if (mp !== player) return
+        val ext = externalUri
+        if (ext != null && playlist.isEmpty()) {
+            if (repeatMode == RepeatMode.ONE) {
+                startUriPlayback(ext)
+            } else {
+                seekTo(0)
+                pause()
+            }
+            return
+        }
         when (repeatMode) {
             RepeatMode.ONE -> startPlayback()
             RepeatMode.ALL -> playNext()
@@ -546,6 +683,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         val meta = currentMeta
         val displayTitle = meta?.title?.takeIf { it.isNotBlank() }
             ?: file?.nameWithoutExtension
+            ?: externalTitle.takeIf { it.isNotBlank() }
             ?: "GrabAll Music"
         val playing = isPlaying() || (!isPrepared && player != null)
         val sub = buildString {
@@ -592,7 +730,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     private fun updateNotification() {
-        if (currentFile() == null) return
+        if (!hasLoadedTrack()) return
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
             .notify(NOTIFICATION_ID, buildNotification())
     }

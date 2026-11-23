@@ -61,7 +61,26 @@
             android:exported="false" />
         <activity
             android:name=".PlayerActivity"
-            android:exported="false" />
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:label="GrabAll Music">
+            <!-- Allow setting GrabAll Music as a system default audio player -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="audio/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/ogg" />
+            </intent-filter>
+        </activity>
         <activity
             android:name=".SitesActivity"
             android:exported="false" />

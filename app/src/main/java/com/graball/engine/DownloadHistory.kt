@@ -23,8 +23,10 @@ object DownloadHistory {
         val mode: String,
         val url: String,
         val detail: String,
-        /** Published file relative to Downloads/GrabAll, "" if unknown. */
-        val file: String = ""
+        /** Published file relative to Downloads/GrabAll or content:// URI, "" if unknown. */
+        val file: String = "",
+        /** Friendly display title (video/playlist name), "" if older entry. */
+        val title: String = ""
     )
 
     private const val MAX_ENTRIES = 50
@@ -38,7 +40,8 @@ object DownloadHistory {
         mode: String,
         status: String,
         detail: String?,
-        file: String? = null
+        file: String? = null,
+        title: String? = null
     ) {
         val clean = { value: String ->
             value.replace('\n', ' ').replace('\t', ' ').take(200)
@@ -49,12 +52,16 @@ object DownloadHistory {
             clean(mode),
             url,
             clean(detail ?: ""),
-            clean(file ?: "")
+            clean(file ?: ""),
+            clean(title ?: "")
         ).joinToString("\t")
         try {
-            val file = historyFile(context)
-            val lines = if (file.exists()) {
-                file.readLines().toMutableList()
+            val histFile = historyFile(context)
+            val lines = if (histFile.exists()) {
+                histFile.readLines().filter { existing ->
+                    val parts = existing.split("\t")
+                    parts.size < 4 || parts[3] != url
+                }.toMutableList()
             } else {
                 mutableListOf()
             }
@@ -62,13 +69,13 @@ object DownloadHistory {
             while (lines.size > MAX_ENTRIES) {
                 lines.removeAt(0)
             }
-            file.writeText(lines.joinToString("\n") + "\n")
+            histFile.writeText(lines.joinToString("\n") + "\n")
         } catch (_: Exception) {
             // History is a nicety; never break a download over it.
         }
     }
 
-    /** Drop every entry for [url] (the Clear button on a row). */
+    /** Drop every entry for [url] (the Clear / Delete button on a row). */
     fun remove(context: Context, url: String) {
         try {
             val file = historyFile(context)
@@ -103,7 +110,8 @@ object DownloadHistory {
                         mode = parts[2],
                         url = parts[3],
                         detail = if (parts.size > 4) parts[4] else "",
-                        file = if (parts.size > 5) parts[5] else ""
+                        file = if (parts.size > 5) parts[5] else "",
+                        title = if (parts.size > 6) parts[6] else ""
                     )
                 }
             }

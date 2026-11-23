@@ -9,8 +9,12 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import android.widget.Toast
 import java.io.File
@@ -160,8 +164,85 @@ class DownloadService : Service() {
     /** Stop the service only when the last session has ended. */
     private fun stopIfIdle() {
         if (sessions.isEmpty()) {
+            releasePowerLocks()
             stopSelf()
         }
+    }
+
+    // ---- WakeLock & WifiLock (keeps downloads running smoothly when screen turns off) ----
+    private val powerLockGuard = Any()
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    private fun acquirePowerLocks() {
+        synchronized(powerLockGuard) {
+            try {
+                if (wakeLock == null) {
+                    val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                    wakeLock = pm?.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        "GrabAll::DownloadWakeLock"
+                    )?.apply { setReferenceCounted(false) }
+                }
+                if (wakeLock?.isHeld == false) {
+                    // Safety cap of 6 hours per active acquisition; released immediately in stopIfIdle()
+                    wakeLock?.acquire(6L * 60L * 60L * 1000L)
+                }
+            } catch (_: Throwable) {
+            }
+            try {
+                if (wifiLock == null) {
+                    val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    @Suppress("DEPRECATION")
+                    val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    } else {
+                        WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                    }
+                    wifiLock = wm?.createWifiLock(mode, "GrabAll::DownloadWifiLock")
+                        ?.apply { setReferenceCounted(false) }
+                }
+                if (wifiLock?.isHeld == false) {
+                    wifiLock?.acquire()
+                }
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun releasePowerLocks() {
+        synchronized(powerLockGuard) {
+            try {
+                if (wakeLock?.isHeld == true) wakeLock?.release()
+            } catch (_: Throwable) {
+            }
+            try {
+                if (wifiLock?.isHeld == true) wifiLock?.release()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var pendingNetworkPause: Runnable? = null
+
+    private fun scheduleNetworkAutoPause(reason: String) {
+        pendingNetworkPause?.let { mainHandler.removeCallbacks(it) }
+        val task = Runnable {
+            pendingNetworkPause = null
+            if (sessions.isNotEmpty()) {
+                autoPause(reason)
+            }
+        }
+        pendingNetworkPause = task
+        // 4s grace window: brief screen-off Wi-Fi power-save blips reconnect
+        // within 1-2s and must NOT pause active downloads.
+        mainHandler.postDelayed(task, 4_000L)
+    }
+
+    private fun cancelScheduledNetworkAutoPause() {
+        pendingNetworkPause?.let { mainHandler.removeCallbacks(it) }
+        pendingNetworkPause = null
     }
 
     /**
@@ -213,6 +294,13 @@ class DownloadService : Service() {
             val uri = MediaStorePublisher.publish(this, file, file.name, subfolder)
             if (uri != null) {
                 session.publishedPaths.add(file.absolutePath)
+                if (DownloadProgressBus.titles[session.url].isNullOrBlank()) {
+                    val inferred = subfolder?.takeIf { it.isNotBlank() }
+                        ?: file.nameWithoutExtension.takeIf { it.isNotBlank() }
+                    if (inferred != null) {
+                        DownloadProgressBus.titles[session.url] = inferred
+                    }
+                }
                 if (uri.scheme == "content") {
                     session.publishedRelPaths.add(uri.toString())
                 } else {
@@ -251,23 +339,18 @@ class DownloadService : Service() {
     }
 
     override fun onDestroy() {
+        cancelScheduledNetworkAutoPause()
         unregisterNetworkCallback()
+        releasePowerLocks()
         super.onDestroy()
     }
 
     /**
-     * Auto-pause on a network switch. A switch (WiFi↔mobile, VPN
-     * on/off) kills the download's socket; yt-dlp's retries then go
-     * out over the NEW network, where a VPN/datacenter IP can get
-     * bot-checked and fail again and again. Pausing instead keeps
-     * the half-download and lets the user resume deliberately —
-     * ideally with the VPN off. A pause is harmless if the switch
-     * would have survived: one tap resumes from the .part file.
+     * Auto-pause on a real network switch (WiFi↔mobile, VPN on/off) with a
+     * 4-second grace debounce so screen-off Wi-Fi power-save blips never
+     * falsely pause running downloads.
      */
     private fun registerNetworkCallback() {
-        // registerDefaultNetworkCallback requires API 24 (Android 7.0+);
-        // calling it on API 21-23 throws NoSuchMethodError (an Error, not
-        // an Exception) and crashes on Android 5/6 devices.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         val manager =
             getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -275,14 +358,17 @@ class DownloadService : Service() {
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 val start = startNetwork
-                if (start != null && network != start) {
-                    autoPause("Network changed")
+                if (start == null || network == start) {
+                    cancelScheduledNetworkAutoPause()
+                } else {
+                    // Genuine switch to a different network interface (e.g. Wi-Fi <-> Mobile)
+                    scheduleNetworkAutoPause("Network changed")
                 }
             }
 
             override fun onLost(network: Network) {
                 if (network == startNetwork) {
-                    autoPause("Network changed")
+                    scheduleNetworkAutoPause("Connection lost")
                 }
             }
         }
@@ -430,6 +516,7 @@ class DownloadService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, prepNotif)
         }
+        acquirePowerLocks()
         // The row is born NOW, not on the first progress tick minutes
         // later: the Downloads screen shows "Preparing…" at once, and
         // a screen opened mid-download replays this from the bus.
@@ -513,6 +600,10 @@ class DownloadService : Service() {
                         )
                         session.fastDownloader = fast
                         val fastResult = fast.run(object : FastYouTubeDownloader.Callback {
+                            override fun onTitleResolved(title: String) {
+                                DownloadProgressBus.titles[url] = title
+                            }
+
                             override fun onProgress(
                                 percent: Float?,
                                 speed: String?,
@@ -700,14 +791,13 @@ class DownloadService : Service() {
                                         return
                                     }
                                     if (exitCode == 0) {
-                                        val outDir = File(outputTemplate).parentFile
-                                        val scanned = outDir?.walkTopDown()
-                                            ?.filter { it.isFile && it.length() > 0 &&
+                                        val outDir = RuntimePaths.stagingDirFor(this@DownloadService, url)
+                                        val scanned = outDir.walkTopDown()
+                                            .filter { it.isFile && it.length() > 0 &&
                                                 !it.name.endsWith(".part") &&
                                                 !it.name.endsWith(".ytdl") &&
                                                 !session.skippedNames.contains(it.name) }
-                                            ?.toList()
-                                            ?: emptyList()
+                                            .toList()
                                         val candidates = if (scanned.isNotEmpty()) {
                                             scanned
                                         } else {
@@ -720,7 +810,7 @@ class DownloadService : Service() {
                                             publishFile(session, file)
                                         }
                                         val published = session.publishedPaths.size
-                                        outDir?.deleteRecursively()
+                                        outDir.deleteRecursively()
                                         clearSavedParams(this@DownloadService, url)
                                         if (published > 0 ||
                                             session.skippedNames.isNotEmpty()
@@ -750,7 +840,7 @@ class DownloadService : Service() {
                                             )
                                         }
                                     } else if (cancelledUrls.remove(url)) {
-                                        File(outputTemplate).parentFile?.deleteRecursively()
+                                        RuntimePaths.stagingDirFor(this@DownloadService, url).deleteRecursively()
                                         clearSavedParams(this@DownloadService, url)
                                         this@DownloadService.updateNotification(
                                             "Download cancelled", null
@@ -762,9 +852,9 @@ class DownloadService : Service() {
                                             )
                                         )
                                     } else {
-                                        val outDir = File(outputTemplate).parentFile
-                                        outDir?.walkTopDown()
-                                            ?.filter { file ->
+                                        val outDir = RuntimePaths.stagingDirFor(this@DownloadService, url)
+                                        outDir.walkTopDown()
+                                            .filter { file ->
                                                 file.isFile &&
                                                     !file.name.endsWith(".part") &&
                                                     !file.name.endsWith(".ytdl") &&
@@ -772,10 +862,10 @@ class DownloadService : Service() {
                                                         file.absolutePath
                                                     )
                                             }
-                                            ?.forEach { it.delete() }
-                                        outDir?.walkBottomUp()
-                                            ?.filter { it.isDirectory && it != outDir }
-                                            ?.forEach { dir ->
+                                            .forEach { it.delete() }
+                                        outDir.walkBottomUp()
+                                            .filter { it.isDirectory && it != outDir }
+                                            .forEach { dir ->
                                                 if (dir.listFiles()?.isEmpty() == true) {
                                                     dir.delete()
                                                 }
