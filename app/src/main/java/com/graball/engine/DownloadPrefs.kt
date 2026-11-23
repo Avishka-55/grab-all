@@ -1,10 +1,10 @@
 package com.graball.engine
 
+import android.app.ActivityManager
 import android.content.Context
 
 /**
- * Last-used download options, so Grab panels open with the user's
- * usual choices instead of resetting to Best/Single every time.
+ * Last-used download options and user-configurable concurrency setting.
  *
  * The playlist choice is only saved for playlist downloads: a video
  * download must never overwrite it, or the next playlist panel
@@ -16,6 +16,10 @@ object DownloadPrefs {
     private const val KEY_QUALITY = "quality"
     private const val KEY_AUDIO = "audio"
     private const val KEY_PLAYLIST = "playlist"
+    private const val KEY_CONCURRENT = "concurrent_downloads"
+
+    /** Supported explicit values (0 = Auto). */
+    val CONCURRENT_OPTIONS = intArrayOf(0, 1, 2, 3, 4, 6)
 
     data class Choices(
         val qualityPos: Int,
@@ -38,5 +42,41 @@ object DownloadPrefs {
             .putBoolean(KEY_AUDIO, choices.audioOnly)
             .putInt(KEY_PLAYLIST, choices.playlistPos)
             .apply()
+    }
+
+    /** Raw setting: 0 = Auto, or explicit 1..6. */
+    fun getConcurrentDownloads(context: Context): Int {
+        return context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            .getInt(KEY_CONCURRENT, 0)
+    }
+
+    fun setConcurrentDownloads(context: Context, count: Int) {
+        val clamped = if (count <= 0) 0 else count.coerceIn(1, 6)
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_CONCURRENT, clamped)
+            .apply()
+    }
+
+    /**
+     * Effective concurrency used by DownloadService & FastYouTubeDownloader:
+     * - Auto (0): 2 on low-RAM / dual-core phones, 3–4 on modern multi-core phones.
+     * - Explicit: user's chosen 1..6 parallel tracks / concurrent downloads.
+     */
+    fun resolvedConcurrency(context: Context): Int {
+        val raw = getConcurrentDownloads(context)
+        if (raw in 1..6) return raw
+        val isLowRam = try {
+            (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)
+                ?.isLowRamDevice == true
+        } catch (_: Exception) {
+            false
+        }
+        if (isLowRam) return 2
+        val cores = Runtime.getRuntime().availableProcessors()
+        return when {
+            cores >= 8 -> 4
+            cores >= 4 -> 3
+            else -> 2
+        }
     }
 }

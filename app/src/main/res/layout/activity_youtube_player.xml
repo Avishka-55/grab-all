@@ -22,20 +22,24 @@
             app:surface_type="surface_view"
             app:use_controller="true" />
 
-        <!-- Audio-only placeholder banner when video track is disabled -->
+        <!-- Audio-only placeholder banner (positioned near top & non-clickable so
+             it never overlaps ExoPlayer's center Play/Pause/Prev/Next controls) -->
         <TextView
             android:id="@+id/audioOnlyBanner"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_gravity="center"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="48dp"
             android:background="@drawable/yt_hud_bg"
-            android:paddingStart="16dp"
-            android:paddingTop="8dp"
-            android:paddingEnd="16dp"
-            android:paddingBottom="8dp"
+            android:clickable="false"
+            android:focusable="false"
+            android:paddingStart="14dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="6dp"
             android:text="🎧 Audio-Only Mode (Battery Saver)"
             android:textColor="@color/graball_text"
-            android:textSize="13sp"
+            android:textSize="12sp"
             android:textStyle="bold"
             android:visibility="gone" />
 

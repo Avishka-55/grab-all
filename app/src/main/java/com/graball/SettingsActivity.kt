@@ -12,8 +12,10 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.graball.engine.AppUpdateChecker
 import com.graball.engine.CookieImporter
+import com.graball.engine.DownloadPrefs
 import com.graball.engine.RuntimePaths
 import com.graball.engine.YtDlpUpdater
 import com.graball.youtube.ThumbnailLoader
@@ -96,6 +98,47 @@ class SettingsActivity : AppCompatActivity() {
             refreshCacheSize()
             Toast.makeText(this, "Cache cleared", Toast.LENGTH_SHORT).show()
         }
+
+        // ---- Concurrent Downloads Selector ----
+        val concStatusText = findViewById<TextView>(R.id.settingsConcurrencyStatus)
+        val concChips = listOf(
+            0 to findViewById<TextView>(R.id.chipConcAuto),
+            1 to findViewById<TextView>(R.id.chipConc1),
+            2 to findViewById<TextView>(R.id.chipConc2),
+            3 to findViewById<TextView>(R.id.chipConc3),
+            4 to findViewById<TextView>(R.id.chipConc4),
+            6 to findViewById<TextView>(R.id.chipConc6)
+        )
+        fun refreshConcurrencyChips() {
+            val selected = DownloadPrefs.getConcurrentDownloads(this)
+            val resolved = DownloadPrefs.resolvedConcurrency(this)
+            concChips.forEach { (value, chip) ->
+                val isSel = value == selected
+                chip.setBackgroundResource(
+                    if (isSel) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+                )
+                chip.setTextColor(
+                    ContextCompat.getColor(
+                        this,
+                        if (isSel) R.color.graball_text else R.color.graball_subtext
+                    )
+                )
+            }
+            concStatusText.text = if (selected == 0) {
+                "Auto: up to $resolved parallel playlist tracks / concurrent videos"
+            } else if (selected == 1) {
+                "1 at a time (lowest CPU & RAM usage)"
+            } else {
+                "Up to $selected parallel playlist tracks / concurrent videos"
+            }
+        }
+        concChips.forEach { (value, chip) ->
+            chip.setOnClickListener {
+                DownloadPrefs.setConcurrentDownloads(this, value)
+                refreshConcurrencyChips()
+            }
+        }
+        refreshConcurrencyChips()
 
         // ---- yt-dlp Self-Updater ----
         val nightlyCheck = findViewById<CheckBox>(R.id.settingsYtDlpNightly)

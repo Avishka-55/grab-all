@@ -15,6 +15,9 @@ import android.util.Log
 import android.widget.Toast
 import java.io.File
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * Foreground service that runs one yt-dlp download at a time.
@@ -45,7 +48,19 @@ class DownloadService : Service() {
         val outputTemplate: String,
         val audioOnly: Boolean
     ) {
+        @Volatile
         var runner: YtDlpRunner? = null
+
+        @Volatile
+        var fastDownloader: FastYouTubeDownloader? = null
+
+        @Volatile
+        var isQueued: Boolean = false
+
+        fun cancelActive() {
+            fastDownloader?.cancel()
+            runner?.cancel()
+        }
 
         /** Final files from the runner, used as a fallback at finish time. */
         var downloadedFiles: List<File> = emptyList()
@@ -79,6 +94,69 @@ class DownloadService : Service() {
     private val sessions =
         Collections.synchronizedMap(mutableMapOf<String, Session>())
 
+    /** Dynamic concurrency gate honoring Settings -> Concurrent Downloads. */
+    private val slotLock = ReentrantLock()
+    private val slotCondition = slotLock.newCondition()
+    private var activeSlotCount = 0
+
+    private fun acquireDownloadSlot(session: Session): Boolean {
+        slotLock.lock()
+        try {
+            session.isQueued = true
+            var announcedQueued = false
+            while (true) {
+                if (pausedUrls.contains(session.url) || cancelledUrls.contains(session.url)) {
+                    session.isQueued = false
+                    return false
+                }
+                val limit = DownloadPrefs.resolvedConcurrency(this)
+                if (activeSlotCount < limit) {
+                    activeSlotCount++
+                    session.isQueued = false
+                    return true
+                }
+                if (!announcedQueued) {
+                    announcedQueued = true
+                    DownloadProgressBus.post(
+                        DownloadProgressBus.State(
+                            session.url,
+                            null,
+                            DownloadProgressBus.Status.PREPARING,
+                            detail = "Queued (max $limit active)…"
+                        )
+                    )
+                }
+                try {
+                    slotCondition.await(1000L, TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    session.isQueued = false
+                    return false
+                }
+            }
+        } finally {
+            slotLock.unlock()
+        }
+    }
+
+    private fun releaseDownloadSlot() {
+        slotLock.lock()
+        try {
+            if (activeSlotCount > 0) activeSlotCount--
+            slotCondition.signalAll()
+        } finally {
+            slotLock.unlock()
+        }
+    }
+
+    private fun wakeSlotWaiters() {
+        slotLock.lock()
+        try {
+            slotCondition.signalAll()
+        } finally {
+            slotLock.unlock()
+        }
+    }
+
     /** Stop the service only when the last session has ended. */
     private fun stopIfIdle() {
         if (sessions.isEmpty()) {
@@ -111,40 +189,41 @@ class DownloadService : Service() {
     /** Default network the current download started on, if known. */
     private var startNetwork: Network? = null
 
-    /** Publish one file unless it was already published this run. */
+    /** Publish one file unless it was already published this run (thread-safe for parallel workers). */
     private fun publishFile(session: Session, file: File): Boolean {
-        if (session.publishedPaths.contains(file.absolutePath)) {
-            return true
-        }
-        // Playlist files live in a subfolder under staging
-        // (see the %(playlist_title)s output template): keep that
-        // folder when publishing, so a playlist lands in
-        // Downloads/GrabAll/<Playlist Title> instead of flat.
-        val stagingDir = File(session.outputTemplate).parentFile
-        val subfolder = try {
-            val parent = file.parentFile?.absolutePath ?: ""
-            val root = stagingDir?.absolutePath ?: ""
-            parent.removePrefix(root).trim('/').takeIf { it.isNotEmpty() }
-        } catch (_: Exception) {
-            null
-        }
-        val uri = MediaStorePublisher.publish(this, file, file.name, subfolder)
-        if (uri != null) {
-            session.publishedPaths.add(file.absolutePath)
-            // On Android 10+ (scoped storage), keep the MediaStore
-            // content:// URI directly so Open works without storage
-            // permission and even if MediaStore auto-renamed a duplicate.
-            // On Android 5-9, keep the relative path under Downloads/GrabAll.
-            if (uri.scheme == "content") {
-                session.publishedRelPaths.add(uri.toString())
-            } else {
-                val safeFolder = subfolder?.let { MediaStorePublisher.sanitizeSubfolder(it) }
-                val rel = if (safeFolder != null) "$safeFolder/${file.name}" else file.name
-                session.publishedRelPaths.add(rel)
+        synchronized(session) {
+            if (session.publishedPaths.contains(file.absolutePath)) {
+                return true
             }
-            return true
+            // Playlist files live in a subfolder under the URL's staging dir
+            // (e.g. <staging>/<Playlist Title>/01 - Song.mp3): keep that folder
+            // when publishing so a playlist lands in Downloads/GrabAll/<Playlist Title>.
+            val stagingRoot = RuntimePaths.stagingDirFor(this, session.url)
+            val subfolder = try {
+                val parent = file.parentFile?.absolutePath ?: ""
+                val root = stagingRoot.absolutePath
+                if (parent.startsWith(root)) {
+                    parent.removePrefix(root).trim('/').takeIf { it.isNotEmpty() }
+                } else {
+                    null
+                }
+            } catch (_: Exception) {
+                null
+            }
+            val uri = MediaStorePublisher.publish(this, file, file.name, subfolder)
+            if (uri != null) {
+                session.publishedPaths.add(file.absolutePath)
+                if (uri.scheme == "content") {
+                    session.publishedRelPaths.add(uri.toString())
+                } else {
+                    val safeFolder = subfolder?.let { MediaStorePublisher.sanitizeSubfolder(it) }
+                    val rel = if (safeFolder != null) "$safeFolder/${file.name}" else file.name
+                    session.publishedRelPaths.add(rel)
+                }
+                return true
+            }
+            return false
         }
-        return false
     }
 
     /**
@@ -235,8 +314,9 @@ class DownloadService : Service() {
         snapshot.forEach { session ->
             pausedUrls.add(session.url)
             pauseReasons[session.url] = reason
-            session.runner?.cancel()
+            session.cancelActive()
         }
+        wakeSlotWaiters()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -253,9 +333,10 @@ class DownloadService : Service() {
                 pausedUrls.remove(url)
                 pauseReasons.remove(url)
                 clearSavedParams(this, url)
-                val running = sessions[url]?.runner
-                if (running != null) {
-                    running.cancel()
+                val session = sessions[url]
+                if (session != null && (session.runner != null || session.fastDownloader != null || session.isQueued)) {
+                    session.cancelActive()
+                    wakeSlotWaiters()
                 } else {
                     // Already paused — wipe its kept staging dir now
                     RuntimePaths.stagingDirFor(this, url).deleteRecursively()
@@ -267,10 +348,13 @@ class DownloadService : Service() {
             val url = safeIntent.getStringExtra(EXTRA_URL)
                 ?: return START_NOT_STICKY
             val session = sessions[url] ?: return START_NOT_STICKY
-            if (session.runner == null) return START_NOT_STICKY
+            if (session.runner == null && session.fastDownloader == null && !session.isQueued) {
+                return START_NOT_STICKY
+            }
             pausedUrls.add(url)
             pauseReasons[url] = null
-            session.runner?.cancel()
+            session.cancelActive()
+            wakeSlotWaiters()
             return START_NOT_STICKY
         }
         if (safeIntent.action == ACTION_RESUME) {
@@ -355,6 +439,30 @@ class DownloadService : Service() {
             )
         )
         Thread {
+            if (!acquireDownloadSlot(session)) {
+                activeUrls.remove(url)
+                sessions.remove(url)
+                if (pausedUrls.remove(url)) {
+                    val reason = pauseReasons.remove(url)
+                    updateNotification("Download paused", null)
+                    DownloadProgressBus.post(
+                        DownloadProgressBus.State(
+                            url, null, DownloadProgressBus.Status.PAUSED, reason
+                        )
+                    )
+                } else if (cancelledUrls.remove(url)) {
+                    RuntimePaths.stagingDirFor(this, url).deleteRecursively()
+                    clearSavedParams(this, url)
+                    updateNotification("Download cancelled", null)
+                    DownloadProgressBus.post(
+                        DownloadProgressBus.State(
+                            url, null, DownloadProgressBus.Status.FAILED, "Cancelled"
+                        )
+                    )
+                }
+                stopIfIdle()
+                return@Thread
+            }
             try {
                 if (!RuntimeExtractor.extractIfNeeded(this, RUNTIME_VERSION)) {
                     updateNotification("Runtime setup failed", null)
@@ -387,6 +495,125 @@ class DownloadService : Service() {
                         } catch (_: Exception) {
                         }
                     }
+
+                    // ---- Tier 1: Fast Native Kotlin YouTube Accelerator ----
+                    // Multi-connection Range chunks for single videos & N-worker
+                    // parallel engine for YouTube playlists (100+ songs in mins).
+                    if (FastYouTubeDownloader.isYouTubeUrl(url)) {
+                        val stagingDir = RuntimePaths.stagingDirFor(this, url)
+                        val fastLog = StringBuilder()
+                        val fast = FastYouTubeDownloader(
+                            context = this,
+                            url = url,
+                            stagingDir = stagingDir,
+                            audioOnly = audioOnly,
+                            maxHeight = maxHeight,
+                            playlistMode = playlistMode,
+                            concurrency = DownloadPrefs.resolvedConcurrency(this)
+                        )
+                        session.fastDownloader = fast
+                        val fastResult = fast.run(object : FastYouTubeDownloader.Callback {
+                            override fun onProgress(
+                                percent: Float?,
+                                speed: String?,
+                                eta: String?,
+                                item: String?,
+                                detail: String?
+                            ) {
+                                val itemSuffix = item?.let { " · $it" } ?: ""
+                                val text = if (percent != null) {
+                                    "Downloading… %.1f%%".format(percent) + itemSuffix
+                                } else {
+                                    (detail ?: "Downloading…") + itemSuffix
+                                }
+                                this@DownloadService.updateNotification(text, percent?.toInt())
+                                val liveDetail = detail ?: listOfNotNull(
+                                    speed,
+                                    eta?.let { "ETA $it" }
+                                ).joinToString(" · ").takeIf { it.isNotBlank() }
+                                DownloadProgressBus.post(
+                                    DownloadProgressBus.State(
+                                        url,
+                                        percent,
+                                        DownloadProgressBus.Status.DOWNLOADING,
+                                        detail = liveDetail,
+                                        item = item
+                                    )
+                                )
+                            }
+
+                            override fun onFileReady(file: File) {
+                                publishFile(session, file)
+                            }
+
+                            override fun onLogLine(line: String) {
+                                synchronized(fastLog) {
+                                    if (fastLog.length < 32_000) {
+                                        fastLog.append(line).append('\n')
+                                    }
+                                    logsByUrl[url] = fastLog.toString()
+                                }
+                            }
+                        })
+                        session.fastDownloader = null
+                        if (fastResult.handled) {
+                            activeUrls.remove(url)
+                            sessions.remove(url)
+                            if (pausedUrls.contains(url)) {
+                                pausedUrls.remove(url)
+                                val reason = pauseReasons.remove(url)
+                                updateNotification("Download paused", null)
+                                DownloadProgressBus.post(
+                                    DownloadProgressBus.State(
+                                        url, null, DownloadProgressBus.Status.PAUSED, reason
+                                    )
+                                )
+                            } else if (fastResult.exitCode == 0) {
+                                RuntimePaths.stagingDirFor(this, url).deleteRecursively()
+                                clearSavedParams(this, url)
+                                if (session.publishedPaths.isNotEmpty() || fastResult.skippedCount > 0) {
+                                    updateNotification("Download complete", null)
+                                    DownloadProgressBus.post(
+                                        DownloadProgressBus.State(
+                                            url,
+                                            100f,
+                                            DownloadProgressBus.Status.COMPLETE,
+                                            output = session.publishedRelPaths.lastOrNull()
+                                        )
+                                    )
+                                } else {
+                                    updateNotification("Download failed (no file produced)", null)
+                                    DownloadProgressBus.post(
+                                        DownloadProgressBus.State(
+                                            url, null, DownloadProgressBus.Status.FAILED,
+                                            "Download finished but no file was produced."
+                                        )
+                                    )
+                                }
+                            } else if (cancelledUrls.remove(url)) {
+                                RuntimePaths.stagingDirFor(this, url).deleteRecursively()
+                                clearSavedParams(this, url)
+                                updateNotification("Download cancelled", null)
+                                DownloadProgressBus.post(
+                                    DownloadProgressBus.State(
+                                        url, null, DownloadProgressBus.Status.FAILED, "Cancelled"
+                                    )
+                                )
+                            } else {
+                                updateNotification("Download failed", null)
+                                DownloadProgressBus.post(
+                                    DownloadProgressBus.State(
+                                        url, null, DownloadProgressBus.Status.FAILED,
+                                        fastResult.detail.ifBlank { "Download failed" }
+                                    )
+                                )
+                            }
+                            stopIfIdle()
+                            return@Thread
+                        }
+                    }
+
+                    // ---- Tier 2: Turbo yt-dlp Engine (all other sites & restricted YT fallback) ----
                     val cookies = cookiesFile.takeIf { it.exists() }
                     val newRunner = YtDlpRunner(
                         pythonBinary = RuntimePaths.pythonBinary(this),
@@ -402,6 +629,7 @@ class DownloadService : Service() {
                         pythonPathDir = RuntimePaths.ytDlpBundleDir(this)
                     )
                     session.runner = newRunner
+                    val runnerDone = CountDownLatch(1)
                     newRunner.download(
                         url, outputTemplate,
                         formatArgs(audioOnly, maxHeight) +
@@ -437,14 +665,6 @@ class DownloadService : Service() {
 
                             override fun onDownloadedFiles(files: List<File>) {
                                 if (audioOnly) {
-                                    // Audio downloads have no merge or
-                                    // remux step, so a destination the
-                                    // runner reports mid-run IS a
-                                    // finished song: publish it now so
-                                    // it shows up in Downloads at once.
-                                    // Video downloads keep the old
-                                    // behavior (publish only the final
-                                    // merged file at the end).
                                     files.forEach { publishFile(session, it) }
                                 } else {
                                     session.downloadedFiles = files
@@ -462,186 +682,142 @@ class DownloadService : Service() {
                             override fun onFinished(exitCode: Int, detail: String) {
                                 activeUrls.remove(url)
                                 sessions.remove(url)
-                                if (pausedUrls.contains(url)) {
-                                    // Pause, not failure: the user (or
-                                    // a network switch) stopped it
-                                    // deliberately. Keep staging fully
-                                    // intact — the resume restarts this
-                                    // same download in the same dir,
-                                    // and yt-dlp continues from .part.
-                                    pausedUrls.remove(url)
-                                    val reason = pauseReasons.remove(url)
-                                    this@DownloadService.updateNotification(
-                                        "Download paused", null
-                                    )
-                                    DownloadProgressBus.post(
-                                        DownloadProgressBus.State(
-                                            url, null,
-                                            DownloadProgressBus.Status.PAUSED,
-                                            reason
-                                        )
-                                    )
-                                    this@DownloadService.stopIfIdle()
-                                    return
-                                }
-                                if (exitCode == 0) {
-                                    // The runner's Destination/Merger log
-                                    // lines go STALE when --remux-video
-                                    // runs: yt-dlp deletes the merged file
-                                    // after remuxing, so the recorded path
-                                    // no longer exists — and yt-dlp can
-                                    // also exit 0 having produced nothing
-                                    // (an "already downloaded" skip off a
-                                    // leftover in shared staging). The old
-                                    // code published whatever path it was
-                                    // given, skipped missing files
-                                    // silently, and still reported Done —
-                                    // exactly the v0.2.7 "Done but no file"
-                                    // bug: audio-only worked (no remux),
-                                    // a capped resolution could pick a
-                                    // webm combo, remux to mp4, and leave
-                                    // nothing publishable behind. So the
-                                    // truth is the output directory
-                                    // itself, and Done requires at least
-                                    // one file actually published.
-                                    // Recursive walk: playlist files live
-                                    // in a %(playlist_title)s subfolder
-                                    // under staging, not flat beside it.
-                                    val outDir = File(outputTemplate).parentFile
-                                    val scanned = outDir?.walkTopDown()
-                                        ?.filter { it.isFile && it.length() > 0 &&
-                                            !it.name.endsWith(".part") &&
-                                            !it.name.endsWith(".ytdl") &&
-                                            !session.skippedNames.contains(it.name) }
-                                        ?.toList()
-                                        ?: emptyList()
-                                    val candidates = if (scanned.isNotEmpty()) {
-                                        scanned
-                                    } else {
-                                        session.downloadedFiles.filter {
-                                            it.exists() &&
-                                                !session.skippedNames.contains(it.name)
-                                        }
-                                    }
-                                    candidates.forEach { file ->
-                                        publishFile(session, file)
-                                    }
-                                    val published = session.publishedPaths.size
-                                    // Drop the whole staging dir, so a
-                                    // later download of the same video can
-                                    // never "skip" off a leftover.
-                                    outDir?.deleteRecursively()
-                                    clearSavedParams(this@DownloadService, url)
-                                    // A run that only skipped files is
-                                    // still a success: everything is
-                                    // already in Downloads from the
-                                    // earlier run.
-                                    if (published > 0 ||
-                                        session.skippedNames.isNotEmpty()
-                                    ) {
+                                try {
+                                    if (pausedUrls.contains(url)) {
+                                        pausedUrls.remove(url)
+                                        val reason = pauseReasons.remove(url)
                                         this@DownloadService.updateNotification(
-                                            "Download complete", null
-                                        )
-                                        DownloadProgressBus.post(
-                                            DownloadProgressBus.State(
-                                                url, 100f,
-                                                DownloadProgressBus.Status.COMPLETE,
-                                                output = session.publishedRelPaths.lastOrNull()
-                                            )
-                                        )
-                                    } else {
-                                        this@DownloadService.updateNotification(
-                                            "Download failed (no file produced)", null
+                                            "Download paused", null
                                         )
                                         DownloadProgressBus.post(
                                             DownloadProgressBus.State(
                                                 url, null,
-                                                DownloadProgressBus.Status.FAILED,
-                                                "Download finished but no file " +
-                                                    "was produced. Try again, " +
-                                                    "or pick a different quality."
+                                                DownloadProgressBus.Status.PAUSED,
+                                                reason
+                                            )
+                                        )
+                                        this@DownloadService.stopIfIdle()
+                                        return
+                                    }
+                                    if (exitCode == 0) {
+                                        val outDir = File(outputTemplate).parentFile
+                                        val scanned = outDir?.walkTopDown()
+                                            ?.filter { it.isFile && it.length() > 0 &&
+                                                !it.name.endsWith(".part") &&
+                                                !it.name.endsWith(".ytdl") &&
+                                                !session.skippedNames.contains(it.name) }
+                                            ?.toList()
+                                            ?: emptyList()
+                                        val candidates = if (scanned.isNotEmpty()) {
+                                            scanned
+                                        } else {
+                                            session.downloadedFiles.filter {
+                                                it.exists() &&
+                                                    !session.skippedNames.contains(it.name)
+                                            }
+                                        }
+                                        candidates.forEach { file ->
+                                            publishFile(session, file)
+                                        }
+                                        val published = session.publishedPaths.size
+                                        outDir?.deleteRecursively()
+                                        clearSavedParams(this@DownloadService, url)
+                                        if (published > 0 ||
+                                            session.skippedNames.isNotEmpty()
+                                        ) {
+                                            this@DownloadService.updateNotification(
+                                                "Download complete", null
+                                            )
+                                            DownloadProgressBus.post(
+                                                DownloadProgressBus.State(
+                                                    url, 100f,
+                                                    DownloadProgressBus.Status.COMPLETE,
+                                                    output = session.publishedRelPaths.lastOrNull()
+                                                )
+                                            )
+                                        } else {
+                                            this@DownloadService.updateNotification(
+                                                "Download failed (no file produced)", null
+                                            )
+                                            DownloadProgressBus.post(
+                                                DownloadProgressBus.State(
+                                                    url, null,
+                                                    DownloadProgressBus.Status.FAILED,
+                                                    "Download finished but no file " +
+                                                        "was produced. Try again, " +
+                                                        "or pick a different quality."
+                                                )
+                                            )
+                                        }
+                                    } else if (cancelledUrls.remove(url)) {
+                                        File(outputTemplate).parentFile?.deleteRecursively()
+                                        clearSavedParams(this@DownloadService, url)
+                                        this@DownloadService.updateNotification(
+                                            "Download cancelled", null
+                                        )
+                                        DownloadProgressBus.post(
+                                            DownloadProgressBus.State(
+                                                url, null, DownloadProgressBus.Status.FAILED,
+                                                "Cancelled"
+                                            )
+                                        )
+                                    } else {
+                                        val outDir = File(outputTemplate).parentFile
+                                        outDir?.walkTopDown()
+                                            ?.filter { file ->
+                                                file.isFile &&
+                                                    !file.name.endsWith(".part") &&
+                                                    !file.name.endsWith(".ytdl") &&
+                                                    !session.publishedPaths.contains(
+                                                        file.absolutePath
+                                                    )
+                                            }
+                                            ?.forEach { it.delete() }
+                                        outDir?.walkBottomUp()
+                                            ?.filter { it.isDirectory && it != outDir }
+                                            ?.forEach { dir ->
+                                                if (dir.listFiles()?.isEmpty() == true) {
+                                                    dir.delete()
+                                                }
+                                            }
+                                        this@DownloadService.updateNotification(
+                                            "Download failed (exit $exitCode)", null
+                                        )
+                                        DownloadProgressBus.post(
+                                            DownloadProgressBus.State(
+                                                url, null, DownloadProgressBus.Status.FAILED,
+                                                detail.ifBlank { "yt-dlp exited $exitCode" }
                                             )
                                         )
                                     }
-                                } else if (cancelledUrls.remove(url)) {
-                                    // Explicitly cancelled: delete the entire
-                                    // staging dir (including .part/.ytdl) so
-                                    // cancelled downloads never leak storage.
-                                    File(outputTemplate).parentFile?.deleteRecursively()
-                                    clearSavedParams(this@DownloadService, url)
-                                    this@DownloadService.updateNotification(
-                                        "Download cancelled", null
-                                    )
-                                    DownloadProgressBus.post(
-                                        DownloadProgressBus.State(
-                                            url, null, DownloadProgressBus.Status.FAILED,
-                                            "Cancelled"
-                                        )
-                                    )
-                                } else {
-                                    // Failed or cancelled: finished
-                                    // songs are already in Downloads
-                                    // (published mid-run), so drop only
-                                    // the unpublished leftovers — but
-                                    // KEEP .part/.ytdl files and the
-                                    // staging originals of songs
-                                    // already published. They are what
-                                    // a re-tap resumes from (the .part
-                                    // for the interrupted song, the
-                                    // complete files yt-dlp will skip),
-                                    // and keeping them avoids both a
-                                    // restart-from-zero and duplicates.
-                                    val outDir = File(outputTemplate).parentFile
-                                    // Recursive: with playlist subfolders,
-                                    // leftovers can sit a level down too.
-                                    // Only delete unpublished, non-resume
-                                    // files; .part/.ytdl and published
-                                    // originals stay for the resume.
-                                    outDir?.walkTopDown()
-                                        ?.filter { file ->
-                                            file.isFile &&
-                                                !file.name.endsWith(".part") &&
-                                                !file.name.endsWith(".ytdl") &&
-                                                !session.publishedPaths.contains(
-                                                    file.absolutePath
-                                                )
-                                        }
-                                        ?.forEach { it.delete() }
-                                    // Prune subfolders left empty by that.
-                                    outDir?.walkBottomUp()
-                                        ?.filter { it.isDirectory && it != outDir }
-                                        ?.forEach { dir ->
-                                            if (dir.listFiles()?.isEmpty() == true) {
-                                                dir.delete()
-                                            }
-                                        }
-                                    this@DownloadService.updateNotification(
-                                        "Download failed (exit $exitCode)", null
-                                    )
-                                    DownloadProgressBus.post(
-                                        DownloadProgressBus.State(
-                                            url, null, DownloadProgressBus.Status.FAILED,
-                                            detail.ifBlank { "yt-dlp exited $exitCode" }
-                                        )
-                                    )
+                                    this@DownloadService.stopIfIdle()
+                                } finally {
+                                    runnerDone.countDown()
                                 }
-                                this@DownloadService.stopIfIdle()
                             }
 
                             override fun onError(message: String) {
                                 activeUrls.remove(url)
                                 sessions.remove(url)
-                                this@DownloadService.updateNotification(
-                                    "Download error: $message", null
-                                )
-                                DownloadProgressBus.post(
-                                    DownloadProgressBus.State(
-                                        url, null, DownloadProgressBus.Status.FAILED, message
+                                try {
+                                    this@DownloadService.updateNotification(
+                                        "Download error: $message", null
                                     )
-                                )
-                                this@DownloadService.stopIfIdle()
+                                    DownloadProgressBus.post(
+                                        DownloadProgressBus.State(
+                                            url, null, DownloadProgressBus.Status.FAILED, message
+                                        )
+                                    )
+                                    this@DownloadService.stopIfIdle()
+                                } finally {
+                                    runnerDone.countDown()
+                                }
                             }
                         })
+                    try {
+                        runnerDone.await()
+                    } catch (_: InterruptedException) {
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Download service failed", e)
@@ -655,6 +831,8 @@ class DownloadService : Service() {
                     )
                 )
                 stopIfIdle()
+            } finally {
+                releaseDownloadSlot()
             }
         }.start()
         return START_NOT_STICKY
@@ -806,7 +984,7 @@ class DownloadService : Service() {
             if (audioOnly) {
                 return listOf(
                     "-f", "bestaudio",
-                    "--extract-audio", "--audio-format", "mp3",
+                    "--extract-audio", "--audio-format", "mp3", "--audio-quality", "4",
                     "--embed-metadata", "--embed-thumbnail"
                 )
             }
@@ -832,9 +1010,9 @@ class DownloadService : Service() {
         private fun playlistArgs(playlistMode: String): List<String> {
             return when (playlistMode) {
                 "20", "30", "50" -> listOf(
-                    "--yes-playlist", "--playlist-end", playlistMode
+                    "--yes-playlist", "--ignore-errors", "--playlist-end", playlistMode
                 )
-                "all" -> listOf("--yes-playlist")
+                "all" -> listOf("--yes-playlist", "--ignore-errors")
                 else -> listOf("--no-playlist")
             }
         }

@@ -86,6 +86,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private var lastSponsorSkipShown: String? = null
     private var isFullscreen = false
     private var inPipMode = false
+    private var isControllerVisible = false
     private var explicitBgAudioRequested = false
     private var autoDisabledVideoForScreenOff = false
     private var normalPlayerHeightPx = 0
@@ -159,6 +160,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         // so it cleanly disappears while watching and reappears on tap.
         playerView.setControllerVisibilityListener(
             PlayerView.ControllerVisibilityListener { visibility ->
+                isControllerVisible = (visibility == View.VISIBLE)
                 if (inPipMode) {
                     playerTopOverlay.visibility = View.GONE
                 } else if (isFullscreen) {
@@ -166,6 +168,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
                 } else {
                     playerTopOverlay.visibility = View.VISIBLE
                 }
+                updateAudioOnlyBannerVisibility(YouTubePlaybackService.currentState)
             }
         )
 
@@ -362,8 +365,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         if (state.isLoading) {
             playerLoadingText.text = state.loadingStatus ?: "Loading…"
         }
-        audioOnlyBanner.visibility =
-            if (state.isAudioOnly && !inPipMode && !state.isLoading) View.VISIBLE else View.GONE
+        updateAudioOnlyBannerVisibility(state)
 
         val item = state.currentItem
         val info = state.streamInfo
@@ -429,6 +431,13 @@ class YouTubePlayerActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+    }
+
+    private fun updateAudioOnlyBannerVisibility(state: YouTubePlaybackState) {
+        // Hide the banner while ExoPlayer's controller is open so transport
+        // controls (Play/Pause/Next/Prev/Seek) are always unobstructed.
+        val show = state.isAudioOnly && !inPipMode && !state.isLoading && !isControllerVisible
+        audioOnlyBanner.visibility = if (show) View.VISIBLE else View.GONE
     }
 
     private fun loadRelated(videoId: String) {
@@ -544,6 +553,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         } else {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         }
+        updateAudioOnlyBannerVisibility(YouTubePlaybackService.currentState)
     }
 
     // ---- Gesture Controls ----

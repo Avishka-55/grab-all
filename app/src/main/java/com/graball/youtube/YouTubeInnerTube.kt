@@ -162,7 +162,7 @@ object YouTubeInnerTube {
         return search("popular music playlist", SearchFilter.PLAYLISTS)
     }
 
-    fun fetchPlaylist(playlistId: String): PlaylistDetails? {
+    fun fetchPlaylist(playlistId: String, maxItems: Int = 500): PlaylistDetails? {
         val cleanId = playlistId.removePrefix("VL")
         val browseId = "VL$cleanId"
         val body = JSONObject().apply {
@@ -174,6 +174,7 @@ object YouTubeInnerTube {
         var title = ""
         var channel = ""
         val items = mutableListOf<YtItem>()
+        val seen = mutableSetOf<String>()
 
         if (root != null) {
             val header = root.optJSONObject("header")
@@ -190,7 +191,27 @@ object YouTubeInnerTube {
             channel = header?.optJSONObject("playlistHeaderRenderer")
                 ?.let { extractText(it.optJSONObject("ownerText")) }
                 .orEmpty()
-            collectPlaylistVideos(root, items, seen = mutableSetOf())
+            collectPlaylistVideos(root, items, seen)
+
+            // Follow InnerTube continuation tokens so playlists with 100+ / 500+
+            // songs load completely (YouTube returns ~100 items per page).
+            var nextToken = findContinuationToken(root)
+            var pages = 0
+            while (!nextToken.isNullOrBlank() && items.size < maxItems && pages < 15) {
+                pages++
+                val contBody = JSONObject().apply {
+                    put("context", webContext())
+                    put("continuation", nextToken)
+                }
+                val contRoot = postInnerTube(
+                    "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+                    contBody
+                ) ?: break
+                val before = items.size
+                collectPlaylistVideos(contRoot, items, seen)
+                if (items.size == before) break
+                nextToken = findContinuationToken(contRoot)
+            }
         }
 
         // Fallback to /next (handles YouTube Mix / Radio RD... playlists and
@@ -210,17 +231,47 @@ object YouTubeInnerTube {
                         ?.optString("title")
                         .orEmpty()
                 }
-                collectPlaylistVideos(nextRoot, items, seen = mutableSetOf())
+                collectPlaylistVideos(nextRoot, items, seen)
             }
         }
 
         if (items.isEmpty()) return null
+        val capped = if (items.size > maxItems) items.subList(0, maxItems).toList() else items
         return PlaylistDetails(
             playlistId = cleanId,
             title = title.ifBlank { "Playlist" },
             channel = channel,
-            items = items
+            items = capped
         )
+    }
+
+    private fun findContinuationToken(node: Any?): String? {
+        when (node) {
+            is JSONObject -> {
+                if (node.has("continuationItemRenderer")) {
+                    val renderer = node.optJSONObject("continuationItemRenderer")
+                    val token = renderer?.optJSONObject("continuationEndpoint")
+                        ?.optJSONObject("continuationCommand")
+                        ?.optString("token")
+                        ?.takeIf { it.isNotBlank() }
+                    if (token != null) return token
+                }
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (key in AD_KEYS) continue
+                    val found = findContinuationToken(node.opt(key))
+                    if (found != null) return found
+                }
+            }
+            is JSONArray -> {
+                for (i in 0 until node.length()) {
+                    val found = findContinuationToken(node.opt(i))
+                    if (found != null) return found
+                }
+            }
+        }
+        return null
     }
 
     fun fetchRelated(videoId: String): List<YtItem> {
@@ -234,6 +285,78 @@ object YouTubeInnerTube {
         val seen = mutableSetOf(videoId)
         collectItems(root, items, seen)
         return items.filter { !it.isPlaylist }.take(30)
+    }
+
+    /**
+     * Fast InnerTube-only stream resolution optimized for direct HTTP downloads
+     * (never spawns Python/yt-dlp). Prefers ANDROID_VR -> IOS -> VISIONOS so
+     * direct adaptive M4A/H.264 URLs (compatible with multi-connection Range
+     * chunking) are preferred over HLS manifests.
+     */
+    fun resolveForDownload(videoId: String): ResolveResult {
+        val visitorData = ensureVisitorData()
+        val androidVr = resolveViaClient(
+            videoId = videoId,
+            clientName = "ANDROID_VR",
+            clientVersion = ANDROID_VR_CLIENT_VERSION,
+            clientNameId = "28",
+            userAgent = ANDROID_VR_UA,
+            visitorData = visitorData,
+            extraClientFields = mapOf(
+                "deviceMake" to "Oculus",
+                "deviceModel" to "Quest 3",
+                "androidSdkVersion" to 32,
+                "osName" to "Android",
+                "osVersion" to "12L"
+            )
+        )
+        if (androidVr.info != null &&
+            (androidVr.info.audioStreams.isNotEmpty() || androidVr.info.muxedStreams.isNotEmpty())
+        ) {
+            return androidVr
+        }
+
+        val ios = resolveViaClient(
+            videoId = videoId,
+            clientName = "IOS",
+            clientVersion = IOS_CLIENT_VERSION,
+            clientNameId = "5",
+            userAgent = IOS_UA,
+            visitorData = visitorData,
+            extraClientFields = mapOf(
+                "deviceMake" to "Apple",
+                "deviceModel" to "iPhone16,2",
+                "osName" to "iPhone",
+                "osVersion" to "18.3.2.22D82"
+            )
+        )
+        if (ios.info != null &&
+            (ios.info.audioStreams.isNotEmpty() || ios.info.muxedStreams.isNotEmpty())
+        ) {
+            return ios
+        }
+
+        val visionOs = resolveViaClient(
+            videoId = videoId,
+            clientName = "VISIONOS",
+            clientVersion = VISIONOS_CLIENT_VERSION,
+            clientNameId = "101",
+            userAgent = VISIONOS_UA,
+            visitorData = visitorData,
+            extraClientFields = mapOf(
+                "deviceMake" to "Apple",
+                "deviceModel" to "RealityDevice17,1",
+                "osName" to "visionOS",
+                "osVersion" to "26.5.23O471"
+            )
+        )
+        if (visionOs.info != null &&
+            (visionOs.info.audioStreams.isNotEmpty() || visionOs.info.muxedStreams.isNotEmpty())
+        ) {
+            return visionOs
+        }
+
+        return ResolveResult(null, androidVr.error ?: ios.error ?: visionOs.error ?: "No direct streams")
     }
 
     // ---- Stream Resolution (Multi-Client InnerTube + Bulletproof yt-dlp Fallback) ----

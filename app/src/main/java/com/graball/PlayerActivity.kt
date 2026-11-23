@@ -45,6 +45,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.graball.youtube.DownloadSheetHelper
 import com.graball.youtube.ThumbnailLoader
 import com.graball.youtube.YouTubeActivity
+import com.graball.youtube.YouTubeInnerTube
 import com.graball.youtube.YouTubePlaybackService
 import com.graball.youtube.YouTubePlaybackState
 import com.graball.youtube.YouTubePlayerActivity
@@ -390,7 +391,21 @@ class PlayerActivity : AppCompatActivity() {
         // Full-Screen Now Playing interactions
         findViewById<View>(R.id.npCollapse).setOnClickListener { closeNowPlayingSheet() }
         findViewById<View>(R.id.npBtnQueue).setOnClickListener { showQueueDialog() }
-        npBtnOpenYoutube.setOnClickListener { openCurrentYouTubeVideo() }
+        npBtnOpenYoutube.setOnClickListener {
+            when (resolveActiveSource()) {
+                ActiveSource.YOUTUBE -> openCurrentYouTubeVideo()
+                ActiveSource.LOCAL -> watchCurrentLocalSongOnYouTube(instantPlay = false)
+                ActiveSource.NONE -> Unit
+            }
+        }
+        npBtnOpenYoutube.setOnLongClickListener {
+            if (resolveActiveSource() == ActiveSource.LOCAL) {
+                watchCurrentLocalSongOnYouTube(instantPlay = true)
+                true
+            } else {
+                false
+            }
+        }
         npPrev.setOnClickListener { handlePrev() }
         npPlayPause.setOnClickListener { handlePlayPause() }
         npNext.setOnClickListener { handleNext() }
@@ -657,7 +672,8 @@ class PlayerActivity : AppCompatActivity() {
         } else {
             "LOCAL MUSIC"
         }
-        npYoutubeBar.visibility = View.GONE
+        npYoutubeBar.visibility = View.VISIBLE
+        npBtnOpenYoutube.text = "📺 Watch on YouTube ↗"
         npTitle.text = title
         npArtist.text = sub
         npPlayPause.setImageResource(playPauseRes)
@@ -725,6 +741,7 @@ class PlayerActivity : AppCompatActivity() {
         // Full-Screen Now Playing with YouTube Audio field
         npSourceLabel.text = "🎧 YOUTUBE AUDIO MODE"
         npYoutubeBar.visibility = View.VISIBLE
+        npBtnOpenYoutube.text = "📺 Watch Video on YouTube ↗"
         npTitle.text = title
         npArtist.text = channel
         npPlayPause.setImageResource(playPauseRes)
@@ -1154,6 +1171,83 @@ class PlayerActivity : AppCompatActivity() {
         startActivity(intent)
         @Suppress("DEPRECATION")
         overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+    }
+
+    /**
+     * Build a clean YouTube search query from the currently playing local
+     * song's ID3 metadata (or cleaned filename), stripping leading track
+     * numbers and noisy tags like "(Official Audio)" or "[320kbps]".
+     */
+    private fun buildLocalSongYouTubeQuery(): String? {
+        val svc = service ?: return null
+        val file = svc.currentFile() ?: return null
+        val meta = svc.currentTrackMeta() ?: cachedLocalMeta
+        val rawTitle = meta?.title?.takeIf { it.isNotBlank() } ?: file.nameWithoutExtension
+        val cleanTitle = rawTitle
+            .replace(Regex("""^\s*\d{1,3}\s*[-._)]\s*"""), "")
+            .replace(Regex("""[\(\[][^)\]]*(?:official|audio|video|lyrics?|hd|4k|hq|320|128|kbps|mp3|m4a|remaster|visualizer|download|www\.|http)[^)\]]*[\)\]]""", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("""\b(?:www\.\S+|https?://\S+|320\s*kbps|128\s*kbps)\b""", RegexOption.IGNORE_CASE), " ")
+            .replace('_', ' ')
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .ifBlank { file.nameWithoutExtension }
+
+        val rawArtist = meta?.artist?.trim().orEmpty()
+        val cleanArtist = if (rawArtist.isNotBlank() &&
+            !rawArtist.equals("<unknown>", ignoreCase = true) &&
+            !rawArtist.equals("unknown", ignoreCase = true) &&
+            !rawArtist.equals("unknown artist", ignoreCase = true) &&
+            !cleanTitle.contains(rawArtist, ignoreCase = true)
+        ) {
+            rawArtist.replace(Regex("""\s+"""), " ").trim()
+        } else {
+            ""
+        }
+        return if (cleanArtist.isNotBlank()) "$cleanArtist $cleanTitle" else cleanTitle
+    }
+
+    private fun watchCurrentLocalSongOnYouTube(instantPlay: Boolean) {
+        val query = buildLocalSongYouTubeQuery() ?: return
+        if (!instantPlay) {
+            startActivity(
+                Intent(this, YouTubeActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    putExtra("start_query", query)
+                }
+            )
+            @Suppress("DEPRECATION")
+            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            return
+        }
+        // Long-press: find #1 YouTube video match and jump straight into YouTubePlayerActivity!
+        Toast.makeText(this, "Finding \"$query\" on YouTube…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val topVideo = try {
+                YouTubeInnerTube.search(query, YouTubeInnerTube.SearchFilter.VIDEOS)
+                    .firstOrNull { !it.isPlaylist }
+            } catch (_: Exception) {
+                null
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (topVideo == null) {
+                    Toast.makeText(this, "Opening YouTube search…", Toast.LENGTH_SHORT).show()
+                    watchCurrentLocalSongOnYouTube(instantPlay = false)
+                    return@runOnUiThread
+                }
+                YouTubePlaybackService.withService(this) { ytSvc ->
+                    ytSvc.playItem(topVideo, audioOnly = false)
+                }
+                startActivity(
+                    Intent(this, YouTubePlayerActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                        putExtra("restore_video", true)
+                    }
+                )
+                @Suppress("DEPRECATION")
+                overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            }
+        }.start()
     }
 
     // ---- Full-Screen Now Playing Sheet Open / Close / Swipe ----

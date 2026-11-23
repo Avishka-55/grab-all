@@ -154,17 +154,14 @@ class YtDlpRunner(
                 }
             }
             try {
-                // Fast-path for YouTube: yt-dlp's default clients include
-                // tv_samsung/web which trigger downloading YouTube's 2.5MB
-                // player.js and solving JS challenges in QuickJS (very slow
-                // on older QuickJS / older phones). Trying visionos alone
-                // first skips JS challenges completely (~1s startup); if
-                // visionos fails (e.g. Made-for-Kids, age-gated, or bot-check),
-                // we automatically fall back to yt-dlp's default clients.
+                // Fast-path for YouTube: try android_vr (direct unfragmented adaptive
+                // streams — no HLS fragment overhead) then visionos (JS-free HLS).
+                // Only fall back to full default clients if fast clients produce
+                // nothing (never restart a partially-completed playlist!).
                 val isYouTube = isYouTubeUrl(url)
                 val attempts: List<List<String>> = if (isYouTube) {
                     listOf(
-                        listOf("--extractor-args", "youtube:player_client=visionos") + extraArgs,
+                        listOf("--extractor-args", "youtube:player_client=android_vr,visionos") + extraArgs,
                         extraArgs
                     )
                 } else {
@@ -241,6 +238,13 @@ class YtDlpRunner(
                     exitCode = proc.waitFor()
                     process = null
                     if (exitCode == 0 || cancelled) {
+                        break
+                    }
+                    // If a playlist already downloaded or skipped tracks on the fast
+                    // client (e.g. 1 private video caused a non-zero exit with -i),
+                    // don't re-run the entire playlist on the slow fallback client.
+                    if (attemptIdx == 0 && (destinations.isNotEmpty() || merged != null || skipped.isNotEmpty())) {
+                        exitCode = 0
                         break
                     }
                 }
@@ -412,6 +416,11 @@ class YtDlpRunner(
             pythonBinary.absolutePath,
             ytDlpScript.absolutePath,
             "--newline",
+            // Multi-fragment & chunked HTTP acceleration (saturates 50+ Mbps
+            // links on HLS/DASH and bypasses per-stream throttling).
+            "--concurrent-fragments", "6",
+            "--http-chunk-size", "10M",
+            "--buffer-size", "16K",
             // Resume resilience: a network switch kills the socket, so
             // let yt-dlp itself retry (from the .part file, in the same
             // staging dir) instead of failing at the first drop, and
