@@ -5,16 +5,21 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.MediaMetadata
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Binder
 import android.os.Build
@@ -22,6 +27,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.view.KeyEvent
 import androidx.core.content.ContextCompat
 import com.graball.youtube.YouTubePlaybackService
 import java.io.File
@@ -127,6 +133,16 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     private var currentMeta: AlbumArtLoader.TrackMeta? = null
     private var externalUri: Uri? = null
     private var externalTitle: String = ""
+    private var mediaSession: MediaSession? = null
+    private var noisyReceiverRegistered = false
+
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                pauseIfPlaying()
+            }
+        }
+    }
 
     inner class PlayerBinder : Binder() {
         fun getService(): PlayerService = this@PlayerService
@@ -147,6 +163,171 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
             }
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .createNotificationChannel(channel)
+        }
+        initMediaSession()
+        try {
+            ContextCompat.registerReceiver(
+                this,
+                noisyReceiver,
+                IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            noisyReceiverRegistered = true
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun initMediaSession() {
+        try {
+            val openApp = PendingIntent.getActivity(
+                this, 0,
+                Intent(this, PlayerActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    putExtra("open_now_playing", true)
+                },
+                pendingIntentFlags()
+            )
+            mediaSession = MediaSession(this, "GrabAllMusic").apply {
+                @Suppress("DEPRECATION")
+                setFlags(
+                    MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
+                        MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+                )
+                setSessionActivity(openApp)
+                setCallback(object : MediaSession.Callback() {
+                    override fun onPlay() {
+                        resume()
+                    }
+
+                    override fun onPause() {
+                        pause()
+                    }
+
+                    override fun onSkipToNext() {
+                        playNext()
+                    }
+
+                    override fun onSkipToPrevious() {
+                        playPrev()
+                    }
+
+                    override fun onStop() {
+                        stopPlayback()
+                    }
+
+                    override fun onSeekTo(pos: Long) {
+                        seekTo(pos.toInt())
+                    }
+
+                    override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                        val ke = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            mediaButtonIntent.getParcelableExtra(
+                                Intent.EXTRA_KEY_EVENT,
+                                KeyEvent::class.java
+                            )
+                        } else {
+                            @Suppress("DEPRECATION")
+                            mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                        }
+                        if (ke != null && ke.action == KeyEvent.ACTION_DOWN) {
+                            when (ke.keyCode) {
+                                KeyEvent.KEYCODE_HEADSETHOOK,
+                                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                                    if (isPlaying()) pause() else resume()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                                    resume()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                                    pause()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                                    playNext()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                                    playPrev()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_STOP -> {
+                                    stopPlayback()
+                                    return true
+                                }
+                            }
+                        }
+                        return super.onMediaButtonEvent(mediaButtonIntent)
+                    }
+                }, mainHandler)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun syncMediaSession() {
+        val session = mediaSession ?: return
+        if (!hasLoadedTrack()) {
+            try {
+                session.setPlaybackState(
+                    PlaybackState.Builder()
+                        .setState(PlaybackState.STATE_STOPPED, 0L, 0f)
+                        .build()
+                )
+                session.isActive = false
+            } catch (_: Exception) {
+            }
+            return
+        }
+        val file = currentFile()
+        val meta = currentMeta
+        val displayTitle = meta?.title?.takeIf { it.isNotBlank() }
+            ?: file?.nameWithoutExtension
+            ?: externalTitle.takeIf { it.isNotBlank() }
+            ?: "GrabAll Music"
+        val displayArtist = meta?.artist?.takeIf { it.isNotBlank() }
+            ?: folderLabel.takeIf { it.isNotBlank() }
+            ?: "GrabAll Music"
+        val displayAlbum = meta?.album?.takeIf { it.isNotBlank() } ?: folderLabel
+        val durMs = duration().toLong().coerceAtLeast(0L)
+        val posMs = position().toLong().coerceAtLeast(0L)
+        val playing = isPlaying()
+        val preparing = !isPrepared && player != null
+
+        try {
+            val mdBuilder = MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, displayTitle)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, displayArtist)
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, displayAlbum)
+            if (durMs > 0L) {
+                mdBuilder.putLong(MediaMetadata.METADATA_KEY_DURATION, durMs)
+            }
+            currentArt?.let { mdBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, it) }
+            session.setMetadata(mdBuilder.build())
+
+            val pbState = when {
+                playing -> PlaybackState.STATE_PLAYING
+                preparing -> PlaybackState.STATE_BUFFERING
+                else -> PlaybackState.STATE_PAUSED
+            }
+            val actions = PlaybackState.ACTION_PLAY or
+                PlaybackState.ACTION_PAUSE or
+                PlaybackState.ACTION_PLAY_PAUSE or
+                PlaybackState.ACTION_SKIP_TO_NEXT or
+                PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackState.ACTION_STOP or
+                PlaybackState.ACTION_SEEK_TO
+            session.setPlaybackState(
+                PlaybackState.Builder()
+                    .setActions(actions)
+                    .setState(pbState, posMs, if (playing) 1.0f else 0f)
+                    .build()
+            )
+            if (!session.isActive) {
+                session.isActive = true
+            }
+        } catch (_: Exception) {
         }
     }
 
@@ -190,6 +371,16 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     override fun onDestroy() {
         persistLastPlayed()
         releasePlayer(abandonAudioFocus = true)
+        if (noisyReceiverRegistered) {
+            noisyReceiverRegistered = false
+            try { unregisterReceiver(noisyReceiver) } catch (_: Exception) { }
+        }
+        try {
+            mediaSession?.isActive = false
+            mediaSession?.release()
+        } catch (_: Exception) {
+        }
+        mediaSession = null
         artExecutor.shutdownNow()
         if (instance === this) instance = null
         super.onDestroy()
@@ -256,6 +447,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     fun seekTo(ms: Int) {
         if (!isPrepared) return
         try { player?.seekTo(ms.coerceAtLeast(0)) } catch (_: Exception) { }
+        syncMediaSession()
     }
 
     fun pause() {
@@ -536,6 +728,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         currentArtPath = null
         currentArt = null
         currentMeta = null
+        syncMediaSession()
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -724,8 +917,12 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
             .setStyle(
                 Notification.MediaStyle()
                     .setShowActionsInCompactView(0, 1, 2)
+                    .also { style ->
+                        mediaSession?.sessionToken?.let { style.setMediaSession(it) }
+                    }
             )
         currentArt?.let { builder.setLargeIcon(it) }
+        syncMediaSession()
         return builder.build()
     }
 
