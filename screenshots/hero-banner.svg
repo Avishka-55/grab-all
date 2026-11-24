@@ -73,21 +73,21 @@
     </text>
 
     <text x="226" y="176" font-family="Segoe UI, -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif" font-size="21" font-weight="500" fill="#CBD5E1">
-      High-Speed Android Downloader · Ad-Free YouTube · Offline Music Player
+      1,750+ Sites Downloader · Ad-Free YouTube · Offline Music Player
     </text>
 
     <g transform="translate(226, 202)" font-family="Segoe UI, -apple-system, Roboto, sans-serif" font-size="13.5" font-weight="600">
-      <rect x="0" y="0" width="166" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#FF7A00" stroke-opacity="0.45"/>
-      <text x="83" y="21" text-anchor="middle" fill="#FFE4CC">Parallel Playlists</text>
+      <rect x="0" y="0" width="152" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#FF7A00" stroke-opacity="0.45"/>
+      <text x="76" y="21" text-anchor="middle" fill="#FFE4CC">1,750+ Sites</text>
 
-      <rect x="178" y="0" width="162" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#FF477E" stroke-opacity="0.45"/>
-      <text x="259" y="21" text-anchor="middle" fill="#FFD6E5">Ad-Free YouTube</text>
+      <rect x="164" y="0" width="166" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#FF477E" stroke-opacity="0.45"/>
+      <text x="247" y="21" text-anchor="middle" fill="#FFD6E5">Ad-Free YouTube</text>
 
-      <rect x="352" y="0" width="176" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#A855F7" stroke-opacity="0.45"/>
-      <text x="440" y="21" text-anchor="middle" fill="#E9D5FF">20+ Audio Formats</text>
+      <rect x="342" y="0" width="176" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#A855F7" stroke-opacity="0.45"/>
+      <text x="430" y="21" text-anchor="middle" fill="#E9D5FF">20+ Audio Formats</text>
 
-      <rect x="540" y="0" width="142" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#22C55E" stroke-opacity="0.45"/>
-      <text x="611" y="21" text-anchor="middle" fill="#DCFCE7">100% On-Device</text>
+      <rect x="530" y="0" width="146" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#22C55E" stroke-opacity="0.45"/>
+      <text x="603" y="21" text-anchor="middle" fill="#DCFCE7">100% On-Device</text>
     </g>
 
     <g transform="translate(996, 98)">

@@ -5,13 +5,14 @@
 <br/><br/>
 
 [![Latest Release](https://img.shields.io/github/v/release/Avishka-55/grab-all?style=for-the-badge&color=FF6B00&labelColor=141625&logo=android&logoColor=white)](https://github.com/Avishka-55/grab-all/releases/latest)
+[![Supported Sites](https://img.shields.io/badge/Supported%20Sites-1%2C750%2B-A855F7?style=for-the-badge&labelColor=141625)](#supported-platforms-1750-sites)
 [![Android CI](https://img.shields.io/github/actions/workflow/status/Avishka-55/grab-all/android.yml?style=for-the-badge&label=Android%20CI&labelColor=141625&logo=githubactions&logoColor=white)](https://github.com/Avishka-55/grab-all/actions/workflows/android.yml)
 [![Android 5.0–16](https://img.shields.io/badge/Android-5.0%20%E2%80%93%2016%20(API%2021%2B)-22C55E?style=for-the-badge&labelColor=141625&logo=android&logoColor=white)](#download--install)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-FF2E93?style=for-the-badge&labelColor=141625)](LICENSE)
 
 <br/>
 
-**A fast, privacy-first, all-in-one Android media downloader, ad-free YouTube client, offline Music Player with live synced lyrics, and WhatsApp Status saver.**  
+**Download videos, reels, audio, and playlists from 1,750+ websites on Android — paired with an ad-free YouTube client, offline Music Player with live synced lyrics, and WhatsApp Status saver.**  
 *100% on-device · Zero ads · Zero servers · Zero tracking · Works on 32-bit ARMv7 & 64-bit ARM64*
 
 <br/>
@@ -55,19 +56,43 @@
 
 ---
 
+## 🌐 Supported Platforms (1,750+ Sites)
+
+Paste any link, share directly from another app (**Share → GrabAll**), or browse inside GrabAll's built-in Quick Sites browser — downloads are automatically organized into per-platform folders under `Downloads/GrabAll/` (created only when you download from that platform).
+
+<div align="center">
+
+| Platform | What You Can Grab | Saved Folder |
+| :--- | :--- | :--- |
+| **YouTube & YT Music** | Videos (up to 4K/H.264 MP4), Shorts, Audio (Fast M4A / MP3), Full or Selected Playlists | `YouTube/Video/`, `YouTube/Audio/`, `YouTube/<Playlist>/` |
+| **TikTok** | Short videos & audio | `TikTok/` |
+| **Instagram** | Reels, videos, posts & audio | `Instagram/` |
+| **Facebook** | Public videos, Reels & Watch clips | `Facebook/` |
+| **X (Twitter)** | Videos, GIFs & Spaces audio | `X/` |
+| **Reddit** | Videos with merged audio (`v.redd.it`) | `Reddit/` |
+| **SoundCloud** | Tracks, sets & playlists | `SoundCloud/` |
+| **Twitch · Vimeo · Dailymotion** | VODs, clips & HD videos | `Twitch/`, `Vimeo/`, `Dailymotion/` |
+| **Pinterest · Threads · Snapchat** | Pins, reels & clips | `Pinterest/`, `Threads/`, `Snapchat/` |
+| **WhatsApp Status** | Built-in 60fps viewer & 1-tap photo/video saver | `WhatsApp Status/` |
+| **+ 1,740 More Sites** | Any site supported by the bundled self-updating **`yt-dlp`** engine (1,755 extractors) | `Other/` |
+
+</div>
+
+---
+
 ## 🚀 Key Features
 
 <table>
 <tr>
 <td width="50%" valign="top">
 
-### ⚡ High-Speed Download Engine
-- **Unthrottled Multi-Connection Chunking:** Uses GoogleVideo's native `&range=start-end` (`1–2 MB` chunks) across parallel connections for **all** YouTube single videos, audio, and playlists.
-- **Parallel Playlist Pipeline:** Downloads multiple tracks simultaneously (`Auto / 1–6` configurable in Settings) while encoding/muxing in a separate pool so Wi-Fi stays saturated.
-- **Fast M4A (Default) & Universal MP3:** Zero-transcode `ffmpeg -c:a copy` M4A saves playlists ~10× faster with original AAC quality + embedded cover art & tags; switch to **MP3** anytime in Settings.
+### ⚡ Multi-Site & High-Speed Download Engine
+- **1,750+ Websites Built In:** Bundled **CPython 3.13 + `yt-dlp` + QuickJS + FFmpeg** runs 100% locally on your phone for TikTok, Instagram, Facebook, X, Reddit, SoundCloud, Vimeo, Twitch, YouTube, and 1,740+ other sites.
+- **Unthrottled Multi-Connection Chunking:** Native Kotlin accelerator uses `&range=start-end` (`1–2 MB` chunks) across parallel connections plus `-N 6` fragmented downloads for full Wi-Fi speed.
+- **Parallel Playlist Pipeline:** Downloads multiple tracks simultaneously (`Auto / 1–6` configurable in Settings) while encoding/muxing in a separate pool so Wi-Fi never stalls.
+- **Fast M4A (Default) & Universal MP3:** Zero-transcode `ffmpeg -c:a copy` M4A saves audio ~10× faster with original AAC quality + embedded cover art & tags; switch to **MP3** anytime in Settings.
 - **Interactive Playlist Item Picker:** Filter, search, and hand-pick exact songs or videos from any playlist before downloading.
-- **Pause, Resume & Screen-Off Persistence:** Partial `.part` resume, `WakeLock` + `WifiLock`, and resilient network-blip recovery.
-- **Multi-Site Support:** Powered by bundled **CPython 3.13 + `yt-dlp` + QuickJS + FFmpeg** for YouTube, TikTok, Instagram, Facebook, X, Reddit, SoundCloud, Vimeo, and 1000+ sites.
+- **Pause, Resume & Screen-Off Persistence:** Partial `.part` resume, `WakeLock` + `WifiLock`, Android Share Sheet integration, and resilient network-blip recovery.
 
 </td>
 <td width="50%" valign="top">
