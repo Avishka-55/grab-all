@@ -6,7 +6,7 @@
 
 [![Latest Release](https://img.shields.io/github/v/release/Avishka-55/grab-all?style=for-the-badge&color=FF6B00&labelColor=141625&logo=android&logoColor=white)](https://github.com/Avishka-55/grab-all/releases/latest)
 [![Supported Sites](https://img.shields.io/badge/Supported_Sites-1750%2B-A855F7?style=for-the-badge&labelColor=141625)](#supported-platforms)
-[![Android CI](https://img.shields.io/github/actions/workflow/status/Avishka-55/grab-all/android.yml?style=for-the-badge&label=Android_CI&labelColor=141625&logo=githubactions&logoColor=white)](https://github.com/Avishka-55/grab-all/actions/workflows/android.yml)
+<a href="https://github.com/Avishka-55/grab-all/actions/workflows/android.yml"><img src="https://github.com/Avishka-55/grab-all/actions/workflows/android.yml/badge.svg" height="28" alt="Android CI" /></a>
 [![Android 5.0–16](https://img.shields.io/badge/Android-5.0%20%E2%80%93%2016%20(API%2021%2B)-22C55E?style=for-the-badge&labelColor=141625&logo=android&logoColor=white)](#download--install)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-FF2E93?style=for-the-badge&labelColor=141625)](LICENSE)
 
