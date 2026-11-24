@@ -167,7 +167,7 @@ object AppUpdateChecker {
                 if (version.isBlank()) return null
                 AppRelease(
                     version = version,
-                    apkUrl = "https://github.com/$REPO/releases/download/$tag/app-release.apk",
+                    apkUrl = "https://github.com/$REPO/releases/download/$tag/GrabAll-$tag.apk",
                     sizeBytes = 0L,
                     isNewer = isVersionNewer(version, current),
                     currentVersion = current

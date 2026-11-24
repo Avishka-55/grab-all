@@ -140,7 +140,7 @@ Paste any link, share directly from another app (**Share → GrabAll**), or brow
 GrabAll is distributed directly via GitHub Releases (not on Google Play).
 
 1. Open the **[Latest Release](https://github.com/Avishka-55/grab-all/releases/latest)** page.
-2. Download `app-release.apk` (universal signed APK for both **ARM64** & **ARMv7 32-bit**).
+2. Download `GrabAll-vX.Y.Z.apk` (universal signed APK for both **ARM64** & **ARMv7 32-bit**).
 3. Install the APK on your Android device *(allow "Install unknown apps" for your browser or file manager if prompted)*.
 
 | Requirement | Details |

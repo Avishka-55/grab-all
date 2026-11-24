@@ -6,6 +6,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.graball.engine.RuntimePaths
@@ -13,6 +15,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -24,25 +27,33 @@ import java.util.zip.ZipInputStream
  * Persistent, in-memory YouTube JS (`sig` + `n`) solver powered by Android's
  * built-in Chromium WebView (V8 JIT engine).
  *
- * Why this is ~30x-100x faster than spawning yt-dlp + QuickJS on VPN:
- * - Android System WebView runs Google's V8 JIT engine on a background renderer
- *   thread (never blocking the Android UI thread).
- * - Fetches the ~1 KB `iframe_api` to find YouTube's active `player_id` and
- *   downloads `base.js` + `signatureTimestamp` ONCE per player version.
- * - Uses the bundled `yt-dlp-ejs` (`lib.min.js` + `core.min.js`) to preprocess
- *   `base.js` ONCE (~1-2s in V8 JIT), caches the preprocessed player to disk
- *   (`filesDir/yt-v8-cache/`), and keeps `window.__ytSolver = { n, sig }` live
- *   in V8 memory across videos.
- * - Every subsequent video resolves all `sig` and `n` challenges in < 10 ms
- *   with zero CPython startup, zero QuickJS subprocesses, and zero 1 MB watch
- *   webpage downloads.
+ * Key design details for Android WebView reliability:
+ * - Tries player JS variants in priority order (`tv-player-ias.js` ->
+ *   `player_es6` -> `player_ias`) because YouTube A/B players like `b485e332`
+ *   crash `yt-dlp-ejs` on `player_ias` while `tv-player-ias` and `player_es6`
+ *   succeed cleanly.
+ * - Serves multi-megabyte scripts (`base.js`, `lib.min.js`, `core.min.js`,
+ *   cached `preprocessed.js`) via `shouldInterceptRequest` (`fetch()`) instead
+ *   of `@JavascriptInterface` return values, and streams `preprocessed_player`
+ *   back in 256 KB chunks — completely avoiding Android WebView IPC/Binder
+ *   transaction size limits.
+ * - Compiles ONCE (~1-2s cold in V8 JIT, ~150ms warm from disk cache) and
+ *   solves all `sig` + `n` challenges in **< 10 ms** per video in RAM.
  */
 object YouTubeJsSolver {
 
     private const val TAG = "YouTubeJsSolver"
+    private const val VIRTUAL_HOST = "graball-solver.local"
+    private const val VIRTUAL_ORIGIN = "https://$VIRTUAL_HOST/"
     private const val PLAYER_REFRESH_INTERVAL_MS = 30L * 60L * 1000L
     private const val WEB_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+    private val PLAYER_VARIANTS = listOf(
+        "tv-player-ias.vflset/tv-player-ias.js",
+        "player_es6.vflset/en_US/base.js",
+        "player_ias.vflset/en_US/base.js"
+    )
 
     data class ReadyInfo(
         val playerId: String,
@@ -71,18 +82,22 @@ object YouTubeJsSolver {
     @Volatile
     private var lastCheckedAtMs: Long = 0L
 
-    // Temporary bridge payloads cleared immediately after WebView reads them.
     @Volatile
-    private var pendingLibJs: String = ""
+    var lastError: String = ""
+        private set
+
+    // Served to the hidden WebView via shouldInterceptRequest (zero IPC size limit).
+    @Volatile
+    private var servedLibBytes: ByteArray = ByteArray(0)
 
     @Volatile
-    private var pendingCoreJs: String = ""
+    private var servedCoreBytes: ByteArray = ByteArray(0)
 
     @Volatile
-    private var pendingPlayerJs: String = ""
+    private var servedPlayerBytes: ByteArray = ByteArray(0)
 
     @Volatile
-    private var pendingCachedPreprocessed: String = ""
+    private var servedCachedPreprocessedBytes: ByteArray = ByteArray(0)
 
     @Volatile
     private var initLatch: CountDownLatch? = null
@@ -91,10 +106,9 @@ object YouTubeJsSolver {
     private var initOk: Boolean = false
 
     @Volatile
-    private var initPreprocessedOutput: String = ""
-
-    @Volatile
     private var initError: String = ""
+
+    private val preprocessedBuf = StringBuilder()
 
     private val solvePayloads = ConcurrentHashMap<String, String>()
     private val solveLatches = ConcurrentHashMap<String, CountDownLatch>()
@@ -102,27 +116,23 @@ object YouTubeJsSolver {
 
     private val jsBridge = object {
         @JavascriptInterface
-        fun getLibJs(): String = pendingLibJs
-
-        @JavascriptInterface
-        fun getCoreJs(): String = pendingCoreJs
-
-        @JavascriptInterface
-        fun getPlayerJs(): String = pendingPlayerJs
-
-        @JavascriptInterface
-        fun getCachedPreprocessed(): String = pendingCachedPreprocessed
-
-        @JavascriptInterface
-        fun onInitDone(ok: Boolean, payloadOrError: String) {
-            initOk = ok
-            if (ok) {
-                initPreprocessedOutput = payloadOrError
-                initError = ""
-            } else {
-                initPreprocessedOutput = ""
-                initError = payloadOrError
+        fun beginPreprocessed() {
+            synchronized(preprocessedBuf) {
+                preprocessedBuf.setLength(0)
             }
+        }
+
+        @JavascriptInterface
+        fun appendPreprocessedChunk(chunk: String) {
+            synchronized(preprocessedBuf) {
+                preprocessedBuf.append(chunk)
+            }
+        }
+
+        @JavascriptInterface
+        fun onInitDone(ok: Boolean, error: String) {
+            initOk = ok
+            initError = if (ok) "" else error
             initLatch?.countDown()
         }
 
@@ -169,8 +179,11 @@ object YouTubeJsSolver {
                 return again
             }
 
-            val playerId = fetchActivePlayerId() ?: return again
-            // If playerId didn't change and solver is already live in memory, just refresh timestamp!
+            val playerId = fetchActivePlayerId()
+            if (playerId == null) {
+                lastError = "iframe_api lookup failed"
+                return again
+            }
             if (!forceRefresh && again != null && again.playerId == playerId && webView != null) {
                 lastCheckedAtMs = System.currentTimeMillis()
                 return again
@@ -182,43 +195,62 @@ object YouTubeJsSolver {
 
             val cachedSts = stsFile.takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
             val cachedPreprocessed = preprocessedFile.takeIf { it.isFile && it.length() > 10_000L }
-                ?.let { runCatching { it.readText() }.getOrNull() }
+                ?.let { runCatching { it.readBytes() }.getOrNull() }
 
             if (!ensureWebViewCreated(context.applicationContext)) {
+                lastError = "Hidden V8 WebView creation failed"
                 return null
             }
 
             // Fast warm-restart path: preprocessed player already cached on disk (~150ms in V8!)
-            if (cachedSts != null && !cachedPreprocessed.isNullOrBlank()) {
+            if (cachedSts != null && cachedPreprocessed != null && cachedPreprocessed.isNotEmpty()) {
                 val ok = loadCachedPreprocessedIntoV8(cachedPreprocessed)
                 if (ok) {
                     val info = ReadyInfo(playerId, cachedSts)
                     readyInfo = info
                     lastCheckedAtMs = System.currentTimeMillis()
+                    lastError = ""
                     Log.d(TAG, "Warm V8 solver loaded from disk cache (pid=$playerId, sts=$cachedSts)")
                     return info
                 }
                 runCatching { preprocessedFile.delete() }
             }
 
-            // Cold path (once per YouTube player version): fetch base.js & preprocess in V8 (~1-2s!)
-            val baseJs = fetchBaseJs(playerId) ?: return null
-            val sts = Regex("""signatureTimestamp:(\d+)""").find(baseJs)?.groupValues?.get(1)?.toIntOrNull()
-                ?: return null
-            val (libJs, coreJs) = loadEjsScripts(context) ?: return null
-
-            val preprocessed = preprocessAndLoadInV8(libJs, coreJs, baseJs) ?: return null
-            runCatching {
-                preprocessedFile.writeText(preprocessed)
-                stsFile.writeText(sts.toString())
-                pruneCacheDir(cacheDir)
+            val (libBytes, coreBytes) = loadEjsScripts(context) ?: run {
+                lastError = "Failed loading bundled yt-dlp-ejs scripts"
+                return null
             }
 
-            val info = ReadyInfo(playerId, sts)
-            readyInfo = info
-            lastCheckedAtMs = System.currentTimeMillis()
-            Log.d(TAG, "Cold V8 solver compiled & cached (pid=$playerId, sts=$sts)")
-            return info
+            // Cold path: try each YouTube player JS variant until one preprocesses cleanly in V8.
+            for (variant in PLAYER_VARIANTS) {
+                val baseJs = fetchPlayerVariant(playerId, variant) ?: continue
+                val sts = Regex("""signatureTimestamp:(\d+)""").find(baseJs)
+                    ?.groupValues?.get(1)?.toIntOrNull()
+                    ?: continue
+
+                val preprocessed = preprocessAndLoadInV8(
+                    libBytes = libBytes,
+                    coreBytes = coreBytes,
+                    playerBytes = baseJs.toByteArray(Charsets.UTF_8)
+                )
+                if (preprocessed != null) {
+                    runCatching {
+                        preprocessedFile.writeText(preprocessed)
+                        stsFile.writeText(sts.toString())
+                        pruneCacheDir(cacheDir)
+                    }
+                    val info = ReadyInfo(playerId, sts)
+                    readyInfo = info
+                    lastCheckedAtMs = System.currentTimeMillis()
+                    lastError = ""
+                    Log.d(TAG, "Cold V8 solver compiled & cached (pid=$playerId, variant=$variant, sts=$sts)")
+                    return info
+                }
+                Log.w(TAG, "Variant $variant failed in V8 ($initError), trying next variant")
+            }
+
+            lastError = initError.ifBlank { "All YouTube player variants failed in V8" }
+            return null
         }
     }
 
@@ -294,14 +326,16 @@ object YouTubeJsSolver {
         }
         val raw = solveResults.remove(reqId)
         if (!finished || raw.isNullOrBlank()) {
-            Log.w(TAG, "V8 solve timed out or returned empty")
+            lastError = "V8 solve timed out"
+            Log.w(TAG, lastError)
             return null
         }
 
         return try {
             val root = JSONObject(raw)
             if (!root.optBoolean("ok", false)) {
-                Log.w(TAG, "V8 solve error: ${root.optString("error")}")
+                lastError = "V8 solve error: ${root.optString("error")}"
+                Log.w(TAG, lastError)
                 return null
             }
             val sigMap = HashMap<String, String>()
@@ -326,7 +360,8 @@ object YouTubeJsSolver {
             }
             SolveResult(sigMap, nMap)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed parsing V8 solve output: ${e.message}")
+            lastError = "V8 solve parse error: ${e.message}"
+            Log.w(TAG, lastError)
             null
         }
     }
@@ -348,6 +383,30 @@ object YouTubeJsSolver {
                 wv.settings.domStorageEnabled = false
                 wv.addJavascriptInterface(jsBridge, "GrabAllBridge")
                 wv.webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(
+                        view: WebView,
+                        request: WebResourceRequest
+                    ): WebResourceResponse? {
+                        val uri = request.url
+                        if (uri.host == VIRTUAL_HOST) {
+                            val bytes = when (uri.path) {
+                                "/lib.js" -> servedLibBytes
+                                "/core.js" -> servedCoreBytes
+                                "/base.js" -> servedPlayerBytes
+                                "/cached.js" -> servedCachedPreprocessedBytes
+                                else -> null
+                            }
+                            if (bytes != null) {
+                                return WebResourceResponse(
+                                    "text/plain",
+                                    "utf-8",
+                                    ByteArrayInputStream(bytes)
+                                )
+                            }
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+
                     override fun onPageFinished(view: WebView, url: String) {
                         if (!created) {
                             created = true
@@ -357,7 +416,7 @@ object YouTubeJsSolver {
                 }
                 webView = wv
                 wv.loadDataWithBaseURL(
-                    "https://www.youtube.com/",
+                    VIRTUAL_ORIGIN,
                     "<!doctype html><html><body></body></html>",
                     "text/html",
                     "utf-8",
@@ -375,18 +434,19 @@ object YouTubeJsSolver {
         }
     }
 
-    private fun loadCachedPreprocessedIntoV8(preprocessed: String): Boolean {
+    private fun loadCachedPreprocessedIntoV8(preprocessedBytes: ByteArray): Boolean {
         val wv = webView ?: return false
-        pendingCachedPreprocessed = preprocessed
+        servedCachedPreprocessedBytes = preprocessedBytes
         val latch = CountDownLatch(1)
         initLatch = latch
         initOk = false
         initError = ""
 
         val js = """
-            setTimeout(function() {
+            (async function() {
               try {
-                var pp = GrabAllBridge.getCachedPreprocessed();
+                var resp = await fetch("${VIRTUAL_ORIGIN}cached.js");
+                var pp = await resp.text();
                 var s = { n: null, sig: null };
                 Function("_result", pp)(s);
                 if (!s.sig || !s.n) {
@@ -398,7 +458,7 @@ object YouTubeJsSolver {
               } catch (e) {
                 GrabAllBridge.onInitDone(false, String(e));
               }
-            }, 0);
+            })();
         """.trimIndent()
 
         mainHandler.post {
@@ -415,7 +475,7 @@ object YouTubeJsSolver {
         } catch (_: InterruptedException) {
             false
         } finally {
-            pendingCachedPreprocessed = ""
+            servedCachedPreprocessedBytes = ByteArray(0)
             initLatch = null
         }
         if (!done || !initOk) {
@@ -426,32 +486,37 @@ object YouTubeJsSolver {
     }
 
     private fun preprocessAndLoadInV8(
-        libJs: String,
-        coreJs: String,
-        baseJs: String
+        libBytes: ByteArray,
+        coreBytes: ByteArray,
+        playerBytes: ByteArray
     ): String? {
         val wv = webView ?: return null
-        pendingLibJs = libJs
-        pendingCoreJs = coreJs
-        pendingPlayerJs = baseJs
+        servedLibBytes = libBytes
+        servedCoreBytes = coreBytes
+        servedPlayerBytes = playerBytes
+        synchronized(preprocessedBuf) {
+            preprocessedBuf.setLength(0)
+        }
         val latch = CountDownLatch(1)
         initLatch = latch
         initOk = false
-        initPreprocessedOutput = ""
         initError = ""
 
         val js = """
-            setTimeout(function() {
+            (async function() {
               try {
                 if (!window.__ejsLoaded) {
-                  (0, eval)(GrabAllBridge.getLibJs());
+                  var libText = await (await fetch("${VIRTUAL_ORIGIN}lib.js")).text();
+                  (0, eval)(libText);
                   Object.assign(globalThis, lib);
-                  (0, eval)(GrabAllBridge.getCoreJs());
+                  var coreText = await (await fetch("${VIRTUAL_ORIGIN}core.js")).text();
+                  (0, eval)(coreText);
                   window.__ejsLoaded = true;
                 }
+                var playerText = await (await fetch("${VIRTUAL_ORIGIN}base.js")).text();
                 var res = jsc({
                   type: "player",
-                  player: GrabAllBridge.getPlayerJs(),
+                  player: playerText,
                   requests: [],
                   output_preprocessed: true
                 });
@@ -459,18 +524,24 @@ object YouTubeJsSolver {
                   GrabAllBridge.onInitDone(false, res ? String(res.error || "empty") : "null_res");
                   return;
                 }
+                var pp = res.preprocessed_player;
                 var s = { n: null, sig: null };
-                Function("_result", res.preprocessed_player)(s);
+                Function("_result", pp)(s);
                 if (!s.sig || !s.n) {
                   GrabAllBridge.onInitDone(false, "missing_sig_or_n");
                   return;
                 }
                 window.__ytSolver = s;
-                GrabAllBridge.onInitDone(true, res.preprocessed_player);
+                GrabAllBridge.beginPreprocessed();
+                var chunkSize = 262144;
+                for (var i = 0; i < pp.length; i += chunkSize) {
+                  GrabAllBridge.appendPreprocessedChunk(pp.slice(i, i + chunkSize));
+                }
+                GrabAllBridge.onInitDone(true, "");
               } catch (e) {
                 GrabAllBridge.onInitDone(false, String(e));
               }
-            }, 0);
+            })();
         """.trimIndent()
 
         mainHandler.post {
@@ -487,17 +558,22 @@ object YouTubeJsSolver {
         } catch (_: InterruptedException) {
             false
         } finally {
-            pendingLibJs = ""
-            pendingCoreJs = ""
-            pendingPlayerJs = ""
+            servedLibBytes = ByteArray(0)
+            servedCoreBytes = ByteArray(0)
+            servedPlayerBytes = ByteArray(0)
             initLatch = null
         }
 
-        if (!done || !initOk || initPreprocessedOutput.isBlank()) {
+        if (!done || !initOk) {
             Log.w(TAG, "Cold V8 preprocess failed: $initError")
+            synchronized(preprocessedBuf) { preprocessedBuf.setLength(0) }
             return null
         }
-        return initPreprocessedOutput.also { initPreprocessedOutput = "" }
+        return synchronized(preprocessedBuf) {
+            val out = preprocessedBuf.toString()
+            preprocessedBuf.setLength(0)
+            out.takeIf { it.isNotBlank() }
+        }
     }
 
     private fun fetchActivePlayerId(): String? {
@@ -517,8 +593,8 @@ object YouTubeJsSolver {
         }
     }
 
-    private fun fetchBaseJs(playerId: String): String? {
-        val url = "https://www.youtube.com/s/player/$playerId/player_ias.vflset/en_US/base.js"
+    private fun fetchPlayerVariant(playerId: String, variant: String): String? {
+        val url = "https://www.youtube.com/s/player/$playerId/$variant"
         return try {
             val req = Request.Builder()
                 .url(url)
@@ -529,37 +605,32 @@ object YouTubeJsSolver {
                 resp.body?.string()?.takeIf { it.length > 100_000 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed fetching base.js ($playerId): ${e.message}")
+            Log.w(TAG, "Failed fetching $variant ($playerId): ${e.message}")
             null
         }
     }
 
-    /**
-     * Loads `lib.min.js` and `core.min.js` from extracted runtime files if
-     * available, otherwise directly from the bundled `runtime/ytdlp.zip` asset
-     * (so V8 works even before Python runtime extraction has ever run!).
-     */
-    private fun loadEjsScripts(context: Context): Pair<String, String>? {
+    private fun loadEjsScripts(context: Context): Pair<ByteArray, ByteArray>? {
         val extractedDir = File(RuntimePaths.ytDlpBundleDir(context), "yt_dlp_ejs/yt/solver")
         val libFile = File(extractedDir, "lib.min.js")
         val coreFile = File(extractedDir, "core.min.js")
         if (libFile.isFile && coreFile.isFile) {
-            val lib = runCatching { libFile.readText() }.getOrNull()
-            val core = runCatching { coreFile.readText() }.getOrNull()
-            if (!lib.isNullOrBlank() && !core.isNullOrBlank()) {
+            val lib = runCatching { libFile.readBytes() }.getOrNull()
+            val core = runCatching { coreFile.readBytes() }.getOrNull()
+            if (lib != null && lib.isNotEmpty() && core != null && core.isNotEmpty()) {
                 return lib to core
             }
         }
 
-        var lib: String? = null
-        var core: String? = null
+        var lib: ByteArray? = null
+        var core: ByteArray? = null
         try {
             ZipInputStream(context.assets.open("runtime/ytdlp.zip").buffered()).use { zis ->
                 var entry = zis.nextEntry
                 while (entry != null) {
                     when (entry.name) {
-                        "yt_dlp_ejs/yt/solver/lib.min.js" -> lib = zis.readBytes().toString(Charsets.UTF_8)
-                        "yt_dlp_ejs/yt/solver/core.min.js" -> core = zis.readBytes().toString(Charsets.UTF_8)
+                        "yt_dlp_ejs/yt/solver/lib.min.js" -> lib = zis.readBytes()
+                        "yt_dlp_ejs/yt/solver/core.min.js" -> core = zis.readBytes()
                     }
                     if (lib != null && core != null) break
                     entry = zis.nextEntry
@@ -568,7 +639,13 @@ object YouTubeJsSolver {
         } catch (e: Exception) {
             Log.w(TAG, "Failed reading ejs scripts from assets: ${e.message}")
         }
-        return if (!lib.isNullOrBlank() && !core.isNullOrBlank()) lib!! to core!! else null
+        val finalLib = lib
+        val finalCore = core
+        return if (finalLib != null && finalLib.isNotEmpty() && finalCore != null && finalCore.isNotEmpty()) {
+            finalLib to finalCore
+        } else {
+            null
+        }
     }
 
     private fun pruneCacheDir(dir: File) {

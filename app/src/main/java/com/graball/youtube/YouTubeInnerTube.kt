@@ -746,7 +746,10 @@ object YouTubeInnerTube {
         includeHlsFallback: Boolean
     ): ResolveResult {
         var ready = YouTubeJsSolver.ensureReady(context)
-            ?: return ResolveResult(null, "V8 JS solver unavailable")
+            ?: return ResolveResult(
+                null,
+                "V8 JS solver unavailable (${YouTubeJsSolver.lastError.ifBlank { "unknown" }})"
+            )
 
         var root = requestTvSamsungPlayer(videoId, visitorData, ready.signatureTimestamp, authHeaders)
         val firstStatus = root?.optJSONObject("playabilityStatus")?.optString("status").orEmpty()

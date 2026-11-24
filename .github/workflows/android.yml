@@ -84,11 +84,13 @@ jobs:
         run: |
           APK=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" "$APK" --title "$TAG" --notes "GrabAll $TAG"
+          NAMED_APK="app/build/outputs/apk/release/GrabAll-${TAG}.apk"
+          cp "$APK" "$NAMED_APK"
+          gh release create "$TAG" "$NAMED_APK" --title "$TAG" --notes "GrabAll $TAG"
       - name: Upload release APK
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: graball-release
-          path: app/build/outputs/apk/release/*.apk
+          path: app/build/outputs/apk/release/GrabAll-*.apk
           retention-days: 3

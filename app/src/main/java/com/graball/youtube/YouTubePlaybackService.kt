@@ -147,10 +147,10 @@ class YouTubePlaybackService : MediaSessionService() {
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                15_000, // minBufferMs
-                30_000, // maxBufferMs
-                1_500,  // bufferForPlaybackMs
-                3_000   // bufferForPlaybackAfterRebufferMs
+                25_000, // minBufferMs (25s smooth cushion on VPN)
+                60_000, // maxBufferMs (buffer up to 60s ahead via fast 2MB chunks)
+                1_500,  // bufferForPlaybackMs (fast start)
+                2_500   // bufferForPlaybackAfterRebufferMs
             )
             .build()
 
@@ -712,14 +712,18 @@ class YouTubePlaybackService : MediaSessionService() {
             .setConnectTimeoutMs(12_000)
             .setReadTimeoutMs(15_000)
 
+        // Wrap GoogleVideo requests in 2 MB bounded `&range=start-end` chunks to
+        // completely bypass YouTube's single-connection throttle on VPN/tv_samsung.
+        val chunkedFactory = YouTubeChunkedDataSource.Factory(httpFactory)
+
         // Wrap upstream HTTP with a bounded 40 MB LRU disk cache so replays,
         // loops, and backward seeks use zero extra network data.
         val dsFactory: DataSource.Factory = getOrCreateMediaCache(applicationContext)?.let { cache ->
             CacheDataSource.Factory()
                 .setCache(cache)
-                .setUpstreamDataSourceFactory(httpFactory)
+                .setUpstreamDataSourceFactory(chunkedFactory)
                 .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-        } ?: httpFactory
+        } ?: chunkedFactory
 
         val meta = MediaMetadata.Builder()
             .setTitle(info.title)
