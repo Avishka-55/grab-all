@@ -55,7 +55,9 @@ data class VideoStreamInfo(
     val audioStreams: List<StreamFormat>,
     val muxedStreams: List<StreamFormat>,
     val userAgent: String,
-    val captionTracks: List<CaptionTrack> = emptyList()
+    val captionTracks: List<CaptionTrack> = emptyList(),
+    /** Raw `streamingData` JSON captured from WebView for async V8 HD upgrade when cold. */
+    val pendingStreamingDataJson: String? = null
 ) {
     /** Distinct playable video heights sorted descending (e.g. 1080, 720, 480, 360). */
     fun availableHeights(): List<Int> {
@@ -79,7 +81,7 @@ data class VideoStreamInfo(
      * strictly preferring H.264 (avc1) first — NOT generic "mp4" which also
      * matches AV1 (av01) that older 32-bit devices cannot decode in hardware.
      */
-    fun pickVideoStream(targetHeight: Int?): StreamFormat? {
+    fun pickVideoStream(targetHeight: Int?, forDownload: Boolean = false): StreamFormat? {
         if (videoStreams.isEmpty()) return null
         val preferred = videoStreams.filter {
             it.mimeType.contains("avc1", ignoreCase = true)
@@ -89,10 +91,15 @@ data class VideoStreamInfo(
             videoStreams
         }
         return if (targetHeight == null) {
-            // Auto: pick 720p max for fast startup and smooth playback on all devices
-            preferred.filter { it.height in 1..720 }
-                .maxByOrNull { it.height * 10_000L + it.bitrate }
-                ?: preferred.minByOrNull { it.height }
+            if (forDownload) {
+                // Best download: pick true highest available resolution (1080p/1440p/4K)
+                preferred.maxByOrNull { it.height * 10_000L + it.bitrate }
+            } else {
+                // Player Auto: pick 720p max for fast startup and smooth playback on all devices
+                preferred.filter { it.height in 1..720 }
+                    .maxByOrNull { it.height * 10_000L + it.bitrate }
+                    ?: preferred.minByOrNull { it.height }
+            }
         } else {
             preferred.filter { it.height in 1..targetHeight }
                 .maxByOrNull { it.height * 10_000L + it.bitrate }

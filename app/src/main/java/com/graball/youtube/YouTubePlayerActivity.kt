@@ -409,15 +409,20 @@ class YouTubePlayerActivity : AppCompatActivity() {
             playerErrorRow.visibility = View.GONE
         }
 
-        val qualityText = if (state.isAudioOnly) {
-            "⚙ Audio"
-        } else if (state.selectedHeight != null) {
-            "⚙ ${state.selectedHeight}p"
-        } else {
-            "⚙ Auto"
+        val actualHeight = state.activeVideoHeight
+        val topQualityText = when {
+            state.isAudioOnly -> "⚙ Audio"
+            actualHeight != null -> "⚙ ${actualHeight}p"
+            else -> "⚙ Auto"
         }
-        actionQuality.text = qualityText
-        btnTopQuality.text = qualityText
+        val chipQualityText = when {
+            state.isAudioOnly -> "⚙ Audio"
+            actualHeight != null && state.selectedHeight == null -> "⚙ Auto (${actualHeight}p)"
+            actualHeight != null -> "⚙ ${actualHeight}p"
+            else -> "⚙ Auto"
+        }
+        actionQuality.text = chipQualityText
+        btnTopQuality.text = topQualityText
 
         actionSpeed.text = "${trimSpeed(state.playbackSpeed)}×"
 
@@ -938,12 +943,23 @@ class YouTubePlayerActivity : AppCompatActivity() {
         val heights = svc.availableVideoHeights()
             .ifEmpty { listOf(1080, 720, 480, 360) }
         val state = YouTubePlaybackService.currentState
+        val activeH = state.activeVideoHeight
+        val effectiveCheckedH = when {
+            state.isAudioOnly || state.selectedHeight == null -> null
+            state.selectedHeight in heights -> state.selectedHeight
+            activeH != null && activeH in heights -> activeH
+            else -> null
+        }
         val labels = mutableListOf(
-            if (!state.isAudioOnly && state.selectedHeight == null) "✓ Auto" else "Auto",
+            if (!state.isAudioOnly && state.selectedHeight == null) {
+                if (activeH != null) "✓ Auto (${activeH}p)" else "✓ Auto"
+            } else {
+                "Auto"
+            },
             if (state.isAudioOnly) "✓ Audio only (battery saver)" else "Audio only (battery saver)"
         )
         heights.forEach { h ->
-            val mark = if (!state.isAudioOnly && state.selectedHeight == h) "✓ " else ""
+            val mark = if (!state.isAudioOnly && effectiveCheckedH == h) "✓ " else ""
             labels.add("$mark${h}p")
         }
 

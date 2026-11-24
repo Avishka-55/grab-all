@@ -158,10 +158,28 @@ class FastYouTubeDownloader(
         callback.onLogLine("[FastYT] Resolving direct stream for $videoId…")
         callback.onProgress(null, null, null, null, "Resolving fast stream…")
 
-        val resolved = YouTubeInnerTube.resolveForDownload(context, videoId)
+        val resolved = YouTubeInnerTube.resolveForDownload(
+            context = context,
+            videoId = videoId,
+            requestedMaxHeight = maxHeight,
+            audioOnly = audioOnly
+        )
         val info = resolved.info
         if (info == null) {
             callback.onLogLine("[FastYT] Direct stream unavailable (${resolved.error}), using yt-dlp engine")
+            WebViewCookieSync.exportYouTubeCookiesIfLoggedIn(context)
+            return RunResult(handled = false)
+        }
+
+        // Strict quality guard: NEVER silently download a 360p-only muxed stream
+        // when the user requested Best / 1080p / 720p / 480p! Hand off cleanly
+        // to yt-dlp (with logged-in cookies) so 1080p downloads are genuinely 1080p.
+        if (!audioOnly && !satisfiesRequestedVideoQuality(info, maxHeight)) {
+            val bestAvail = info.availableHeights().firstOrNull() ?: 0
+            callback.onLogLine(
+                "[FastYT] Fast path only resolved ${bestAvail}p (requested ${maxHeight?.let { "${it}p" } ?: "Best"}) — using yt-dlp for full HD"
+            )
+            WebViewCookieSync.exportYouTubeCookiesIfLoggedIn(context)
             return RunResult(handled = false)
         }
 
@@ -456,7 +474,12 @@ class FastYouTubeDownloader(
                             val baseName = "$prefix - $safeTitle"
                             val tempTag = "t${idx}_${track.id}"
 
-                            val resolved = YouTubeInnerTube.resolveForDownload(context, track.id)
+                            val resolved = YouTubeInnerTube.resolveForDownload(
+                                context = context,
+                                videoId = track.id,
+                                requestedMaxHeight = maxHeight,
+                                audioOnly = audioOnly
+                            )
                             val info = resolved.info
                             if (cancelled) {
                                 inFlightProgress.remove(idx)
@@ -530,8 +553,8 @@ class FastYouTubeDownloader(
                                     }
                                     continue
                                 }
-                            } else if (info != null && !audioOnly) {
-                                val hasAdaptive = info.pickVideoStream(maxHeight) != null && info.bestAudio() != null
+                            } else if (info != null && !audioOnly && satisfiesRequestedVideoQuality(info, maxHeight)) {
+                                val hasAdaptive = info.pickVideoStream(maxHeight, forDownload = true) != null && info.bestAudio() != null
                                 if (hasAdaptive) {
                                     val rawVideo = fetchRawVideoStreams(
                                         info = info,
@@ -908,6 +931,22 @@ class FastYouTubeDownloader(
         return downloadMuxedVideoTrack(info, targetDir, fileBaseName, parallelConns, onByteProgress)
     }
 
+    /**
+     * Ensures we never silently settle for a 360p-only muxed stream when the
+     * user explicitly asked for Best, 1080p, 720p, or 480p.
+     */
+    private fun satisfiesRequestedVideoQuality(info: VideoStreamInfo, requestedMaxHeight: Int?): Boolean {
+        val wantsHd = requestedMaxHeight == null || requestedMaxHeight > 360
+        if (!wantsHd) return true
+        val video = info.pickVideoStream(requestedMaxHeight, forDownload = true)
+        val audio = info.bestAudio()
+        if (video != null && audio != null && video.height > 360) {
+            return true
+        }
+        val muxed = info.pickMuxedStream(requestedMaxHeight)
+        return muxed != null && muxed.height > 360
+    }
+
     private fun fetchRawVideoStreams(
         info: VideoStreamInfo,
         targetDir: File,
@@ -915,7 +954,7 @@ class FastYouTubeDownloader(
         parallelConns: Int,
         onByteProgress: (Long, Long) -> Unit
     ): RawVideoStage? {
-        val video = info.pickVideoStream(maxHeight) ?: return null
+        val video = info.pickVideoStream(maxHeight, forDownload = true) ?: return null
         val audio = info.bestAudio() ?: return null
         val vExt = if (video.mimeType.contains("webm", true)) "webm" else "mp4"
         val aExt = if (audio.mimeType.contains("webm", true)) "webm" else "m4a"

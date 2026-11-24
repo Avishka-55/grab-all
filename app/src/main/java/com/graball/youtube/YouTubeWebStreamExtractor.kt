@@ -81,6 +81,7 @@ object YouTubeWebStreamExtractor {
         @Volatile var videoHeight: Int = 0
         @Volatile var audioUrl: String? = null
         @Volatile var audioMime: String = "audio/mp4"
+        @Volatile var streamingDataJson: String? = null
         @Volatile var finished: Boolean = false
 
         fun tryComplete() {
@@ -127,6 +128,14 @@ object YouTubeWebStreamExtractor {
         @JavascriptInterface
         fun onAdState(isAd: Boolean) {
             currentSession?.adShowing = isAd
+        }
+
+        @JavascriptInterface
+        fun onStreamingData(jsonStr: String) {
+            val s = currentSession ?: return
+            if (jsonStr.length > 50) {
+                s.streamingDataJson = jsonStr
+            }
         }
 
         @JavascriptInterface
@@ -232,6 +241,31 @@ object YouTubeWebStreamExtractor {
             }
 
             val hls = session.hlsUrl
+            val rawStreamingData = session.streamingDataJson
+            var pendingRawStreamingData: String? = rawStreamingData
+
+            // If V8 solver is already warm in memory, decrypt ALL adaptiveFormats
+            // (144p-1080p+ video + M4A/Opus audio) right now in <10ms!
+            if (!rawStreamingData.isNullOrBlank() && YouTubeJsSolver.isWarmInMemory()) {
+                val decrypted = YouTubeInnerTube.decryptRawStreamingData(rawStreamingData)
+                if (decrypted != null) {
+                    if (decrypted.videoStreams.isNotEmpty()) {
+                        videoStreams.clear()
+                        videoStreams.addAll(decrypted.videoStreams)
+                    }
+                    if (decrypted.audioStreams.isNotEmpty()) {
+                        audioStreams.clear()
+                        audioStreams.addAll(decrypted.audioStreams)
+                    }
+                    if (decrypted.muxedStreams.isNotEmpty() && muxedStreams.isEmpty()) {
+                        muxedStreams.addAll(decrypted.muxedStreams)
+                    }
+                    if (videoStreams.isNotEmpty() && audioStreams.isNotEmpty()) {
+                        pendingRawStreamingData = null
+                    }
+                }
+            }
+
             if (hls == null && muxedStreams.isEmpty() && (videoStreams.isEmpty() || audioStreams.isEmpty())) {
                 Log.w(TAG, "Logged-in WebView extractor captured no playable URL for $videoId")
                 return YouTubeInnerTube.ResolveResult(null, "WebView stream capture timed out")
@@ -254,12 +288,13 @@ object YouTubeWebStreamExtractor {
                 userAgent = activeUserAgent.ifBlank {
                     "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                 },
-                captionTracks = emptyList()
+                captionTracks = emptyList(),
+                pendingStreamingDataJson = pendingRawStreamingData
             )
             Log.d(
                 TAG,
                 "Captured live logged-in WebView stream for $videoId " +
-                    "(hls=${hls != null}, muxed=${muxedStreams.size}, v=${videoStreams.size}, a=${audioStreams.size})"
+                    "(hls=${hls != null}, muxed=${muxedStreams.size}, v=${videoStreams.size}, a=${audioStreams.size}, pendingHd=${pendingRawStreamingData != null})"
             )
             return YouTubeInnerTube.ResolveResult(info)
         }
@@ -416,6 +451,11 @@ object YouTubeWebStreamExtractor {
                     var thumb = (thumbs && thumbs.length) ? thumbs[thumbs.length - 1].url : "";
                     var hls = (pr.streamingData && pr.streamingData.hlsManifestUrl) ? pr.streamingData.hlsManifestUrl : "";
                     reportedMeta = true;
+                    if (pr.streamingData && (pr.streamingData.adaptiveFormats || pr.streamingData.formats)) {
+                      try {
+                        GrabAllWebExt.onStreamingData(JSON.stringify(pr.streamingData));
+                      } catch (e2) {}
+                    }
                     GrabAllWebExt.onMetadata(JSON.stringify({
                       videoId: d.videoId || "",
                       title: d.title || "",

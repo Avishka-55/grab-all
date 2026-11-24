@@ -713,9 +713,15 @@ object YouTubeInnerTube {
      * - Tier 2 (VPN / logged-in fast path, ~0.5-1.5s): Cookie-authenticated TVHTML5
      *   with persistent hidden WebView V8 JIT solver (<10ms per video when warm).
      */
-    fun resolveForDownload(context: Context, videoId: String): ResolveResult {
+    fun resolveForDownload(
+        context: Context,
+        videoId: String,
+        requestedMaxHeight: Int? = null,
+        audioOnly: Boolean = false
+    ): ResolveResult {
         val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
         val hasCookies = authHeaders != null
+        val wantsHd = !audioOnly && (requestedMaxHeight == null || requestedMaxHeight > 360)
         val visitorData by lazy { ensureVisitorData() }
         var tier1Error: String? = null
 
@@ -799,9 +805,11 @@ object YouTubeInnerTube {
             }
         }
 
-        // Tier 2A: Only run inline when V8 is already warm in memory and not cooled down.
+        // Tier 2A: Authenticated TVHTML5 / WEB + V8 JS solver (full 144p-1080p+ adaptive HD!).
+        // For HD downloads, wait for V8 ensureReady() (still ~10x faster than spawning Python/yt-dlp)
+        // so 1080p/720p downloads resolve real adaptive HD streams directly.
         if (authHeaders != null && !isV8FailedRecently()) {
-            if (YouTubeJsSolver.isWarmInMemory()) {
+            if (YouTubeJsSolver.isWarmInMemory() || wantsHd) {
                 val v8 = resolveViaAuthedV8(
                     context = context,
                     videoId = videoId,
@@ -824,10 +832,21 @@ object YouTubeInnerTube {
         // Tier 2B: Real logged-in m.youtube.com stream capture (~1.5-2.5s on VPN!)
         if (authHeaders != null || WebViewCookieSync.hasLoggedInYouTubeSession()) {
             val webCap = YouTubeWebStreamExtractor.extract(context, videoId)
-            if (webCap.info != null &&
-                (webCap.info.audioStreams.isNotEmpty() || webCap.info.muxedStreams.isNotEmpty())
-            ) {
-                return webCap
+            val capInfo = webCap.info
+            if (capInfo != null) {
+                // If user asked for HD and WebView captured raw adaptiveFormats while V8 was cold,
+                // upgrade to full decrypted HD adaptive formats right here before downloading!
+                if (wantsHd && capInfo.videoStreams.none { it.height > 360 } &&
+                    !capInfo.pendingStreamingDataJson.isNullOrBlank()
+                ) {
+                    val upgraded = upgradeStreamInfoToHd(context, capInfo)
+                    if (upgraded != null) {
+                        return ResolveResult(upgraded)
+                    }
+                }
+                if (capInfo.audioStreams.isNotEmpty() || capInfo.muxedStreams.isNotEmpty()) {
+                    return webCap
+                }
             }
         }
 
@@ -1002,8 +1021,22 @@ object YouTubeInnerTube {
 
         if (root != null) {
             val parsed = parseDecryptedPlayerRoot(videoId, root, TV_SAMSUNG_UA)
-            if (parsed.info != null) return parsed
+            if (parsed.info != null &&
+                (parsed.info.videoStreams.isNotEmpty() || parsed.info.hlsUrl != null)
+            ) {
+                return parsed
+            }
             Log.d(TAG, "TVHTML5 V8 parse note ($videoId): ${parsed.error}")
+        }
+
+        // Fallback to authenticated desktop WEB player (returns full 144p-1080p+ adaptiveFormats)
+        val webDesktopRoot = requestWebDesktopPlayer(videoId, visitorData, ready.signatureTimestamp, authHeaders)
+        if (webDesktopRoot != null) {
+            val parsed = parseDecryptedPlayerRoot(videoId, webDesktopRoot, WEB_UA)
+            if (parsed.info != null && parsed.info.videoStreams.isNotEmpty() && parsed.info.audioStreams.isNotEmpty()) {
+                return parsed
+            }
+            Log.d(TAG, "WEB desktop V8 parse note ($videoId): ${parsed.error}")
         }
 
         // Optional HLS fallback via authenticated WEB (Safari UA) for playback
@@ -1021,12 +1054,84 @@ object YouTubeInnerTube {
         return ResolveResult(null, err)
     }
 
+    data class DecryptedStreams(
+        val videoStreams: List<StreamFormat>,
+        val audioStreams: List<StreamFormat>,
+        val muxedStreams: List<StreamFormat>
+    )
+
+    /**
+     * Decrypts a raw `streamingData` JSON blob (captured from `ytInitialPlayerResponse`
+     * in [YouTubeWebStreamExtractor]) using the warm in-memory V8 [YouTubeJsSolver].
+     * Returns null if V8 isn't ready or no streams decrypted cleanly.
+     */
+    fun decryptRawStreamingData(streamingDataJson: String): DecryptedStreams? {
+        if (!YouTubeJsSolver.isWarmInMemory()) return null
+        val streamingData = try {
+            JSONObject(streamingDataJson)
+        } catch (_: Exception) {
+            return null
+        }
+        return decryptStreamingDataObject(streamingData)
+    }
+
+    /**
+     * Upgrades a 360p-only [VideoStreamInfo] (e.g. fast-start Tier 2B playback
+     * while V8 was warming up) into full 144p-1080p+ adaptive HD streams in the
+     * background without delaying initial playback start.
+     */
+    fun upgradeStreamInfoToHd(context: Context, current: VideoStreamInfo): VideoStreamInfo? {
+        val ready = YouTubeJsSolver.ensureReady(context) ?: return null
+
+        // 1) Fast local path (zero extra InnerTube request): decrypt adaptiveFormats
+        //    already captured from the logged-in m.youtube.com page!
+        val pendingJson = current.pendingStreamingDataJson
+        if (!pendingJson.isNullOrBlank()) {
+            val dec = decryptRawStreamingData(pendingJson)
+            if (dec != null && dec.videoStreams.any { it.height > 360 } && dec.audioStreams.isNotEmpty()) {
+                return current.copy(
+                    videoStreams = dec.videoStreams,
+                    audioStreams = dec.audioStreams,
+                    muxedStreams = current.muxedStreams.ifEmpty { dec.muxedStreams },
+                    pendingStreamingDataJson = null
+                )
+            }
+        }
+
+        // 2) Authenticated Tier 2A (TVHTML5 -> WEB desktop) using the now-warm V8 solver.
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context) ?: return null
+        val visitorData = ensureVisitorData()
+        val v8 = resolveViaAuthedV8(
+            context = context,
+            videoId = current.videoId,
+            visitorData = visitorData,
+            authHeaders = authHeaders,
+            includeHlsFallback = true
+        )
+        val hdInfo = v8.info ?: return null
+        if (hdInfo.videoStreams.any { it.height > 360 } && hdInfo.audioStreams.isNotEmpty()) {
+            lastV8FailedAtMs = 0L
+            return current.copy(
+                hlsUrl = current.hlsUrl ?: hdInfo.hlsUrl,
+                videoStreams = hdInfo.videoStreams,
+                audioStreams = hdInfo.audioStreams,
+                muxedStreams = current.muxedStreams.ifEmpty { hdInfo.muxedStreams },
+                userAgent = hdInfo.userAgent,
+                captionTracks = current.captionTracks.ifEmpty { hdInfo.captionTracks },
+                pendingStreamingDataJson = null
+            )
+        }
+        return null
+    }
+
     private fun requestTvSamsungPlayer(
         videoId: String,
         visitorData: String?,
         signatureTimestamp: Int,
         authHeaders: WebViewCookieSync.YouTubeAuthHeaders
     ): JSONObject? {
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
         val clientObj = JSONObject().apply {
             put("clientName", "TVHTML5")
             put("clientVersion", TV_SAMSUNG_CLIENT_VERSION)
@@ -1034,9 +1139,9 @@ object YouTubeInnerTube {
             put("deviceModel", "UKS9800")
             put("osName", "Tizen")
             put("osVersion", "2.4.0")
-            put("hl", "en")
-            put("gl", "US")
-            if (!visitorData.isNullOrBlank()) put("visitorData", visitorData)
+            put("hl", cfg.hl)
+            put("gl", cfg.gl)
+            if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
         }
         val body = JSONObject().apply {
             put("context", JSONObject().apply { put("client", clientObj) })
@@ -1049,14 +1154,51 @@ object YouTubeInnerTube {
             put("contentCheckOk", true)
             put("racyCheckOk", true)
         }
+        val baseUrl = if (!cfg.apiKey.isNullOrBlank()) {
+            "https://www.youtube.com/youtubei/v1/player?key=${cfg.apiKey}&prettyPrint=false"
+        } else {
+            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+        }
         return postInnerTube(
-            url = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+            url = baseUrl,
             body = body,
             userAgent = TV_SAMSUNG_UA,
             clientNameId = "7",
             clientVersion = TV_SAMSUNG_CLIENT_VERSION,
-            visitorData = visitorData,
-            authHeaders = authHeaders
+            visitorData = effectiveVisitor,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        )
+    }
+
+    private fun requestWebDesktopPlayer(
+        videoId: String,
+        visitorData: String?,
+        signatureTimestamp: Int,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders
+    ): JSONObject? {
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
+        val body = JSONObject().apply {
+            put("context", webContext(cfg))
+            put("videoId", videoId)
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("signatureTimestamp", signatureTimestamp)
+                })
+            })
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+        return postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+            body = body,
+            userAgent = WEB_UA,
+            clientNameId = "1",
+            clientVersion = cfg.clientVersion,
+            visitorData = effectiveVisitor,
+            authHeaders = authHeaders,
+            webConfig = cfg
         )
     }
 
@@ -1120,91 +1262,10 @@ object YouTubeInnerTube {
             ?: return ResolveResult(null, "No streaming data returned")
         val hlsUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
 
-        val pending = mutableListOf<PendingCipherFormat>()
-        val nParamRegex = Regex("""[?&]n=([^&]+)""")
-
-        fun collectRaw(arr: JSONArray?, isMuxed: Boolean) {
-            if (arr == null) return
-            for (i in 0 until arr.length()) {
-                val obj = arr.optJSONObject(i) ?: continue
-                var baseUrl = obj.optString("url")
-                var cipherS: String? = null
-                var cipherSp = "signature"
-                if (!baseUrl.startsWith("http")) {
-                    val cipher = obj.optString("signatureCipher").ifBlank { obj.optString("cipher") }
-                    if (cipher.isBlank()) continue
-                    val parts = parseQueryParams(cipher)
-                    baseUrl = parts["url"].orEmpty()
-                    cipherS = parts["s"]
-                    cipherSp = parts["sp"].orEmpty().ifBlank { "signature" }
-                    if (!baseUrl.startsWith("http") || cipherS.isNullOrBlank()) continue
-                }
-                val rawN = nParamRegex.find(baseUrl)?.groupValues?.get(1)?.let { urlDecode(it) }
-                pending.add(PendingCipherFormat(obj, isMuxed, baseUrl, cipherS, cipherSp, rawN))
-            }
-        }
-
-        collectRaw(streamingData.optJSONArray("formats"), isMuxed = true)
-        collectRaw(streamingData.optJSONArray("adaptiveFormats"), isMuxed = false)
-
-        val needSigs = pending.mapNotNull { it.cipherS }.distinct()
-        val needNs = pending.mapNotNull { it.rawN }.distinct()
-        val solved = if (needSigs.isNotEmpty() || needNs.isNotEmpty()) {
-            YouTubeJsSolver.solve(needSigs, needNs)
-        } else {
-            YouTubeJsSolver.SolveResult(emptyMap(), emptyMap())
-        }
-
-        val videoStreams = mutableListOf<StreamFormat>()
-        val audioStreams = mutableListOf<StreamFormat>()
-        val muxedStreams = mutableListOf<StreamFormat>()
-
-        if (solved != null) {
-            val replaceNRegex = Regex("""([?&]n=)[^&]+""")
-            for (p in pending) {
-                var finalUrl = p.baseUrl
-                if (p.rawN != null) {
-                    val solvedN = solved.ns[p.rawN]
-                    if (!solvedN.isNullOrBlank()) {
-                        val encN = urlEncode(solvedN)
-                        val match = replaceNRegex.find(finalUrl)
-                        if (match != null) {
-                            finalUrl = finalUrl.replaceRange(match.range, match.groupValues[1] + encN)
-                        }
-                    }
-                }
-                if (p.cipherS != null) {
-                    val solvedSig = solved.sigs[p.cipherS] ?: continue
-                    val sep = if ('?' in finalUrl) "&" else "?"
-                    finalUrl = "$finalUrl$sep${p.cipherSp}=${urlEncode(solvedSig)}"
-                }
-
-                val obj = p.obj
-                val mime = obj.optString("mimeType")
-                val itag = obj.optInt("itag", 0)
-                val height = obj.optInt("height", 0)
-                val bitrate = obj.optInt("bitrate", 0)
-                val qualityLabel = obj.optString("qualityLabel", if (height > 0) "${height}p" else "")
-                val isVideo = mime.startsWith("video/")
-                val isAudio = mime.startsWith("audio/")
-                val fmt = StreamFormat(
-                    itag = itag,
-                    url = finalUrl,
-                    mimeType = mime,
-                    qualityLabel = qualityLabel,
-                    height = height,
-                    bitrate = bitrate,
-                    isAudioOnly = isAudio,
-                    isVideoOnly = isVideo && !p.isMuxedDefault,
-                    isMuxed = p.isMuxedDefault
-                )
-                when {
-                    p.isMuxedDefault -> muxedStreams.add(fmt)
-                    isAudio -> audioStreams.add(fmt)
-                    isVideo -> videoStreams.add(fmt)
-                }
-            }
-        }
+        val decrypted = decryptStreamingDataObject(streamingData)
+        val videoStreams = decrypted?.videoStreams.orEmpty()
+        val audioStreams = decrypted?.audioStreams.orEmpty()
+        val muxedStreams = decrypted?.muxedStreams.orEmpty()
 
         if (hlsUrl == null && muxedStreams.isEmpty() && (videoStreams.isEmpty() || audioStreams.isEmpty())) {
             return ResolveResult(null, "No playable stream URLs after V8 decryption")
@@ -1237,6 +1298,94 @@ object YouTubeInnerTube {
                 captionTracks = captions
             )
         )
+    }
+
+    private fun decryptStreamingDataObject(streamingData: JSONObject): DecryptedStreams? {
+        val pending = mutableListOf<PendingCipherFormat>()
+        val nParamRegex = Regex("""[?&]n=([^&]+)""")
+
+        fun collectRaw(arr: JSONArray?, isMuxed: Boolean) {
+            if (arr == null) return
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                var baseUrl = obj.optString("url")
+                var cipherS: String? = null
+                var cipherSp = "signature"
+                if (!baseUrl.startsWith("http")) {
+                    val cipher = obj.optString("signatureCipher").ifBlank { obj.optString("cipher") }
+                    if (cipher.isBlank()) continue
+                    val parts = parseQueryParams(cipher)
+                    baseUrl = parts["url"].orEmpty()
+                    cipherS = parts["s"]
+                    cipherSp = parts["sp"].orEmpty().ifBlank { "signature" }
+                    if (!baseUrl.startsWith("http") || cipherS.isNullOrBlank()) continue
+                }
+                val rawN = nParamRegex.find(baseUrl)?.groupValues?.get(1)?.let { urlDecode(it) }
+                pending.add(PendingCipherFormat(obj, isMuxed, baseUrl, cipherS, cipherSp, rawN))
+            }
+        }
+
+        collectRaw(streamingData.optJSONArray("formats"), isMuxed = true)
+        collectRaw(streamingData.optJSONArray("adaptiveFormats"), isMuxed = false)
+        if (pending.isEmpty()) return null
+
+        val needSigs = pending.mapNotNull { it.cipherS }.distinct()
+        val needNs = pending.mapNotNull { it.rawN }.distinct()
+        val solved = if (needSigs.isNotEmpty() || needNs.isNotEmpty()) {
+            YouTubeJsSolver.solve(needSigs, needNs) ?: return null
+        } else {
+            YouTubeJsSolver.SolveResult(emptyMap(), emptyMap())
+        }
+
+        val videoStreams = mutableListOf<StreamFormat>()
+        val audioStreams = mutableListOf<StreamFormat>()
+        val muxedStreams = mutableListOf<StreamFormat>()
+        val replaceNRegex = Regex("""([?&]n=)[^&]+""")
+
+        for (p in pending) {
+            var finalUrl = p.baseUrl
+            if (p.rawN != null) {
+                val solvedN = solved.ns[p.rawN]
+                if (!solvedN.isNullOrBlank()) {
+                    val encN = urlEncode(solvedN)
+                    val match = replaceNRegex.find(finalUrl)
+                    if (match != null) {
+                        finalUrl = finalUrl.replaceRange(match.range, match.groupValues[1] + encN)
+                    }
+                }
+            }
+            if (p.cipherS != null) {
+                val solvedSig = solved.sigs[p.cipherS] ?: continue
+                val sep = if ('?' in finalUrl) "&" else "?"
+                finalUrl = "$finalUrl$sep${p.cipherSp}=${urlEncode(solvedSig)}"
+            }
+
+            val obj = p.obj
+            val mime = obj.optString("mimeType")
+            val itag = obj.optInt("itag", 0)
+            val height = obj.optInt("height", 0)
+            val bitrate = obj.optInt("bitrate", 0)
+            val qualityLabel = obj.optString("qualityLabel", if (height > 0) "${height}p" else "")
+            val isVideo = mime.startsWith("video/")
+            val isAudio = mime.startsWith("audio/")
+            val fmt = StreamFormat(
+                itag = itag,
+                url = finalUrl,
+                mimeType = mime,
+                qualityLabel = qualityLabel,
+                height = height,
+                bitrate = bitrate,
+                isAudioOnly = isAudio,
+                isVideoOnly = isVideo && !p.isMuxedDefault,
+                isMuxed = p.isMuxedDefault
+            )
+            when {
+                p.isMuxedDefault -> muxedStreams.add(fmt)
+                isAudio -> audioStreams.add(fmt)
+                isVideo -> videoStreams.add(fmt)
+            }
+        }
+        return DecryptedStreams(videoStreams, audioStreams, muxedStreams)
     }
 
     private fun parseQueryParams(qs: String): Map<String, String> {
@@ -1643,6 +1792,11 @@ object YouTubeInnerTube {
                 reqBuilder.header("Authorization", authHeaders.authorizationHeader)
                 reqBuilder.header("X-Origin", "https://www.youtube.com")
                 reqBuilder.header("X-Goog-AuthUser", "0")
+                if (cfg == null) {
+                    webConfig?.identityToken?.takeIf { it.isNotBlank() }?.let {
+                        reqBuilder.header("X-YouTube-Identity-Token", it)
+                    }
+                }
             }
 
             val req = reqBuilder

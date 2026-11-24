@@ -424,8 +424,14 @@ object YouTubeJsSolver {
                             }
                             if (bytes != null) {
                                 return WebResourceResponse(
-                                    "text/plain",
+                                    "application/javascript",
                                     "utf-8",
+                                    200,
+                                    "OK",
+                                    mapOf(
+                                        "Access-Control-Allow-Origin" to "*",
+                                        "Cache-Control" to "no-store"
+                                    ),
                                     ByteArrayInputStream(bytes)
                                 )
                             }

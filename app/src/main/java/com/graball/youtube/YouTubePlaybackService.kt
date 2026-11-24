@@ -23,6 +23,8 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
@@ -61,6 +63,7 @@ data class YouTubePlaybackState(
     val isAudioOnly: Boolean = false,
     val captionsEnabled: Boolean = false,
     val selectedHeight: Int? = null,
+    val activeVideoHeight: Int? = null,
     val playbackSpeed: Float = 1.0f,
     val error: String? = null,
     val lastSponsorSkip: String? = null
@@ -106,6 +109,8 @@ class YouTubePlaybackService : MediaSessionService() {
     private var isAudioOnly = false
     private var captionsEnabled = false
     private var selectedHeight: Int? = null
+    private var activeVideoHeight: Int? = null
+    private var preparedVideoHeight: Int? = null
     private var playbackSpeed = 1.0f
     private var lastError: String? = null
     private var lastSponsorSkip: String? = null
@@ -182,6 +187,21 @@ class YouTubePlaybackService : MediaSessionService() {
                             saveCurrentProgress()
                         }
                         broadcastState()
+                    }
+
+                    override fun onTracksChanged(tracks: Tracks) {
+                        refreshActiveVideoHeight(tracks)
+                        broadcastState()
+                    }
+
+                    override fun onVideoSizeChanged(videoSize: VideoSize) {
+                        if (videoSize.height > 0) {
+                            val normalized = normalizeQualityHeight(videoSize.height)
+                            if (activeVideoHeight != normalized) {
+                                activeVideoHeight = normalized
+                                broadcastState()
+                            }
+                        }
                     }
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
@@ -634,6 +654,8 @@ class YouTubePlaybackService : MediaSessionService() {
         queueIndex = -1
         fetchingAutoNext = false
         currentStreamInfo = null
+        activeVideoHeight = null
+        preparedVideoHeight = null
         currentArtwork = null
         currentArtworkUrl = null
         sponsorSegments = emptyList()
@@ -670,6 +692,8 @@ class YouTubePlaybackService : MediaSessionService() {
         lastSponsorSkip = null
         currentStreamInfo = null
         currentStreamMode = null
+        activeVideoHeight = null
+        preparedVideoHeight = null
         attemptedModes.clear()
         sponsorSegments = emptyList()
         skippedSegmentKeys.clear()
@@ -730,6 +754,36 @@ class YouTubePlaybackService : MediaSessionService() {
                     isLoading = false
                     loadingStatus = null
                     broadcastState()
+
+                    // Seamless background HD upgrade: if we started fast at 360p muxed
+                    // while V8 was warming up, decrypt adaptiveFormats (480p/720p/1080p+)
+                    // asynchronously so the quality picker unlocks HD and upgrades smoothly!
+                    if (info.videoStreams.none { it.height > 360 } && info.hlsUrl.isNullOrBlank()) {
+                        ioExecutor.execute {
+                            val upgraded = YouTubeInnerTube.upgradeStreamInfoToHd(
+                                applicationContext,
+                                info
+                            )
+                            if (upgraded != null) {
+                                mainHandler.post {
+                                    if (gen != loadGeneration || currentStreamInfo?.videoId != info.videoId) {
+                                        return@post
+                                    }
+                                    currentStreamInfo = upgraded
+                                    val wantsHd = !isAudioOnly &&
+                                        (selectedHeight == null || selectedHeight!! > 360)
+                                    if (wantsHd && currentStreamMode == StreamMode.MUXED) {
+                                        val p = player
+                                        val pos = p?.currentPosition?.coerceAtLeast(0L) ?: 0L
+                                        val wasPlaying = p?.playWhenReady ?: true
+                                        attemptedModes.clear()
+                                        prepareStream(upgraded, resumePosMs = pos, playImmediately = wasPlaying)
+                                    }
+                                    broadcastState()
+                                }
+                            }
+                        }
+                    }
 
                     // Fetch SponsorBlock asynchronously AFTER playback starts so it
                     // never delays video startup even if sponsor.ajay.app is slow.
@@ -853,6 +907,8 @@ class YouTubePlaybackService : MediaSessionService() {
         if (StreamMode.HLS !in attemptedModes && !info.hlsUrl.isNullOrBlank()) {
             attemptedModes.add(StreamMode.HLS)
             currentStreamMode = StreamMode.HLS
+            preparedVideoHeight = null
+            activeVideoHeight = null
             val item = MediaItem.Builder()
                 .setUri(info.hlsUrl)
                 .setMediaMetadata(meta)
@@ -872,6 +928,8 @@ class YouTubePlaybackService : MediaSessionService() {
         if (StreamMode.ADAPTIVE_MERGE !in attemptedModes && videoStream != null && audioStream != null) {
             attemptedModes.add(StreamMode.ADAPTIVE_MERGE)
             currentStreamMode = StreamMode.ADAPTIVE_MERGE
+            preparedVideoHeight = videoStream.height.takeIf { it > 0 }
+            activeVideoHeight = preparedVideoHeight
             val vItem = MediaItem.Builder()
                 .setUri(videoStream.url)
                 .setMediaMetadata(meta)
@@ -896,6 +954,8 @@ class YouTubePlaybackService : MediaSessionService() {
         if (StreamMode.MUXED !in attemptedModes && muxed != null) {
             attemptedModes.add(StreamMode.MUXED)
             currentStreamMode = StreamMode.MUXED
+            preparedVideoHeight = muxed.height.takeIf { it > 0 }
+            activeVideoHeight = preparedVideoHeight
             val item = MediaItem.Builder()
                 .setUri(muxed.url)
                 .setMediaMetadata(meta)
@@ -910,6 +970,34 @@ class YouTubePlaybackService : MediaSessionService() {
         }
 
         return false
+    }
+
+    private fun refreshActiveVideoHeight(tracks: Tracks) {
+        val fromFormat = player?.videoFormat?.height?.takeIf { it > 0 }
+        if (fromFormat != null) {
+            activeVideoHeight = normalizeQualityHeight(fromFormat)
+            return
+        }
+        for (group in tracks.groups) {
+            if (group.type != C.TRACK_TYPE_VIDEO || !group.isSelected) continue
+            for (i in 0 until group.length) {
+                if (group.isTrackSelected(i)) {
+                    val h = group.getTrackFormat(i).height
+                    if (h > 0) {
+                        activeVideoHeight = normalizeQualityHeight(h)
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    private fun normalizeQualityHeight(rawHeight: Int): Int {
+        val standards = intArrayOf(144, 240, 360, 480, 720, 1080, 1440, 2160)
+        for (std in standards) {
+            if (kotlin.math.abs(rawHeight - std) <= 12) return std
+        }
+        return rawHeight
     }
 
     private fun applyTrackSelection() {
@@ -976,6 +1064,7 @@ class YouTubePlaybackService : MediaSessionService() {
             isAudioOnly = isAudioOnly,
             captionsEnabled = captionsEnabled,
             selectedHeight = selectedHeight,
+            activeVideoHeight = activeVideoHeight ?: preparedVideoHeight,
             playbackSpeed = playbackSpeed,
             error = lastError,
             lastSponsorSkip = lastSponsorSkip
