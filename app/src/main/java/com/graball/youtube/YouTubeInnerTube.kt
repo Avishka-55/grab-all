@@ -51,8 +51,15 @@ object YouTubeInnerTube {
     private const val IOS_UA =
         "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
 
-    /** Cooldown during which anonymous Tier 1 is skipped after a VPN bot-check. */
-    private const val ANON_BOT_BLOCK_COOLDOWN_MS = 10L * 60L * 1000L
+    private const val TV_SAMSUNG_CLIENT_VERSION = "5.20260707"
+    private const val TV_SAMSUNG_UA =
+        "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1"
+
+    private const val WEB_SAFARI_UA =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+
+    /** Short cooldown during which anonymous Tier 1 is skipped after a VPN bot-check. */
+    private const val ANON_BOT_BLOCK_COOLDOWN_MS = 3L * 60L * 1000L
 
     @Volatile
     private var lastAnonBotBlockedAtMs: Long = 0L
@@ -489,112 +496,135 @@ object YouTubeInnerTube {
 
     /**
      * Fast InnerTube-only stream resolution optimized for direct HTTP downloads
-     * (never spawns Python/yt-dlp). Prefers ANDROID_VR -> IOS -> VISIONOS; if
-     * signed in and anonymous clients were just VPN bot-blocked, skips straight
-     * to yt-dlp (with cached QuickJS solver) in 0ms instead of wasting 3-5s.
+     * (never spawns Python/yt-dlp):
+     * - Tier 1 (No-VPN instant bypass, ~300ms): Anonymous ANDROID_VR -> IOS -> VISIONOS.
+     * - Tier 2 (VPN / logged-in fast path, ~0.5-1.5s): Cookie-authenticated TVHTML5
+     *   with persistent hidden WebView V8 JIT solver (<10ms per video when warm).
      */
     fun resolveForDownload(context: Context, videoId: String): ResolveResult {
-        val hasCookies = RuntimePaths.cookiesFile(context).exists()
-        if (hasCookies && isAnonBotBlockedRecently()) {
-            return ResolveResult(null, "VPN bot-check active, using authenticated yt-dlp")
-        }
-
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+        val hasCookies = authHeaders != null
         val visitorData = ensureVisitorData()
-        val androidVr = resolveViaClient(
-            videoId = videoId,
-            clientName = "ANDROID_VR",
-            clientVersion = ANDROID_VR_CLIENT_VERSION,
-            clientNameId = "28",
-            userAgent = ANDROID_VR_UA,
-            visitorData = visitorData,
-            extraClientFields = mapOf(
-                "deviceMake" to "Oculus",
-                "deviceModel" to "Quest 3",
-                "androidSdkVersion" to 32,
-                "osName" to "Android",
-                "osVersion" to "12L"
+        var tier1Error: String? = null
+
+        if (!hasCookies || !isAnonBotBlockedRecently()) {
+            val androidVr = resolveViaClient(
+                videoId = videoId,
+                clientName = "ANDROID_VR",
+                clientVersion = ANDROID_VR_CLIENT_VERSION,
+                clientNameId = "28",
+                userAgent = ANDROID_VR_UA,
+                visitorData = visitorData,
+                extraClientFields = mapOf(
+                    "deviceMake" to "Oculus",
+                    "deviceModel" to "Quest 3",
+                    "androidSdkVersion" to 32,
+                    "osName" to "Android",
+                    "osVersion" to "12L"
+                )
             )
-        )
-        if (androidVr.info != null &&
-            (androidVr.info.audioStreams.isNotEmpty() || androidVr.info.muxedStreams.isNotEmpty())
-        ) {
-            lastAnonBotBlockedAtMs = 0L
-            return androidVr
-        }
-        if (hasCookies && looksLikeBotBlock(androidVr.error)) {
-            lastAnonBotBlockedAtMs = System.currentTimeMillis()
-            return ResolveResult(null, androidVr.error)
+            if (androidVr.info != null &&
+                (androidVr.info.audioStreams.isNotEmpty() || androidVr.info.muxedStreams.isNotEmpty())
+            ) {
+                lastAnonBotBlockedAtMs = 0L
+                return androidVr
+            }
+            tier1Error = androidVr.error
+
+            if (hasCookies && looksLikeBotBlock(androidVr.error)) {
+                lastAnonBotBlockedAtMs = System.currentTimeMillis()
+            } else {
+                val ios = resolveViaClient(
+                    videoId = videoId,
+                    clientName = "IOS",
+                    clientVersion = IOS_CLIENT_VERSION,
+                    clientNameId = "5",
+                    userAgent = IOS_UA,
+                    visitorData = visitorData,
+                    extraClientFields = mapOf(
+                        "deviceMake" to "Apple",
+                        "deviceModel" to "iPhone16,2",
+                        "osName" to "iPhone",
+                        "osVersion" to "18.3.2.22D82"
+                    )
+                )
+                if (ios.info != null &&
+                    (ios.info.audioStreams.isNotEmpty() || ios.info.muxedStreams.isNotEmpty())
+                ) {
+                    lastAnonBotBlockedAtMs = 0L
+                    return ios
+                }
+                if (hasCookies && looksLikeBotBlock(ios.error)) {
+                    lastAnonBotBlockedAtMs = System.currentTimeMillis()
+                } else {
+                    val visionOs = resolveViaClient(
+                        videoId = videoId,
+                        clientName = "VISIONOS",
+                        clientVersion = VISIONOS_CLIENT_VERSION,
+                        clientNameId = "101",
+                        userAgent = VISIONOS_UA,
+                        visitorData = visitorData,
+                        extraClientFields = mapOf(
+                            "deviceMake" to "Apple",
+                            "deviceModel" to "RealityDevice17,1",
+                            "osName" to "visionOS",
+                            "osVersion" to "26.5.23O471"
+                        )
+                    )
+                    if (visionOs.info != null &&
+                        (visionOs.info.audioStreams.isNotEmpty() || visionOs.info.muxedStreams.isNotEmpty())
+                    ) {
+                        lastAnonBotBlockedAtMs = 0L
+                        return visionOs
+                    }
+                    if (hasCookies && looksLikeBotBlock(visionOs.error)) {
+                        lastAnonBotBlockedAtMs = System.currentTimeMillis()
+                    }
+                    if (tier1Error.isNullOrBlank()) {
+                        tier1Error = ios.error ?: visionOs.error
+                    }
+                }
+            }
         }
 
-        val ios = resolveViaClient(
-            videoId = videoId,
-            clientName = "IOS",
-            clientVersion = IOS_CLIENT_VERSION,
-            clientNameId = "5",
-            userAgent = IOS_UA,
-            visitorData = visitorData,
-            extraClientFields = mapOf(
-                "deviceMake" to "Apple",
-                "deviceModel" to "iPhone16,2",
-                "osName" to "iPhone",
-                "osVersion" to "18.3.2.22D82"
+        // Tier 2: Fast authenticated InnerTube + persistent V8 WebView solver (~0.5-1.5s on VPN!)
+        if (authHeaders != null) {
+            val v8 = resolveViaAuthedV8(
+                context = context,
+                videoId = videoId,
+                visitorData = visitorData,
+                authHeaders = authHeaders,
+                includeHlsFallback = false
             )
-        )
-        if (ios.info != null &&
-            (ios.info.audioStreams.isNotEmpty() || ios.info.muxedStreams.isNotEmpty())
-        ) {
-            lastAnonBotBlockedAtMs = 0L
-            return ios
-        }
-        if (hasCookies && looksLikeBotBlock(ios.error)) {
-            lastAnonBotBlockedAtMs = System.currentTimeMillis()
-            return ResolveResult(null, ios.error)
+            if (v8.info != null &&
+                (v8.info.audioStreams.isNotEmpty() || v8.info.muxedStreams.isNotEmpty())
+            ) {
+                return v8
+            }
+            if (!v8.error.isNullOrBlank()) {
+                return ResolveResult(null, v8.error)
+            }
         }
 
-        val visionOs = resolveViaClient(
-            videoId = videoId,
-            clientName = "VISIONOS",
-            clientVersion = VISIONOS_CLIENT_VERSION,
-            clientNameId = "101",
-            userAgent = VISIONOS_UA,
-            visitorData = visitorData,
-            extraClientFields = mapOf(
-                "deviceMake" to "Apple",
-                "deviceModel" to "RealityDevice17,1",
-                "osName" to "visionOS",
-                "osVersion" to "26.5.23O471"
-            )
-        )
-        if (visionOs.info != null &&
-            (visionOs.info.audioStreams.isNotEmpty() || visionOs.info.muxedStreams.isNotEmpty())
-        ) {
-            lastAnonBotBlockedAtMs = 0L
-            return visionOs
-        }
-        if (hasCookies && looksLikeBotBlock(visionOs.error)) {
-            lastAnonBotBlockedAtMs = System.currentTimeMillis()
-        }
-
-        return ResolveResult(null, androidVr.error ?: ios.error ?: visionOs.error ?: "No direct streams")
+        return ResolveResult(null, tier1Error ?: "No direct streams")
     }
 
-    // ---- Stream Resolution (Multi-Client InnerTube + Cached QuickJS yt-dlp Fallback) ----
+    // ---- Stream Resolution (Tier 1 Anonymous -> Tier 2 V8 Authenticated -> Tier 3 yt-dlp) ----
 
     fun resolveStreams(
         context: Context,
         videoId: String,
         onStatus: ((String) -> Unit)? = null
     ): ResolveResult {
-        val hasCookies = RuntimePaths.cookiesFile(context).exists()
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+        val hasCookies = authHeaders != null
+        val visitorData = ensureVisitorData()
         var tier1Error: String? = null
 
-        // Skip anonymous Tier 1 immediately when we already know this VPN IP
-        // triggers YouTube's anonymous robot-check (saves 3-5s on every video).
+        // Tier 1 (No-VPN instant bypass, ~300ms): try anonymous fast clients first
+        // whenever YouTube didn't just bot-block this IP.
         if (!hasCookies || !isAnonBotBlockedRecently()) {
             onStatus?.invoke("Connecting to YouTube…")
-            val visitorData = ensureVisitorData()
-
-            // Tier 1: Fast anonymous InnerTube /player clients (~300ms each)
             val visionOs = resolveViaClient(
                 videoId = videoId,
                 clientName = "VISIONOS",
@@ -662,7 +692,30 @@ object YouTubeInnerTube {
             }
         }
 
-        // Tier 2: Authenticated yt-dlp + cached QuickJS preprocessed player
+        // Tier 2 (VPN fast path, ~0.5-1.5s): Cookie-authenticated TVHTML5 / WEB_SAFARI
+        // decrypted in-memory via persistent hidden WebView V8 JIT solver (<10ms warm!).
+        if (authHeaders != null) {
+            onStatus?.invoke(
+                if (YouTubeJsSolver.isWarmInMemory()) {
+                    "Connecting to YouTube…"
+                } else {
+                    "Preparing fast engine…"
+                }
+            )
+            val v8 = resolveViaAuthedV8(
+                context = context,
+                videoId = videoId,
+                visitorData = visitorData,
+                authHeaders = authHeaders,
+                includeHlsFallback = true
+            )
+            if (v8.info != null) {
+                return v8
+            }
+            Log.d(TAG, "Tier 2 V8 authed InnerTube failed ($videoId: ${v8.error}), falling back to yt-dlp")
+        }
+
+        // Tier 3: Safety-net fallback via bundled yt-dlp + QuickJS + cookies.txt
         onStatus?.invoke(
             if (hasCookies && !hasWarmJsSolverCache(context)) {
                 "Preparing YouTube engine (first time only)…"
@@ -679,6 +732,290 @@ object YouTubeInnerTube {
             ?: "Couldn't load stream for this video"
         return ResolveResult(null, reason)
     }
+
+    /**
+     * Resolves streams directly via cookie-authenticated `TVHTML5` (Samsung
+     * Tizen) + `signatureTimestamp` and decrypts `signatureCipher` + `n`
+     * parameters in <10ms using [YouTubeJsSolver] (Android WebView V8 JIT).
+     */
+    private fun resolveViaAuthedV8(
+        context: Context,
+        videoId: String,
+        visitorData: String?,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders,
+        includeHlsFallback: Boolean
+    ): ResolveResult {
+        var ready = YouTubeJsSolver.ensureReady(context)
+            ?: return ResolveResult(null, "V8 JS solver unavailable")
+
+        var root = requestTvSamsungPlayer(videoId, visitorData, ready.signatureTimestamp, authHeaders)
+        val firstStatus = root?.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        val firstReason = root?.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
+        if (firstStatus != "OK" && firstReason.contains("reload", ignoreCase = true)) {
+            // Player signatureTimestamp may have just rotated — refresh once.
+            YouTubeJsSolver.invalidate()
+            ready = YouTubeJsSolver.ensureReady(context, forceRefresh = true)
+                ?: return ResolveResult(null, firstReason.ifBlank { "V8 refresh failed" })
+            root = requestTvSamsungPlayer(videoId, visitorData, ready.signatureTimestamp, authHeaders)
+        }
+
+        if (root != null) {
+            val parsed = parseDecryptedPlayerRoot(videoId, root, TV_SAMSUNG_UA)
+            if (parsed.info != null) return parsed
+            Log.d(TAG, "TVHTML5 V8 parse note ($videoId): ${parsed.error}")
+        }
+
+        // Optional HLS fallback via authenticated WEB (Safari UA) for playback
+        if (includeHlsFallback) {
+            val webRoot = requestWebSafariPlayer(videoId, visitorData, ready.signatureTimestamp, authHeaders)
+            if (webRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(videoId, webRoot, WEB_SAFARI_UA)
+                if (parsed.info != null) return parsed
+            }
+        }
+
+        val err = root?.optJSONObject("playabilityStatus")?.optString("reason")
+            ?.takeIf { it.isNotBlank() }
+            ?: "Authenticated InnerTube returned no playable formats"
+        return ResolveResult(null, err)
+    }
+
+    private fun requestTvSamsungPlayer(
+        videoId: String,
+        visitorData: String?,
+        signatureTimestamp: Int,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders
+    ): JSONObject? {
+        val clientObj = JSONObject().apply {
+            put("clientName", "TVHTML5")
+            put("clientVersion", TV_SAMSUNG_CLIENT_VERSION)
+            put("deviceMake", "Samsung")
+            put("deviceModel", "UKS9800")
+            put("osName", "Tizen")
+            put("osVersion", "2.4.0")
+            put("hl", "en")
+            put("gl", "US")
+            if (!visitorData.isNullOrBlank()) put("visitorData", visitorData)
+        }
+        val body = JSONObject().apply {
+            put("context", JSONObject().apply { put("client", clientObj) })
+            put("videoId", videoId)
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("signatureTimestamp", signatureTimestamp)
+                })
+            })
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+        return postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+            body = body,
+            userAgent = TV_SAMSUNG_UA,
+            clientNameId = "7",
+            clientVersion = TV_SAMSUNG_CLIENT_VERSION,
+            visitorData = visitorData,
+            authHeaders = authHeaders
+        )
+    }
+
+    private fun requestWebSafariPlayer(
+        videoId: String,
+        visitorData: String?,
+        signatureTimestamp: Int,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders
+    ): JSONObject? {
+        val clientObj = JSONObject().apply {
+            put("clientName", "WEB")
+            put("clientVersion", WEB_CLIENT_VERSION)
+            put("hl", "en")
+            put("gl", "US")
+            if (!visitorData.isNullOrBlank()) put("visitorData", visitorData)
+        }
+        val body = JSONObject().apply {
+            put("context", JSONObject().apply { put("client", clientObj) })
+            put("videoId", videoId)
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("signatureTimestamp", signatureTimestamp)
+                })
+            })
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+        return postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+            body = body,
+            userAgent = WEB_SAFARI_UA,
+            clientNameId = "1",
+            clientVersion = WEB_CLIENT_VERSION,
+            visitorData = visitorData,
+            authHeaders = authHeaders
+        )
+    }
+
+    private data class PendingCipherFormat(
+        val obj: JSONObject,
+        val isMuxedDefault: Boolean,
+        val baseUrl: String,
+        val cipherS: String?,
+        val cipherSp: String,
+        val rawN: String?
+    )
+
+    private fun parseDecryptedPlayerRoot(
+        videoId: String,
+        root: JSONObject,
+        userAgent: String
+    ): ResolveResult {
+        val playStatus = root.optJSONObject("playabilityStatus")
+        val status = playStatus?.optString("status") ?: ""
+        if (status != "OK") {
+            val reason = playStatus?.optString("reason").orEmpty()
+            return ResolveResult(null, reason.ifBlank { status.ifBlank { "UNPLAYABLE" } })
+        }
+
+        val streamingData = root.optJSONObject("streamingData")
+            ?: return ResolveResult(null, "No streaming data returned")
+        val hlsUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
+
+        val pending = mutableListOf<PendingCipherFormat>()
+        val nParamRegex = Regex("""[?&]n=([^&]+)""")
+
+        fun collectRaw(arr: JSONArray?, isMuxed: Boolean) {
+            if (arr == null) return
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                var baseUrl = obj.optString("url")
+                var cipherS: String? = null
+                var cipherSp = "signature"
+                if (!baseUrl.startsWith("http")) {
+                    val cipher = obj.optString("signatureCipher").ifBlank { obj.optString("cipher") }
+                    if (cipher.isBlank()) continue
+                    val parts = parseQueryParams(cipher)
+                    baseUrl = parts["url"].orEmpty()
+                    cipherS = parts["s"]
+                    cipherSp = parts["sp"].orEmpty().ifBlank { "signature" }
+                    if (!baseUrl.startsWith("http") || cipherS.isNullOrBlank()) continue
+                }
+                val rawN = nParamRegex.find(baseUrl)?.groupValues?.get(1)?.let { urlDecode(it) }
+                pending.add(PendingCipherFormat(obj, isMuxed, baseUrl, cipherS, cipherSp, rawN))
+            }
+        }
+
+        collectRaw(streamingData.optJSONArray("formats"), isMuxed = true)
+        collectRaw(streamingData.optJSONArray("adaptiveFormats"), isMuxed = false)
+
+        val needSigs = pending.mapNotNull { it.cipherS }.distinct()
+        val needNs = pending.mapNotNull { it.rawN }.distinct()
+        val solved = if (needSigs.isNotEmpty() || needNs.isNotEmpty()) {
+            YouTubeJsSolver.solve(needSigs, needNs)
+        } else {
+            YouTubeJsSolver.SolveResult(emptyMap(), emptyMap())
+        }
+
+        val videoStreams = mutableListOf<StreamFormat>()
+        val audioStreams = mutableListOf<StreamFormat>()
+        val muxedStreams = mutableListOf<StreamFormat>()
+
+        if (solved != null) {
+            val replaceNRegex = Regex("""([?&]n=)[^&]+""")
+            for (p in pending) {
+                var finalUrl = p.baseUrl
+                if (p.rawN != null) {
+                    val solvedN = solved.ns[p.rawN]
+                    if (!solvedN.isNullOrBlank()) {
+                        val encN = urlEncode(solvedN)
+                        val match = replaceNRegex.find(finalUrl)
+                        if (match != null) {
+                            finalUrl = finalUrl.replaceRange(match.range, match.groupValues[1] + encN)
+                        }
+                    }
+                }
+                if (p.cipherS != null) {
+                    val solvedSig = solved.sigs[p.cipherS] ?: continue
+                    val sep = if ('?' in finalUrl) "&" else "?"
+                    finalUrl = "$finalUrl$sep${p.cipherSp}=${urlEncode(solvedSig)}"
+                }
+
+                val obj = p.obj
+                val mime = obj.optString("mimeType")
+                val itag = obj.optInt("itag", 0)
+                val height = obj.optInt("height", 0)
+                val bitrate = obj.optInt("bitrate", 0)
+                val qualityLabel = obj.optString("qualityLabel", if (height > 0) "${height}p" else "")
+                val isVideo = mime.startsWith("video/")
+                val isAudio = mime.startsWith("audio/")
+                val fmt = StreamFormat(
+                    itag = itag,
+                    url = finalUrl,
+                    mimeType = mime,
+                    qualityLabel = qualityLabel,
+                    height = height,
+                    bitrate = bitrate,
+                    isAudioOnly = isAudio,
+                    isVideoOnly = isVideo && !p.isMuxedDefault,
+                    isMuxed = p.isMuxedDefault
+                )
+                when {
+                    p.isMuxedDefault -> muxedStreams.add(fmt)
+                    isAudio -> audioStreams.add(fmt)
+                    isVideo -> videoStreams.add(fmt)
+                }
+            }
+        }
+
+        if (hlsUrl == null && muxedStreams.isEmpty() && (videoStreams.isEmpty() || audioStreams.isEmpty())) {
+            return ResolveResult(null, "No playable stream URLs after V8 decryption")
+        }
+
+        val details = root.optJSONObject("videoDetails")
+        val title = details?.optString("title").orEmpty().ifBlank { "YouTube Video" }
+        val channel = details?.optString("author").orEmpty()
+        val durationSec = details?.optString("lengthSeconds")?.toLongOrNull() ?: 0L
+        val views = formatViews(details?.optString("viewCount")?.toLongOrNull())
+        val description = details?.optString("shortDescription").orEmpty()
+        val thumb = pickThumb(details?.optJSONObject("thumbnail"))
+            .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
+        val captions = parseInnerTubeCaptions(root)
+
+        return ResolveResult(
+            VideoStreamInfo(
+                videoId = videoId,
+                title = title,
+                channel = channel,
+                durationSec = durationSec,
+                viewCount = views,
+                description = description,
+                thumbnailUrl = thumb,
+                hlsUrl = hlsUrl,
+                videoStreams = videoStreams,
+                audioStreams = audioStreams,
+                muxedStreams = muxedStreams,
+                userAgent = userAgent,
+                captionTracks = captions
+            )
+        )
+    }
+
+    private fun parseQueryParams(qs: String): Map<String, String> {
+        val out = HashMap<String, String>()
+        for (pair in qs.split('&')) {
+            val eq = pair.indexOf('=')
+            if (eq > 0) {
+                val k = urlDecode(pair.substring(0, eq))
+                val v = urlDecode(pair.substring(eq + 1))
+                out[k] = v
+            }
+        }
+        return out
+    }
+
+    private fun urlDecode(s: String): String =
+        try { java.net.URLDecoder.decode(s, "UTF-8") } catch (_: Exception) { s }
+
+    private fun urlEncode(s: String): String =
+        try { java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20") } catch (_: Exception) { s }
 
     private fun ensureVisitorData(): String? {
         cachedVisitorData?.takeIf { it.isNotBlank() }?.let { return it }
