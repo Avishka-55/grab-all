@@ -316,6 +316,41 @@
                         android:layout_weight="1" />
                 </LinearLayout>
 
+                <!-- YouTube Quick Actions: Watch Playlist / Select Items (or Watch Video / Listen Audio) -->
+                <LinearLayout
+                    android:id="@+id/grabQuickRow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/grabWatchButton"
+                        android:layout_width="0dp"
+                        android:layout_height="38dp"
+                        android:layout_marginEnd="8dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/yt_chip_bg"
+                        android:gravity="center"
+                        android:text="▶ Watch Playlist"
+                        android:textColor="@color/graball_text"
+                        android:textSize="12.5sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/grabSecondButton"
+                        android:layout_width="0dp"
+                        android:layout_height="38dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/yt_chip_bg"
+                        android:gravity="center"
+                        android:text="☑ Select Items"
+                        android:textColor="@color/graball_orange"
+                        android:textSize="12.5sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
                 <Button
                     android:id="@+id/downloadButton"
                     android:layout_width="match_parent"

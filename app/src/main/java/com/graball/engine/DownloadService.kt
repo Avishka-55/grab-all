@@ -464,7 +464,8 @@ class DownloadService : Service() {
             }
             startDownload(
                 this, url, params.outputTemplate, params.audioOnly,
-                params.maxHeight, params.playlistMode
+                params.maxHeight, params.playlistMode,
+                params.selectedVideoIds?.let { ArrayList(it) }
             )
             return START_NOT_STICKY
         }
@@ -480,6 +481,8 @@ class DownloadService : Service() {
             }
         val playlistMode =
             safeIntent.getStringExtra(EXTRA_PLAYLIST_MODE) ?: "single"
+        val selectedVideoIds = safeIntent.getStringArrayListExtra(EXTRA_SELECTED_IDS)
+            ?.takeIf { it.isNotEmpty() }
 
         // Guard after all early returns, so a rejected intent never
         // leaves the URL stuck in the set.
@@ -495,7 +498,7 @@ class DownloadService : Service() {
         logsByUrl.remove(url)
         val session = Session(url, outputTemplate, audioOnly)
         sessions[url] = session
-        val params = DownloadParams(outputTemplate, audioOnly, maxHeight, playlistMode)
+        val params = DownloadParams(outputTemplate, audioOnly, maxHeight, playlistMode, selectedVideoIds)
         paramsByUrl[url] = params
         saveParams(this, url, params)
         // The network this download starts on: a switch away from it
@@ -603,7 +606,8 @@ class DownloadService : Service() {
                             audioOnly = audioOnly,
                             maxHeight = maxHeight,
                             playlistMode = playlistMode,
-                            concurrency = DownloadPrefs.resolvedConcurrency(this)
+                            concurrency = DownloadPrefs.resolvedConcurrency(this),
+                            selectedVideoIds = selectedVideoIds?.toSet()
                         )
                         session.fastDownloader = fast
                         val fastResult = fast.run(object : FastYouTubeDownloader.Callback {
@@ -986,6 +990,7 @@ class DownloadService : Service() {
         private const val EXTRA_AUDIO_ONLY = "com.graball.engine.extra.AUDIO_ONLY"
         private const val EXTRA_MAX_HEIGHT = "com.graball.engine.extra.MAX_HEIGHT"
         private const val EXTRA_PLAYLIST_MODE = "com.graball.engine.extra.PLAYLIST_MODE"
+        private const val EXTRA_SELECTED_IDS = "com.graball.engine.extra.SELECTED_IDS"
         private const val ACTION_CANCEL = "com.graball.engine.action.CANCEL"
         private const val ACTION_PAUSE = "com.graball.engine.action.PAUSE"
         private const val ACTION_RESUME = "com.graball.engine.action.RESUME"
@@ -1004,7 +1009,8 @@ class DownloadService : Service() {
             val outputTemplate: String,
             val audioOnly: Boolean,
             val maxHeight: Int?,
-            val playlistMode: String
+            val playlistMode: String,
+            val selectedVideoIds: List<String>? = null
         )
 
         private val paramsByUrl = mutableMapOf<String, DownloadParams>()
@@ -1017,7 +1023,8 @@ class DownloadService : Service() {
                     p.outputTemplate,
                     p.audioOnly.toString(),
                     (p.maxHeight ?: 0).toString(),
-                    p.playlistMode
+                    p.playlistMode,
+                    p.selectedVideoIds?.joinToString(",").orEmpty()
                 ).joinToString("\n")
                 context.getSharedPreferences(PARAMS_PREFS, Context.MODE_PRIVATE)
                     .edit().putString(url, encoded).apply()
@@ -1031,11 +1038,14 @@ class DownloadService : Service() {
                     .getString(url, null) ?: return null
                 val parts = raw.split("\n")
                 if (parts.size < 4) return null
+                val selected = parts.getOrNull(4)?.split(",")?.filter { it.isNotBlank() }
+                    ?.takeIf { it.isNotEmpty() }
                 DownloadParams(
                     outputTemplate = parts[0],
                     audioOnly = parts[1] == "true",
                     maxHeight = parts[2].toIntOrNull()?.takeIf { it > 0 },
-                    playlistMode = parts[3]
+                    playlistMode = parts[3],
+                    selectedVideoIds = selected
                 )
             } catch (_: Exception) {
                 null
@@ -1062,7 +1072,8 @@ class DownloadService : Service() {
             outputTemplate: String,
             audioOnly: Boolean = false,
             maxHeight: Int? = null,
-            playlistMode: String = "single"
+            playlistMode: String = "single",
+            selectedVideoIds: ArrayList<String>? = null
         ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 putExtra(EXTRA_URL, url)
@@ -1070,6 +1081,9 @@ class DownloadService : Service() {
                 putExtra(EXTRA_AUDIO_ONLY, audioOnly)
                 if (maxHeight != null) putExtra(EXTRA_MAX_HEIGHT, maxHeight)
                 putExtra(EXTRA_PLAYLIST_MODE, playlistMode)
+                if (!selectedVideoIds.isNullOrEmpty()) {
+                    putStringArrayListExtra(EXTRA_SELECTED_IDS, selectedVideoIds)
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

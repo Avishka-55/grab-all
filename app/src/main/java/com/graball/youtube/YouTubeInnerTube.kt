@@ -12,6 +12,8 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -154,6 +156,81 @@ object YouTubeInnerTube {
             return search("trending music and videos", SearchFilter.VIDEOS)
         }
         return items.filter { !it.isPlaylist }
+    }
+
+    /**
+     * Private on-device "For You" recommendation feed built strictly from the
+     * user's local Watch History, Bookmarks, and Recent Searches (never uploaded
+     * to a Google account). Fetches up to 3 seeds in parallel (~500ms), filters
+     * out recently watched videos, interleaves results, and falls back smoothly
+     * to Trending when history is empty.
+     */
+    fun exploreForYou(context: Context, musicMode: Boolean = false): List<YtItem> {
+        val history = YouTubeStore.getHistory(context)
+        val bookmarks = YouTubeStore.getBookmarks(context)
+        val searches = YouTubeStore.getRecentSearches(context)
+
+        val watchedIds = history.take(30).map { it.item.id }.toSet()
+        val seedVideos = (history.map { it.item } + bookmarks)
+            .filter { !it.isPlaylist && it.id.length == 11 }
+            .distinctBy { it.id }
+            .take(2)
+        val seedQuery = searches.firstOrNull { it.length >= 2 }
+
+        if (seedVideos.isEmpty() && seedQuery == null) {
+            return explore(musicMode)
+        }
+
+        val tasks = mutableListOf<() -> List<YtItem>>()
+        seedVideos.forEach { vid ->
+            tasks += { fetchRelated(vid.id).filter { !it.isPlaylist } }
+        }
+        if (seedQuery != null) {
+            tasks += {
+                val filter = if (musicMode) SearchFilter.MUSIC else SearchFilter.VIDEOS
+                search(seedQuery, filter).filter { !it.isPlaylist }
+            }
+        }
+
+        val buckets = Array<List<YtItem>>(tasks.size) { emptyList() }
+        val pool = Executors.newFixedThreadPool(tasks.size.coerceIn(1, 3))
+        val latch = CountDownLatch(tasks.size)
+        tasks.forEachIndexed { idx, task ->
+            pool.execute {
+                try {
+                    buckets[idx] = task()
+                } catch (_: Exception) {
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+        try {
+            latch.await(5, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+        } finally {
+            pool.shutdownNow()
+        }
+
+        // Round-robin interleave across seeds so the feed stays diverse & fresh
+        val seen = mutableSetOf<String>()
+        val fresh = mutableListOf<YtItem>()
+        val maxLen = buckets.maxOfOrNull { it.size } ?: 0
+        for (i in 0 until maxLen) {
+            for (b in buckets) {
+                val item = b.getOrNull(i) ?: continue
+                if (item.id in watchedIds) continue
+                if (seen.add(item.id)) fresh.add(item)
+            }
+        }
+
+        // Top up with Trending/Music if personalized pool is small
+        if (fresh.size < 12) {
+            explore(musicMode).forEach { item ->
+                if (seen.add(item.id)) fresh.add(item)
+            }
+        }
+        return fresh.take(40)
     }
 
     fun explorePlaylists(): List<YtItem> {

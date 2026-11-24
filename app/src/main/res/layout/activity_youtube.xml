@@ -279,26 +279,39 @@
                 android:id="@+id/ytPlaylistPlayAll"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
-                android:layout_marginEnd="8dp"
+                android:layout_marginEnd="6dp"
                 android:layout_weight="1"
                 android:background="@drawable/yt_chip_bg"
                 android:gravity="center"
                 android:text="▶ Play All"
                 android:textColor="@color/graball_text"
-                android:textSize="13sp"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/ytPlaylistSelect"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:background="@drawable/yt_chip_bg"
+                android:gravity="center"
+                android:text="☑ Select"
+                android:textColor="@color/graball_orange"
+                android:textSize="12sp"
                 android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/ytPlaylistDownload"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
-                android:layout_marginEnd="8dp"
+                android:layout_marginEnd="6dp"
                 android:layout_weight="1"
                 android:background="@drawable/yt_chip_selected"
                 android:gravity="center"
-                android:text="⬇ Download All"
+                android:text="⬇ All"
                 android:textColor="@color/graball_text"
-                android:textSize="13sp"
+                android:textSize="12sp"
                 android:textStyle="bold" />
 
             <TextView

@@ -177,6 +177,10 @@ class YouTubeActivity : AppCompatActivity() {
                 openPlayerScreen()
             }
         }
+        findViewById<TextView>(R.id.ytPlaylistSelect).setOnClickListener {
+            val pl = openPlaylist ?: return@setOnClickListener
+            PlaylistPickerDialog.show(this, pl)
+        }
         findViewById<TextView>(R.id.ytPlaylistDownload).setOnClickListener {
             val pl = openPlaylist ?: return@setOnClickListener
             val plItem = YtItem(
@@ -237,9 +241,15 @@ class YouTubeActivity : AppCompatActivity() {
         recycler.adapter = adapter
 
         refreshRecentChips()
+        updateForYouTabLabel()
+        val startPlaylistId = intent.getStringExtra("start_playlist_id")?.trim()
         val startQuery = intent.getStringExtra("start_query")?.trim()
         val startMode = intent.getStringExtra("start_mode")
-        if (!startQuery.isNullOrBlank()) {
+        if (!startPlaylistId.isNullOrBlank()) {
+            openPlaylistItems(
+                YtItem(id = startPlaylistId, title = "Playlist", channel = "", isPlaylist = true)
+            )
+        } else if (!startQuery.isNullOrBlank()) {
             suppressSuggestions = true
             searchInput.setText(startQuery)
             searchInput.setSelection(startQuery.length)
@@ -260,6 +270,12 @@ class YouTubeActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        val plId = intent.getStringExtra("start_playlist_id")?.trim()
+        if (!plId.isNullOrBlank()) {
+            if (currentTab != Tab.EXPLORE) selectTab(Tab.EXPLORE)
+            openPlaylistItems(YtItem(id = plId, title = "Playlist", channel = "", isPlaylist = true))
+            return
+        }
         val q = intent.getStringExtra("start_query")?.trim()
         if (!q.isNullOrBlank()) {
             suppressSuggestions = true
@@ -272,6 +288,13 @@ class YouTubeActivity : AppCompatActivity() {
             if (currentTab != Tab.EXPLORE) selectTab(Tab.EXPLORE)
             runSearch(q)
         }
+    }
+
+    private fun updateForYouTabLabel() {
+        val hasPersonalSeeds = YouTubeStore.getHistory(this).isNotEmpty() ||
+            YouTubeStore.getBookmarks(this).isNotEmpty() ||
+            YouTubeStore.getRecentSearches(this).isNotEmpty()
+        tabViews[Tab.EXPLORE]?.text = if (hasPersonalSeeds) "For You" else "Explore"
     }
 
     override fun onResume() {
@@ -541,8 +564,9 @@ class YouTubeActivity : AppCompatActivity() {
     private fun loadExplore(musicMode: Boolean) {
         val gen = ++requestGen
         setLoading(true)
+        updateForYouTabLabel()
         io.execute {
-            val results = YouTubeInnerTube.explore(musicMode)
+            val results = YouTubeInnerTube.exploreForYou(applicationContext, musicMode)
             runOnUiThread {
                 if (gen != requestGen || isFinishing) return@runOnUiThread
                 setLoading(false)

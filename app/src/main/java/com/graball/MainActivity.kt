@@ -29,10 +29,15 @@ import com.graball.engine.AppUpdateChecker
 import com.graball.engine.DownloadPrefs
 import com.graball.engine.DownloadService
 import com.graball.engine.DownloadProgressBus
+import com.graball.engine.FastYouTubeDownloader
 import com.graball.engine.LinkDetector
 import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
+import com.graball.youtube.PlaylistPickerDialog
 import com.graball.youtube.YouTubeActivity
+import com.graball.youtube.YouTubePlaybackService
+import com.graball.youtube.YouTubePlayerActivity
+import com.graball.youtube.YtItem
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -44,6 +49,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var grabPanel: LinearLayout
     private lateinit var grabType: TextView
     private lateinit var playlistRow: LinearLayout
+    private lateinit var grabQuickRow: LinearLayout
+    private lateinit var grabWatchButton: TextView
+    private lateinit var grabSecondButton: TextView
     /** Top tabs (Search is this screen); kept to re-select Search on return. */
     private lateinit var mainTabs: List<TextView>
     /** What the open Grab panel holds; video panels force single. */
@@ -106,6 +114,63 @@ class MainActivity : AppCompatActivity() {
         grabPanel = findViewById(R.id.grabPanel)
         grabType = findViewById(R.id.grabType)
         playlistRow = findViewById(R.id.playlistRow)
+        grabQuickRow = findViewById(R.id.grabQuickRow)
+        grabWatchButton = findViewById(R.id.grabWatchButton)
+        grabSecondButton = findViewById(R.id.grabSecondButton)
+
+        grabWatchButton.setOnClickListener {
+            val url = linkInput.text.toString().trim()
+            if (url.isEmpty()) return@setOnClickListener
+            val plId = FastYouTubeDownloader.extractPlaylistId(url)
+            val vidId = FastYouTubeDownloader.extractVideoId(url)
+            if (grabbedKind == LinkKind.PLAYLIST && !plId.isNullOrBlank()) {
+                startActivity(
+                    Intent(this, YouTubeActivity::class.java)
+                        .putExtra("start_playlist_id", plId)
+                )
+            } else if (!vidId.isNullOrBlank()) {
+                val item = YtItem(
+                    id = vidId,
+                    title = "YouTube Video",
+                    channel = "",
+                    thumbnailUrl = "https://i.ytimg.com/vi/$vidId/hqdefault.jpg"
+                )
+                YouTubePlaybackService.withService(this) { svc ->
+                    svc.playItem(item, audioOnly = false)
+                }
+                startActivity(
+                    Intent(this, YouTubePlayerActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        putExtra("restore_video", true)
+                    }
+                )
+            }
+        }
+
+        grabSecondButton.setOnClickListener {
+            val url = linkInput.text.toString().trim()
+            if (url.isEmpty()) return@setOnClickListener
+            if (grabbedKind == LinkKind.PLAYLIST && FastYouTubeDownloader.extractPlaylistId(url) != null) {
+                PlaylistPickerDialog.showForUrl(this, url)
+            } else {
+                val vidId = FastYouTubeDownloader.extractVideoId(url) ?: return@setOnClickListener
+                val item = YtItem(
+                    id = vidId,
+                    title = "YouTube Audio",
+                    channel = "",
+                    thumbnailUrl = "https://i.ytimg.com/vi/$vidId/hqdefault.jpg"
+                )
+                YouTubePlaybackService.withService(this) { svc ->
+                    svc.playItem(item, audioOnly = true)
+                }
+                startActivity(
+                    Intent(this, PlayerActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                        putExtra("open_now_playing", true)
+                    }
+                )
+            }
+        }
         // Option 4 chrome: tabs, site cards, bottom nav. Search is
         // this screen; YouTube opens the in-app browser; More opens
         // the supported-sites list.
@@ -366,6 +431,20 @@ class MainActivity : AppCompatActivity() {
             android.view.View.VISIBLE
         } else {
             android.view.View.GONE
+        }
+        val isYt = FastYouTubeDownloader.isYouTubeUrl(url)
+        val hasYtPlaylist = isYt && FastYouTubeDownloader.extractPlaylistId(url) != null
+        val hasYtVideo = isYt && FastYouTubeDownloader.extractVideoId(url) != null
+        if (kind == LinkKind.PLAYLIST && hasYtPlaylist) {
+            grabQuickRow.visibility = android.view.View.VISIBLE
+            grabWatchButton.text = "▶ Watch Playlist"
+            grabSecondButton.text = "☑ Select Items"
+        } else if (hasYtVideo) {
+            grabQuickRow.visibility = android.view.View.VISIBLE
+            grabWatchButton.text = "▶ Watch Video"
+            grabSecondButton.text = "🎧 Listen Audio"
+        } else {
+            grabQuickRow.visibility = android.view.View.GONE
         }
         val prefs = DownloadPrefs.load(this)
         qualitySpinner.setSelection(prefs.qualityPos)

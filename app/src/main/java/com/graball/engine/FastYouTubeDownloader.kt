@@ -47,7 +47,8 @@ class FastYouTubeDownloader(
     private val audioOnly: Boolean,
     private val maxHeight: Int?,
     private val playlistMode: String,
-    private val concurrency: Int
+    private val concurrency: Int,
+    private val selectedVideoIds: Set<String>? = null
 ) {
     interface Callback {
         fun onTitleResolved(title: String) {}
@@ -219,8 +220,18 @@ class FastYouTubeDownloader(
             return RunResult(handled = false)
         }
 
-        val items = details.items.take(maxItems)
-        val total = items.size
+        val fullItems = details.items.take(maxItems)
+        val indexedTargets: List<Pair<Int, YtItem>> = if (!selectedVideoIds.isNullOrEmpty()) {
+            fullItems.mapIndexedNotNull { idx, item ->
+                if (item.id in selectedVideoIds) (idx + 1) to item else null
+            }
+        } else {
+            fullItems.mapIndexed { idx, item -> (idx + 1) to item }
+        }
+        if (indexedTargets.isEmpty()) {
+            return RunResult(handled = true, exitCode = 1, detail = "None of the selected tracks were found")
+        }
+        val total = indexedTargets.size
         if (details.title.isNotBlank()) {
             callback.onTitleResolved(details.title)
         }
@@ -250,7 +261,7 @@ class FastYouTubeDownloader(
         val activeWorkers = AtomicInteger(0)
         val nextIndex = AtomicInteger(0)
         val startedAtMs = System.currentTimeMillis()
-        val indexWidth = total.toString().length.coerceAtLeast(2)
+        val indexWidth = fullItems.size.toString().length.coerceAtLeast(2)
 
         fun markCompleted(videoId: String) {
             if (completedIds.add(videoId)) {
@@ -297,7 +308,7 @@ class FastYouTubeDownloader(
                     while (!cancelled) {
                         val idx = nextIndex.getAndIncrement()
                         if (idx >= total) break
-                        val track = items[idx]
+                        val (origTrackNum, track) = indexedTargets[idx]
                         if (completedIds.contains(track.id)) {
                             skippedCount.incrementAndGet()
                             completedCount.incrementAndGet()
@@ -307,7 +318,7 @@ class FastYouTubeDownloader(
                         activeWorkers.incrementAndGet()
                         emitPlaylistProgress(force = false)
                         try {
-                            val prefix = String.format("%0${indexWidth}d", idx + 1)
+                            val prefix = String.format("%0${indexWidth}d", origTrackNum)
                             val safeTitle = sanitizeFileName(track.title).ifBlank { track.id }
                             val baseName = "$prefix - $safeTitle"
                             val okFile = processPlaylistTrack(

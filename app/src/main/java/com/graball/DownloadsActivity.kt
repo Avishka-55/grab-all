@@ -504,6 +504,7 @@ class DownloadsActivity : AppCompatActivity() {
         val isAudio = mode.contains("Audio", ignoreCase = true) || isAudioOutput(output)
         val isPlaylist = mode.contains("First ", ignoreCase = true) ||
             mode.contains("All videos", ignoreCase = true) ||
+            mode.contains("selected", ignoreCase = true) ||
             FastYouTubeDownloader.extractPlaylistId(url) != null ||
             (!output.startsWith("content://") && output.contains('/'))
 
