@@ -587,7 +587,7 @@ object YouTubeInnerTube {
             }
         }
 
-        // Tier 2: Fast authenticated InnerTube + persistent V8 WebView solver (~0.5-1.5s on VPN!)
+        // Tier 2A: Fast authenticated InnerTube + persistent V8 WebView solver (~0.5-1.5s on VPN!)
         if (authHeaders != null) {
             val v8 = resolveViaAuthedV8(
                 context = context,
@@ -601,8 +601,16 @@ object YouTubeInnerTube {
             ) {
                 return v8
             }
-            if (!v8.error.isNullOrBlank()) {
-                return ResolveResult(null, v8.error)
+            Log.d(TAG, "Download Tier 2A V8 failed ($videoId: ${v8.error}), trying Tier 2B WebView capture")
+        }
+
+        // Tier 2B: Real logged-in m.youtube.com stream capture (~1.5-2.5s on VPN!)
+        if (authHeaders != null || WebViewCookieSync.hasLoggedInYouTubeSession()) {
+            val webCap = YouTubeWebStreamExtractor.extract(context, videoId)
+            if (webCap.info != null &&
+                (webCap.info.audioStreams.isNotEmpty() || webCap.info.muxedStreams.isNotEmpty())
+            ) {
+                return webCap
             }
         }
 
@@ -692,7 +700,7 @@ object YouTubeInnerTube {
             }
         }
 
-        // Tier 2 (VPN fast path, ~0.5-1.5s): Cookie-authenticated TVHTML5 / WEB_SAFARI
+        // Tier 2A (VPN fast path, ~0.5-1.5s): Cookie-authenticated TVHTML5 / WEB_SAFARI
         // decrypted in-memory via persistent hidden WebView V8 JIT solver (<10ms warm!).
         if (authHeaders != null) {
             onStatus?.invoke(
@@ -712,7 +720,19 @@ object YouTubeInnerTube {
             if (v8.info != null) {
                 return v8
             }
-            Log.d(TAG, "Tier 2 V8 authed InnerTube failed ($videoId: ${v8.error}), falling back to yt-dlp")
+            Log.d(TAG, "Tier 2A V8 authed InnerTube failed ($videoId: ${v8.error}), trying Tier 2B WebView capture")
+        }
+
+        // Tier 2B (VPN direct logged-in YouTube WebView capture, ~1.5-2.5s):
+        // Uses YouTube's own official m.youtube.com player JS with your real
+        // logged-in cookies to capture a clean, ad-free stream for ExoPlayer!
+        if (authHeaders != null || WebViewCookieSync.hasLoggedInYouTubeSession()) {
+            onStatus?.invoke("Loading with YouTube login…")
+            val webCap = YouTubeWebStreamExtractor.extract(context, videoId)
+            if (webCap.info != null) {
+                return webCap
+            }
+            Log.d(TAG, "Tier 2B WebView capture failed ($videoId: ${webCap.error}), falling back to yt-dlp")
         }
 
         // Tier 3: Safety-net fallback via bundled yt-dlp + QuickJS + cookies.txt

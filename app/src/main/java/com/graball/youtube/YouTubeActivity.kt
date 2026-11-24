@@ -1,5 +1,6 @@
 package com.graball.youtube
 
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -20,7 +21,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.graball.BrowseActivity
+import com.graball.LoginActivity
 import com.graball.R
+import com.graball.engine.WebViewCookieSync
 import java.util.concurrent.Executors
 
 /**
@@ -37,6 +41,7 @@ class YouTubeActivity : AppCompatActivity() {
 
     private lateinit var searchInput: EditText
     private lateinit var searchClear: TextView
+    private lateinit var accountBtn: TextView
     private lateinit var suggestionsBox: LinearLayout
     private lateinit var recentRow: HorizontalScrollView
     private lateinit var recentContainer: LinearLayout
@@ -85,6 +90,7 @@ class YouTubeActivity : AppCompatActivity() {
 
         searchInput = findViewById(R.id.ytSearchInput)
         searchClear = findViewById(R.id.ytSearchClear)
+        accountBtn = findViewById(R.id.ytAccountBtn)
         suggestionsBox = findViewById(R.id.ytSuggestionsBox)
         recentRow = findViewById(R.id.ytRecentRow)
         recentContainer = findViewById(R.id.ytRecentContainer)
@@ -138,6 +144,8 @@ class YouTubeActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.ytSearchGo).setOnClickListener {
             triggerSearch()
         }
+        accountBtn.setOnClickListener { onAccountButtonTapped() }
+        refreshAccountButton()
 
         tabViews = mapOf(
             Tab.EXPLORE to findViewById(R.id.ytTabExplore),
@@ -305,7 +313,52 @@ class YouTubeActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        refreshAccountButton()
         YouTubePlaybackService.addListener(playbackListener)
+    }
+
+    private fun isSignedInToYouTube(): Boolean {
+        return WebViewCookieSync.buildYouTubeAuthHeaders(this) != null ||
+            WebViewCookieSync.hasLoggedInYouTubeSession()
+    }
+
+    private fun refreshAccountButton() {
+        val signedIn = isSignedInToYouTube()
+        accountBtn.text = if (signedIn) "✓" else "👤"
+        accountBtn.setBackgroundResource(
+            if (signedIn) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+        )
+    }
+
+    private fun onAccountButtonTapped() {
+        if (!isSignedInToYouTube()) {
+            startActivity(Intent(this, LoginActivity::class.java))
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Signed in to YouTube ✓")
+            .setItems(
+                arrayOf(
+                    "Open YouTube Web (Ad-Free)",
+                    "Switch account / Re-login",
+                    "Sign out"
+                )
+            ) { _, which ->
+                when (which) {
+                    0 -> startActivity(
+                        Intent(this, BrowseActivity::class.java)
+                            .putExtra("start_url", "https://m.youtube.com")
+                    )
+                    1 -> startActivity(Intent(this, LoginActivity::class.java))
+                    2 -> {
+                        WebViewCookieSync.clearYouTubeSession(this)
+                        refreshAccountButton()
+                        Toast.makeText(this, "Signed out of YouTube", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     override fun onPause() {

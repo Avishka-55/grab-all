@@ -11,8 +11,8 @@ android {
         applicationId 'com.graball'
         minSdk 21
         targetSdk 34
-        versionCode 68
-        versionName '1.2.5'
+        versionCode 69
+        versionName '1.2.6'
     }
 
     // Release signing activates only when keystore properties are supplied

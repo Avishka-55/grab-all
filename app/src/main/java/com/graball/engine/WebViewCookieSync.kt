@@ -190,12 +190,15 @@ object WebViewCookieSync {
         val sapisid = cookies["SAPISID"]
         val sapisid1p = cookies["__Secure-1PAPISID"]
         val sapisid3p = cookies["__Secure-3PAPISID"]
-        if (sapisid == null && sapisid1p == null && sapisid3p == null) return null
+        // Match yt-dlp's _get_sid_cookies: YouTube falls back to __Secure-3PAPISID
+        // for SAPISIDHASH when the plain SAPISID cookie is absent (common on m.youtube.com).
+        val effectiveSapisid = sapisid ?: sapisid3p
+        if (effectiveSapisid == null && sapisid1p == null && sapisid3p == null) return null
 
         val ts = System.currentTimeMillis() / 1000L
         val authParts = mutableListOf<String>()
-        if (sapisid != null) {
-            authParts += "SAPISIDHASH ${ts}_${sha1Hex("$ts $sapisid $YOUTUBE_ORIGIN")}"
+        if (effectiveSapisid != null) {
+            authParts += "SAPISIDHASH ${ts}_${sha1Hex("$ts $effectiveSapisid $YOUTUBE_ORIGIN")}"
         }
         if (sapisid1p != null) {
             authParts += "SAPISID1PHASH ${ts}_${sha1Hex("$ts $sapisid1p $YOUTUBE_ORIGIN")}"

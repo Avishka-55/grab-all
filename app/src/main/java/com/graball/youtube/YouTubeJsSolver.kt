@@ -43,8 +43,11 @@ import java.util.zip.ZipInputStream
 object YouTubeJsSolver {
 
     private const val TAG = "YouTubeJsSolver"
-    private const val VIRTUAL_HOST = "graball-solver.local"
-    private const val VIRTUAL_ORIGIN = "https://$VIRTUAL_HOST/"
+    // Use real youtube.com origin so Android WebView never fails synthetic .local
+    // host resolution before invoking shouldInterceptRequest!
+    private const val VIRTUAL_HOST = "www.youtube.com"
+    private const val VIRTUAL_PATH_PREFIX = "/__graball_solver__"
+    private const val VIRTUAL_ORIGIN = "https://$VIRTUAL_HOST$VIRTUAL_PATH_PREFIX/"
     private const val PLAYER_REFRESH_INTERVAL_MS = 30L * 60L * 1000L
     private const val WEB_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -388,8 +391,9 @@ object YouTubeJsSolver {
                         request: WebResourceRequest
                     ): WebResourceResponse? {
                         val uri = request.url
-                        if (uri.host == VIRTUAL_HOST) {
-                            val bytes = when (uri.path) {
+                        val path = uri.path.orEmpty()
+                        if (uri.host == VIRTUAL_HOST && path.startsWith(VIRTUAL_PATH_PREFIX)) {
+                            val bytes = when (path.removePrefix(VIRTUAL_PATH_PREFIX)) {
                                 "/lib.js" -> servedLibBytes
                                 "/core.js" -> servedCoreBytes
                                 "/base.js" -> servedPlayerBytes
