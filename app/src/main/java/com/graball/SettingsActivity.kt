@@ -76,6 +76,9 @@ class SettingsActivity : AppCompatActivity() {
         findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
             NavHelper.switchTab(this, PlayerActivity::class.java)
         }
+        findViewById<Button>(R.id.settingsLoginButton).setOnClickListener {
+            startActivity(Intent(this, LoginActivity::class.java))
+        }
         findViewById<Button>(R.id.settingsImportButton).setOnClickListener {
             importLauncher.launch("*/*")
         }

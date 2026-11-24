@@ -55,6 +55,9 @@ object CookieImporter {
         file.writeText(
             "# Netscape HTTP Cookie File\n" + kept.joinToString("\n") + "\n"
         )
+        // Mirror imported cookies into WebView's CookieManager so BrowseActivity
+        // opens YouTube already logged in without needing another sign-in.
+        WebViewCookieSync.injectCookiesFromFile(file)
         return Result(true, "Cookies imported in app")
     }
 }

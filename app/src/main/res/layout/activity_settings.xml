@@ -180,14 +180,23 @@
                     android:textSize="13sp" />
 
                 <Button
-                    android:id="@+id/settingsImportButton"
+                    android:id="@+id/settingsLoginButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="16dp"
                     android:background="@drawable/btn_orange"
-                    android:text="@string/import_cookies"
+                    android:text="@string/login_youtube"
                     android:textColor="@color/graball_text"
                     android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/settingsImportButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/btn_small"
+                    android:text="@string/import_cookies"
+                    android:textColor="@color/graball_text" />
             </LinearLayout>
 
             <!-- YouTube Player & Cache Controls -->

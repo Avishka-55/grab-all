@@ -1,12 +1,16 @@
 package com.graball
 
+import android.app.Dialog
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.os.Message
 import android.view.MotionEvent
 import android.view.ViewConfiguration
+import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -25,6 +29,7 @@ import com.graball.engine.DownloadService
 import com.graball.engine.LinkDetector
 import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
+import com.graball.engine.WebViewCookieSync
 import java.io.File
 import kotlin.math.abs
 
@@ -55,6 +60,9 @@ class BrowseActivity : AppCompatActivity() {
     private var currentUrl: String? = null
     /** What the open panel holds; UNKNOWN means "not detected". */
     private var panelKind: LinkKind = LinkKind.UNKNOWN
+    private var popupDialog: Dialog? = null
+    private var popupWebView: WebView? = null
+    private var sessionSyncToastShown = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,8 +72,80 @@ class BrowseActivity : AppCompatActivity() {
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(webView, true)
+        val cleanUserAgent = WebViewCookieSync.cleanBrowserUserAgent(
+            webView.settings.userAgentString
+        )
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
+        webView.settings.userAgentString = cleanUserAgent
+        webView.settings.setSupportMultipleWindows(true)
+        webView.settings.javaScriptCanOpenWindowsAutomatically = true
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onCreateWindow(
+                view: WebView,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message?
+            ): Boolean {
+                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                dismissPopup()
+                val child = WebView(this@BrowseActivity).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.userAgentString = cleanUserAgent
+                    settings.setSupportMultipleWindows(true)
+                    settings.javaScriptCanOpenWindowsAutomatically = true
+                    cookieManager.setAcceptThirdPartyCookies(this, true)
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView,
+                            request: WebResourceRequest
+                        ): Boolean {
+                            val url = request.url.toString()
+                            if (url.startsWith("http://") || url.startsWith("https://")) {
+                                return false
+                            }
+                            return try {
+                                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                true
+                            } catch (_: Exception) {
+                                true
+                            }
+                        }
+                    }
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onCloseWindow(window: WebView) {
+                            dismissPopup()
+                        }
+                    }
+                }
+                val dialog = Dialog(
+                    this@BrowseActivity,
+                    android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen
+                ).apply {
+                    setContentView(child)
+                    setCancelable(true)
+                    setOnDismissListener {
+                        if (popupWebView === child) {
+                            popupWebView = null
+                            popupDialog = null
+                        }
+                        child.destroy()
+                        syncYouTubeSessionIfNeeded(webView.url ?: currentUrl)
+                    }
+                }
+                popupWebView = child
+                popupDialog = dialog
+                dialog.show()
+                transport.webView = child
+                resultMsg.sendToTarget()
+                return true
+            }
+        }
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 loading.visibility = android.view.View.VISIBLE
@@ -75,6 +155,7 @@ class BrowseActivity : AppCompatActivity() {
                 loading.visibility = android.view.View.GONE
                 currentUrl = url
                 updateFabState()
+                syncYouTubeSessionIfNeeded(url)
             }
 
             // YouTube is a single-page app: tapping a video changes the
@@ -91,6 +172,7 @@ class BrowseActivity : AppCompatActivity() {
             ) {
                 currentUrl = url
                 updateFabState()
+                syncYouTubeSessionIfNeeded(url)
             }
 
             override fun shouldOverrideUrlLoading(
@@ -202,10 +284,54 @@ class BrowseActivity : AppCompatActivity() {
         if (savedInstanceState == null) {
             // The Music tab passes m.youtube.com/music; everything
             // else opens plain YouTube.
-            webView.loadUrl(
-                intent.getStringExtra("start_url")
-                    ?: "https://www.youtube.com"
-            )
+            val startUrl = intent.getStringExtra("start_url")
+                ?: "https://www.youtube.com"
+            // Option 3 fallback: if cookies.txt was imported in Settings and the
+            // WebView does not yet have a logged-in YouTube session, inject the
+            // imported cookies before loading YouTube.
+            if (isYouTubeUrl(startUrl) &&
+                !WebViewCookieSync.hasLoggedInYouTubeSession() &&
+                RuntimePaths.cookiesFile(this).exists()
+            ) {
+                WebViewCookieSync.injectCookiesIntoWebView(this)
+            }
+            webView.loadUrl(startUrl)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        syncYouTubeSessionIfNeeded(webView.url ?: currentUrl, showToast = false)
+    }
+
+    override fun onDestroy() {
+        dismissPopup()
+        super.onDestroy()
+    }
+
+    private fun dismissPopup() {
+        val dialog = popupDialog
+        popupDialog = null
+        val child = popupWebView
+        popupWebView = null
+        if (dialog != null && dialog.isShowing) {
+            dialog.dismiss()
+        } else {
+            child?.destroy()
+        }
+    }
+
+    private fun isYouTubeUrl(url: String?): Boolean {
+        val host = url?.let { Uri.parse(it).host }?.lowercase() ?: return false
+        return host == "youtube.com" || host.endsWith(".youtube.com") || host == "youtu.be"
+    }
+
+    private fun syncYouTubeSessionIfNeeded(url: String?, showToast: Boolean = true) {
+        if (!isYouTubeUrl(url)) return
+        val synced = WebViewCookieSync.exportYouTubeCookiesIfLoggedIn(this)
+        if (synced && showToast && !sessionSyncToastShown) {
+            sessionSyncToastShown = true
+            Toast.makeText(this, "YouTube login synced for downloads", Toast.LENGTH_SHORT).show()
         }
     }
 
