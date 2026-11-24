@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Crisp white download arrow centered in Android adaptive-icon safe zone -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,29 L54,60"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="7.5" />
+
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M39,47 L54,62 L69,47"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="7.5" />
+
+    <!-- Bottom pill tray bar -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36.5,70.5 L71.5,70.5 A3.25,3.25 0 0,1 71.5,77 L36.5,77 A3.25,3.25 0 0,1 36.5,70.5 Z" />
+</vector>

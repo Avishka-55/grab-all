@@ -10,11 +10,14 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * Checks GrabAll's public mirror repo (Avishka-55/graball-website) for newer
- * Android APK releases while completely ignoring PC releases (pc-v*).
+ * Checks GrabAll's official open-source GitHub repository (Avishka-55/grab-all)
+ * directly for newer signed Android APK releases.
  *
- * Primary source: raw latest.json (zero GitHub API rate-limit).
- * Fallback: GitHub Releases API filtered strictly to `android-v*` tags.
+ * Strategy:
+ * 1. GitHub Releases `/releases/latest` API (returns latest non-prerelease tag + exact APK size/URL).
+ * 2. Fallback: `/releases?per_page=10` API skipping drafts & prereleases (e.g. `runtime-latest`).
+ * 3. Zero-rate-limit fallback: follows `github.com/.../releases/latest` redirect to extract the
+ *    latest `v*` tag directly when GitHub API's unauthenticated rate limit is hit.
  */
 object AppUpdateChecker {
 
@@ -22,10 +25,10 @@ object AppUpdateChecker {
     private const val KEY_LAST_CHECK = "last_check_ms"
     private const val CHECK_INTERVAL_MS = 6L * 60L * 60L * 1000L // 6 hours
 
-    private const val LATEST_JSON_URL =
-        "https://raw.githubusercontent.com/Avishka-55/graball-website/main/latest.json"
-    private const val RELEASES_API_URL =
-        "https://api.github.com/repos/Avishka-55/graball-website/releases?per_page=10"
+    private const val REPO = "Avishka-55/grab-all"
+    private const val LATEST_API_URL = "https://api.github.com/repos/$REPO/releases/latest"
+    private const val RELEASES_API_URL = "https://api.github.com/repos/$REPO/releases?per_page=10"
+    private const val LATEST_WEB_URL = "https://github.com/$REPO/releases/latest"
 
     data class AppRelease(
         val version: String,
@@ -38,6 +41,7 @@ object AppUpdateChecker {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
+        .followRedirects(true)
         .build()
 
     fun currentVersionName(context: Context): String {
@@ -71,32 +75,22 @@ object AppUpdateChecker {
                 .apply()
         }
         val current = currentVersionName(context)
-        val fromJson = checkFromLatestJson(current)
-        if (fromJson != null) return fromJson
-        return checkFromReleasesApi(current)
+        checkFromLatestApi(current)?.let { return it }
+        checkFromReleasesApi(current)?.let { return it }
+        return checkFromLatestRedirect(current)
     }
 
-    private fun checkFromLatestJson(current: String): AppRelease? {
+    private fun checkFromLatestApi(current: String): AppRelease? {
         return try {
             val req = Request.Builder()
-                .url(LATEST_JSON_URL)
+                .url(LATEST_API_URL)
                 .header("User-Agent", "GrabAll-Android")
+                .header("Accept", "application/vnd.github+json")
                 .build()
             client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 val body = resp.body?.string() ?: return null
-                val androidObj = JSONObject(body).optJSONObject("android") ?: return null
-                val version = androidObj.optString("version").removePrefix("v").trim()
-                val url = androidObj.optString("url").trim()
-                val size = androidObj.optLong("size_bytes", 0L)
-                if (version.isBlank() || !url.startsWith("http")) return null
-                AppRelease(
-                    version = version,
-                    apkUrl = url,
-                    sizeBytes = size,
-                    isNewer = isVersionNewer(version, current),
-                    currentVersion = current
-                )
+                parseReleaseObject(JSONObject(body), current)
             }
         } catch (_: Exception) {
             null
@@ -108,6 +102,7 @@ object AppUpdateChecker {
             val req = Request.Builder()
                 .url(RELEASES_API_URL)
                 .header("User-Agent", "GrabAll-Android")
+                .header("Accept", "application/vnd.github+json")
                 .build()
             client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return null
@@ -115,26 +110,8 @@ object AppUpdateChecker {
                 val arr = JSONArray(body)
                 for (i in 0 until arr.length()) {
                     val rel = arr.optJSONObject(i) ?: continue
-                    val tag = rel.optString("tag_name")
-                    // Strictly ignore PC releases (pc-v*)
-                    if (!tag.startsWith("android-v")) continue
-                    val version = tag.removePrefix("android-v").trim()
-                    val assets = rel.optJSONArray("assets") ?: continue
-                    for (j in 0 until assets.length()) {
-                        val a = assets.optJSONObject(j) ?: continue
-                        if (a.optString("name").endsWith(".apk", ignoreCase = true)) {
-                            val url = a.optString("browser_download_url")
-                            if (url.startsWith("http")) {
-                                return AppRelease(
-                                    version = version,
-                                    apkUrl = url,
-                                    sizeBytes = a.optLong("size", 0L),
-                                    isNewer = isVersionNewer(version, current),
-                                    currentVersion = current
-                                )
-                            }
-                        }
-                    }
+                    val parsed = parseReleaseObject(rel, current)
+                    if (parsed != null) return parsed
                 }
                 null
             }
@@ -143,9 +120,67 @@ object AppUpdateChecker {
         }
     }
 
+    private fun parseReleaseObject(rel: JSONObject, current: String): AppRelease? {
+        if (rel.optBoolean("draft", false) || rel.optBoolean("prerelease", false)) return null
+        val tag = rel.optString("tag_name").trim()
+        if (!tag.startsWith("v", ignoreCase = true)) return null
+        val version = tag.removePrefix("v").removePrefix("V").trim()
+        if (version.isBlank()) return null
+
+        val assets = rel.optJSONArray("assets") ?: return null
+        for (j in 0 until assets.length()) {
+            val a = assets.optJSONObject(j) ?: continue
+            if (a.optString("name").endsWith(".apk", ignoreCase = true)) {
+                val url = a.optString("browser_download_url").trim()
+                if (url.startsWith("http")) {
+                    return AppRelease(
+                        version = version,
+                        apkUrl = url,
+                        sizeBytes = a.optLong("size", 0L),
+                        isNewer = isVersionNewer(version, current),
+                        currentVersion = current
+                    )
+                }
+            }
+        }
+        return null
+    }
+
+    /** Zero-rate-limit fallback via GitHub's /releases/latest HTTP redirect. */
+    private fun checkFromLatestRedirect(current: String): AppRelease? {
+        return try {
+            val req = Request.Builder()
+                .url(LATEST_WEB_URL)
+                .header("User-Agent", "GrabAll-Android")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val finalUrl = resp.request.url.toString()
+                val idx = finalUrl.indexOf("/releases/tag/")
+                if (idx < 0) return null
+                val tag = finalUrl.substring(idx + "/releases/tag/".length)
+                    .substringBefore('?')
+                    .substringBefore('#')
+                    .trim()
+                if (!tag.startsWith("v", ignoreCase = true)) return null
+                val version = tag.removePrefix("v").removePrefix("V").trim()
+                if (version.isBlank()) return null
+                AppRelease(
+                    version = version,
+                    apkUrl = "https://github.com/$REPO/releases/download/$tag/app-release.apk",
+                    sizeBytes = 0L,
+                    isNewer = isVersionNewer(version, current),
+                    currentVersion = current
+                )
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun isVersionNewer(remote: String, local: String): Boolean {
-        val r = remote.removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
-        val l = local.removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
+        val r = remote.removePrefix("v").removePrefix("V").split('.').map { it.toIntOrNull() ?: 0 }
+        val l = local.removePrefix("v").removePrefix("V").split('.').map { it.toIntOrNull() ?: 0 }
         val len = maxOf(r.size, l.size)
         for (i in 0 until len) {
             val rv = r.getOrElse(i) { 0 }
