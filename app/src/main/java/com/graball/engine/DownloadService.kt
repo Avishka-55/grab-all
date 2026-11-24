@@ -278,10 +278,11 @@ class DownloadService : Service() {
                 return true
             }
             // Playlist files live in a subfolder under the URL's staging dir
-            // (e.g. <staging>/<Playlist Title>/01 - Song.mp3): keep that folder
-            // when publishing so a playlist lands in Downloads/GrabAll/<Playlist Title>.
+            // (e.g. <staging>/<Playlist Title>/01 - Song.mp3). Route every
+            // download into its platform folder under Downloads/GrabAll/
+            // (YouTube/Audio, YouTube/Video, YouTube/<Playlist>, TikTok, etc.).
             val stagingRoot = RuntimePaths.stagingDirFor(this, session.url)
-            val subfolder = try {
+            val playlistSubfolder = try {
                 val parent = file.parentFile?.absolutePath ?: ""
                 val root = stagingRoot.absolutePath
                 if (parent.startsWith(root)) {
@@ -292,11 +293,16 @@ class DownloadService : Service() {
             } catch (_: Exception) {
                 null
             }
-            val uri = MediaStorePublisher.publish(this, file, file.name, subfolder)
+            val targetSubfolder = MediaStorePublisher.targetSubfolder(
+                url = session.url,
+                audioOnly = session.audioOnly,
+                playlistSubfolder = playlistSubfolder
+            )
+            val uri = MediaStorePublisher.publish(this, file, file.name, targetSubfolder)
             if (uri != null) {
                 session.publishedPaths.add(file.absolutePath)
                 if (DownloadProgressBus.titles[session.url].isNullOrBlank()) {
-                    val inferred = subfolder?.takeIf { it.isNotBlank() }
+                    val inferred = playlistSubfolder?.takeIf { it.isNotBlank() }
                         ?: file.nameWithoutExtension.takeIf { it.isNotBlank() }
                     if (inferred != null) {
                         DownloadProgressBus.titles[session.url] = inferred
@@ -305,8 +311,8 @@ class DownloadService : Service() {
                 if (uri.scheme == "content") {
                     session.publishedRelPaths.add(uri.toString())
                 } else {
-                    val safeFolder = subfolder?.let { MediaStorePublisher.sanitizeSubfolder(it) }
-                    val rel = if (safeFolder != null) "$safeFolder/${file.name}" else file.name
+                    val safeFolder = MediaStorePublisher.sanitizeSubfolder(targetSubfolder)
+                    val rel = "$safeFolder/${file.name}"
                     session.publishedRelPaths.add(rel)
                 }
                 return true

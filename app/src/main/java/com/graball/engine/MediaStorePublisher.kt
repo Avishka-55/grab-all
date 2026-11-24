@@ -115,8 +115,11 @@ object MediaStorePublisher {
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
             "GrabAll"
         )
-        if (subfolder != null) {
-            dir = File(dir, sanitizeSubfolder(subfolder))
+        if (!subfolder.isNullOrBlank()) {
+            val cleanRel = sanitizeSubfolder(subfolder)
+            cleanRel.split('/').filter { it.isNotBlank() }.forEach { seg ->
+                dir = File(dir, seg)
+            }
         }
         if (!dir.exists()) {
             dir.mkdirs()
@@ -126,11 +129,69 @@ object MediaStorePublisher {
         return Uri.fromFile(dest)
     }
 
-    /** Strip path separators out of a folder name, so a playlist title
-     * can never escape Downloads/GrabAll. */
-    fun sanitizeSubfolder(name: String): String {
-        return name.replace('/', '-').replace('\\', '-').trim()
-            .takeIf { it.isNotEmpty() } ?: "Playlist"
+    /**
+     * Sanitize a single folder segment or a nested relative path (e.g.
+     * "YouTube/My Playlist" or "YouTube/Audio") so it can never escape
+     * Downloads/GrabAll via "..", backslashes, or illegal filename chars.
+     */
+    fun sanitizeSubfolder(path: String): String {
+        val segments = path.replace('\\', '/')
+            .split('/')
+            .map { sanitizeSegment(it) }
+            .filter { it.isNotEmpty() && it != "." && it != ".." }
+        return if (segments.isEmpty()) "Playlist" else segments.joinToString("/")
+    }
+
+    fun sanitizeSegment(segment: String): String {
+        return segment
+            .replace(Regex("""[\\/:*?"<>|\u0000-\u001F]"""), "-")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .trim('.')
+            .take(80)
+    }
+
+    /** Detect the platform folder name from a download URL (created only on demand). */
+    fun platformFolderForUrl(url: String): String {
+        val host = try {
+            Uri.parse(url).host?.lowercase()?.removePrefix("www.")?.removePrefix("m.") ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+        return when {
+            host == "youtu.be" || host.endsWith("youtube.com") -> "YouTube"
+            host.endsWith("tiktok.com") -> "TikTok"
+            host.endsWith("instagram.com") || host == "instagr.am" -> "Instagram"
+            host.endsWith("facebook.com") || host == "fb.watch" || host == "fb.com" -> "Facebook"
+            host == "x.com" || host.endsWith(".x.com") || host.endsWith("twitter.com") || host == "t.co" -> "X"
+            host.endsWith("reddit.com") || host == "redd.it" || host == "v.redd.it" -> "Reddit"
+            host.endsWith("soundcloud.com") -> "SoundCloud"
+            host.endsWith("vimeo.com") -> "Vimeo"
+            host.endsWith("dailymotion.com") || host == "dai.ly" -> "Dailymotion"
+            host.endsWith("twitch.tv") -> "Twitch"
+            host.endsWith("pinterest.com") || host == "pin.it" -> "Pinterest"
+            host.endsWith("snapchat.com") -> "Snapchat"
+            host.endsWith("threads.net") || host.endsWith("threads.com") -> "Threads"
+            else -> "Other"
+        }
+    }
+
+    /**
+     * Option 2B folder layout under Downloads/GrabAll/ (created on-demand):
+     * - YouTube single audio  -> YouTube/Audio
+     * - YouTube single video  -> YouTube/Video
+     * - YouTube playlist      -> YouTube/<Playlist Title>
+     * - Other platforms       -> <Platform> (or <Platform>/<Playlist Title>)
+     */
+    fun targetSubfolder(url: String, audioOnly: Boolean, playlistSubfolder: String?): String {
+        val platform = platformFolderForUrl(url)
+        val cleanPl = playlistSubfolder?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { sanitizeSubfolder(it) }
+        return when {
+            cleanPl != null -> "$platform/$cleanPl"
+            platform == "YouTube" -> if (audioOnly) "YouTube/Audio" else "YouTube/Video"
+            else -> platform
+        }
     }
 
     fun mimeFor(displayName: String): String {

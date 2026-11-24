@@ -508,22 +508,23 @@ class DownloadsActivity : AppCompatActivity() {
             (!output.startsWith("content://") && output.contains('/'))
 
         if (isPlaylist) {
-            val folderName = resolvePlaylistFolderName(url, output)
+            val relSubfolder = resolvePlaylistRelativeFolder(url, isAudio, output)
             val grabAllRoot = File(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
                 "GrabAll"
             )
-            val folderDir = if (!folderName.isNullOrBlank()) {
-                File(grabAllRoot, folderName)
+            val folderDir = if (!relSubfolder.isNullOrBlank()) {
+                File(grabAllRoot, relSubfolder)
             } else {
                 grabAllRoot
             }
+            val leafFolderName = relSubfolder?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
             if (isAudio) {
                 val intent = Intent(this, PlayerActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                     putExtra(PlayerActivity.EXTRA_OPEN_FOLDER_PATH, folderDir.absolutePath)
-                    if (!folderName.isNullOrBlank()) {
-                        putExtra(PlayerActivity.EXTRA_OPEN_FOLDER_NAME, folderName)
+                    if (!leafFolderName.isNullOrBlank()) {
+                        putExtra(PlayerActivity.EXTRA_OPEN_FOLDER_NAME, leafFolderName)
                     }
                 }
                 startActivity(intent)
@@ -531,13 +532,13 @@ class DownloadsActivity : AppCompatActivity() {
                 overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
                 return
             } else {
-                if (openFolderInFileManager(folderName, folderDir)) {
+                if (openFolderInFileManager(relSubfolder, folderDir)) {
                     return
                 }
                 // Fall back to opening the latest video file if no file manager handled folder URI
                 Toast.makeText(
                     this,
-                    "Saved in Downloads/GrabAll/${folderName ?: ""}".trimEnd('/'),
+                    "Saved in Downloads/GrabAll/${relSubfolder ?: ""}".trimEnd('/'),
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -562,7 +563,8 @@ class DownloadsActivity : AppCompatActivity() {
         return output.substringAfterLast('.', "").lowercase() in audioExts
     }
 
-    private fun resolvePlaylistFolderName(url: String, output: String): String? {
+    /** Returns relative path under Downloads/GrabAll, e.g. "YouTube/My Playlist". */
+    private fun resolvePlaylistRelativeFolder(url: String, isAudio: Boolean, output: String): String? {
         if (output.startsWith("content://") && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
                 contentResolver.query(
@@ -574,7 +576,7 @@ class DownloadsActivity : AppCompatActivity() {
                 )?.use { cursor ->
                     if (cursor.moveToFirst()) {
                         val rel = cursor.getString(0).orEmpty().trim('/')
-                        // e.g. "Download/GrabAll/My Playlist"
+                        // e.g. "Download/GrabAll/YouTube/My Playlist"
                         val idx = rel.indexOf("GrabAll/", ignoreCase = true)
                         if (idx >= 0) {
                             val sub = rel.substring(idx + "GrabAll/".length).trim('/')
@@ -585,13 +587,17 @@ class DownloadsActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         } else if (!output.startsWith("content://") && output.contains('/')) {
-            val sub = output.substringBefore('/').trim()
+            val sub = output.substringBeforeLast('/').trim('/')
             if (sub.isNotBlank()) return sub
         }
         val title = rowDisplayTitle[url]?.takeIf {
             it.isNotBlank() && !it.startsWith("YouTube Playlist")
         }
-        return title?.let { MediaStorePublisher.sanitizeSubfolder(it) }
+        return if (title != null) {
+            MediaStorePublisher.targetSubfolder(url, isAudio, title)
+        } else {
+            MediaStorePublisher.platformFolderForUrl(url)
+        }
     }
 
     private fun openFolderInFileManager(folderName: String?, folderDir: File): Boolean {

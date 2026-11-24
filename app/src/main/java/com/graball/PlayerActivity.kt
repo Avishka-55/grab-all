@@ -1900,7 +1900,7 @@ class PlayerActivity : AppCompatActivity() {
                     byPath[file.absolutePath] = AudioTrack(
                         file = file,
                         folderPath = parent.absolutePath,
-                        folderName = parent.name.ifBlank { "Storage" },
+                        folderName = friendlyFolderName(parent, "Storage"),
                         isSdCard = isSd,
                         durationMs = durMs
                     )
@@ -1927,7 +1927,7 @@ class PlayerActivity : AppCompatActivity() {
                         byPath[file.absolutePath] = AudioTrack(
                             file = file,
                             folderPath = parent.absolutePath,
-                            folderName = parent.name.ifBlank { "GrabAll" },
+                            folderName = friendlyFolderName(parent, "GrabAll"),
                             isSdCard = isSd,
                             durationMs = 0L
                         )
@@ -1955,6 +1955,17 @@ class PlayerActivity : AppCompatActivity() {
 
         renderCurrentView()
         applyPendingFolderIfReady()
+    }
+
+    private fun friendlyFolderName(parent: File, fallback: String): String {
+        return if (
+            parent.name.equals("Audio", ignoreCase = true) &&
+            parent.parentFile?.name.equals("YouTube", ignoreCase = true)
+        ) {
+            "YouTube Audio"
+        } else {
+            parent.name.ifBlank { fallback }
+        }
     }
 
     private fun isMusicFile(name: String): Boolean {

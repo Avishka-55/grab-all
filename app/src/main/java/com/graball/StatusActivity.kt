@@ -285,9 +285,14 @@ class StatusActivity : AppCompatActivity() {
         ioExecutor.execute {
             val byName = mutableMapOf<String, StatusItem>()
 
-            // Pre-scan Downloads/GrabAll once off the main thread so Saved badges need 0 UI disk I/O
+            // Pre-scan WhatsApp Status folder (+ legacy GrabAll root) off the main thread
+            // so Saved badges need 0 UI disk I/O and older saves still show as Saved.
             val existingSaved = mutableSetOf<String>()
-            downloadsGrabAllDir().listFiles()?.forEach { f ->
+            val grabRoot = downloadsGrabAllDir()
+            File(grabRoot, STATUS_SUBFOLDER).listFiles()?.forEach { f ->
+                if (f.isFile) existingSaved.add(f.name)
+            }
+            grabRoot.listFiles()?.forEach { f ->
                 if (f.isFile) existingSaved.add(f.name)
             }
 
@@ -529,8 +534,12 @@ class StatusActivity : AppCompatActivity() {
         }
         ioExecutor.execute {
             val uri = when {
-                item.file != null -> MediaStorePublisher.publish(this, item.file, item.name)
-                item.uri != null -> MediaStorePublisher.publishUri(this, item.uri, item.name)
+                item.file != null -> MediaStorePublisher.publish(
+                    this, item.file, item.name, subfolder = STATUS_SUBFOLDER
+                )
+                item.uri != null -> MediaStorePublisher.publishUri(
+                    this, item.uri, item.name, subfolder = STATUS_SUBFOLDER
+                )
                 else -> null
             }
             val ok = uri != null
@@ -781,5 +790,6 @@ class StatusActivity : AppCompatActivity() {
     companion object {
         private const val SAF_PREFS = "graball_status_saf"
         private const val KEY_TREE_URIS = "tree_uris"
+        private const val STATUS_SUBFOLDER = "WhatsApp Status"
     }
 }
