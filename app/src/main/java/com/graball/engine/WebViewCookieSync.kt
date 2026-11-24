@@ -218,6 +218,7 @@ object WebViewCookieSync {
      */
     fun clearYouTubeSession(context: Context) {
         lastExportedHash = 0
+        com.graball.youtube.YouTubeInnerTube.resetAnonBotBlockHint()
         try {
             RuntimePaths.cookiesFile(context).delete()
         } catch (_: Exception) {

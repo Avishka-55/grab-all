@@ -51,13 +51,34 @@ object YouTubeInnerTube {
     private const val IOS_UA =
         "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
 
-    private const val TV_SAMSUNG_CLIENT_VERSION = "5.20260707"
-    private const val TV_SAMSUNG_UA =
-        "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1"
+    /** Cooldown during which anonymous Tier 1 is skipped after a VPN bot-check. */
+    private const val ANON_BOT_BLOCK_COOLDOWN_MS = 10L * 60L * 1000L
 
-    private const val WEB_EMBEDDED_CLIENT_VERSION = "2.20260708.00.00"
-    private const val WEB_SAFARI_UA =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+    @Volatile
+    private var lastAnonBotBlockedAtMs: Long = 0L
+
+    fun resetAnonBotBlockHint() {
+        lastAnonBotBlockedAtMs = 0L
+    }
+
+    private fun isAnonBotBlockedRecently(): Boolean {
+        val ts = lastAnonBotBlockedAtMs
+        return ts > 0L && (System.currentTimeMillis() - ts) < ANON_BOT_BLOCK_COOLDOWN_MS
+    }
+
+    private fun looksLikeBotBlock(error: String?): Boolean {
+        val lower = error?.lowercase() ?: return false
+        return lower.contains("robot") ||
+            lower.contains("not a bot") ||
+            lower.contains("sign in to confirm") ||
+            lower.contains("login_required")
+    }
+
+    private fun hasWarmJsSolverCache(context: Context): Boolean {
+        val solverDir = java.io.File(RuntimePaths.ytDlpCacheDir(context), "challenge-solver")
+        return solverDir.isDirectory &&
+            (solverDir.listFiles { f -> f.isFile && f.name.startsWith("player") }?.isNotEmpty() == true)
+    }
 
     data class ResolveResult(
         val info: VideoStreamInfo?,
@@ -468,22 +489,17 @@ object YouTubeInnerTube {
 
     /**
      * Fast InnerTube-only stream resolution optimized for direct HTTP downloads
-     * (never spawns Python/yt-dlp). When signed in, tries cookie-authenticated
-     * TVHTML5 / WEB_EMBEDDED_PLAYER first so VPN IPs resolve directly in ~400ms;
-     * otherwise tries ANDROID_VR -> IOS -> VISIONOS.
+     * (never spawns Python/yt-dlp). Prefers ANDROID_VR -> IOS -> VISIONOS; if
+     * signed in and anonymous clients were just VPN bot-blocked, skips straight
+     * to yt-dlp (with cached QuickJS solver) in 0ms instead of wasting 3-5s.
      */
     fun resolveForDownload(context: Context, videoId: String): ResolveResult {
-        val visitorData = ensureVisitorData()
-        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
-        if (authHeaders != null) {
-            val authed = resolveViaAuthedClients(videoId, visitorData, authHeaders)
-            if (authed.info != null &&
-                (authed.info.audioStreams.isNotEmpty() || authed.info.muxedStreams.isNotEmpty())
-            ) {
-                return authed
-            }
+        val hasCookies = RuntimePaths.cookiesFile(context).exists()
+        if (hasCookies && isAnonBotBlockedRecently()) {
+            return ResolveResult(null, "VPN bot-check active, using authenticated yt-dlp")
         }
 
+        val visitorData = ensureVisitorData()
         val androidVr = resolveViaClient(
             videoId = videoId,
             clientName = "ANDROID_VR",
@@ -502,7 +518,12 @@ object YouTubeInnerTube {
         if (androidVr.info != null &&
             (androidVr.info.audioStreams.isNotEmpty() || androidVr.info.muxedStreams.isNotEmpty())
         ) {
+            lastAnonBotBlockedAtMs = 0L
             return androidVr
+        }
+        if (hasCookies && looksLikeBotBlock(androidVr.error)) {
+            lastAnonBotBlockedAtMs = System.currentTimeMillis()
+            return ResolveResult(null, androidVr.error)
         }
 
         val ios = resolveViaClient(
@@ -522,7 +543,12 @@ object YouTubeInnerTube {
         if (ios.info != null &&
             (ios.info.audioStreams.isNotEmpty() || ios.info.muxedStreams.isNotEmpty())
         ) {
+            lastAnonBotBlockedAtMs = 0L
             return ios
+        }
+        if (hasCookies && looksLikeBotBlock(ios.error)) {
+            lastAnonBotBlockedAtMs = System.currentTimeMillis()
+            return ResolveResult(null, ios.error)
         }
 
         val visionOs = resolveViaClient(
@@ -542,128 +568,116 @@ object YouTubeInnerTube {
         if (visionOs.info != null &&
             (visionOs.info.audioStreams.isNotEmpty() || visionOs.info.muxedStreams.isNotEmpty())
         ) {
+            lastAnonBotBlockedAtMs = 0L
             return visionOs
+        }
+        if (hasCookies && looksLikeBotBlock(visionOs.error)) {
+            lastAnonBotBlockedAtMs = System.currentTimeMillis()
         }
 
         return ResolveResult(null, androidVr.error ?: ios.error ?: visionOs.error ?: "No direct streams")
     }
 
-    // ---- Stream Resolution (Multi-Client InnerTube + Bulletproof yt-dlp Fallback) ----
+    // ---- Stream Resolution (Multi-Client InnerTube + Cached QuickJS yt-dlp Fallback) ----
 
     fun resolveStreams(
         context: Context,
         videoId: String,
         onStatus: ((String) -> Unit)? = null
     ): ResolveResult {
-        onStatus?.invoke("Connecting to YouTube…")
-        val visitorData = ensureVisitorData()
-        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+        val hasCookies = RuntimePaths.cookiesFile(context).exists()
+        var tier1Error: String? = null
 
-        // Tier 1a: When signed in, try cookie-authenticated InnerTube clients
-        // first so VPN IPs bypass YouTube's anonymous robot-check in ~400ms.
-        if (authHeaders != null) {
-            val authed = resolveViaAuthedClients(videoId, visitorData, authHeaders)
-            if (authed.info != null) return authed
+        // Skip anonymous Tier 1 immediately when we already know this VPN IP
+        // triggers YouTube's anonymous robot-check (saves 3-5s on every video).
+        if (!hasCookies || !isAnonBotBlockedRecently()) {
+            onStatus?.invoke("Connecting to YouTube…")
+            val visitorData = ensureVisitorData()
+
+            // Tier 1: Fast anonymous InnerTube /player clients (~300ms each)
+            val visionOs = resolveViaClient(
+                videoId = videoId,
+                clientName = "VISIONOS",
+                clientVersion = VISIONOS_CLIENT_VERSION,
+                clientNameId = "101",
+                userAgent = VISIONOS_UA,
+                visitorData = visitorData,
+                extraClientFields = mapOf(
+                    "deviceMake" to "Apple",
+                    "deviceModel" to "RealityDevice17,1",
+                    "osName" to "visionOS",
+                    "osVersion" to "26.5.23O471"
+                )
+            )
+            if (visionOs.info != null) {
+                lastAnonBotBlockedAtMs = 0L
+                return visionOs
+            }
+            tier1Error = visionOs.error
+
+            if (hasCookies && looksLikeBotBlock(visionOs.error)) {
+                lastAnonBotBlockedAtMs = System.currentTimeMillis()
+            } else {
+                val androidVr = resolveViaClient(
+                    videoId = videoId,
+                    clientName = "ANDROID_VR",
+                    clientVersion = ANDROID_VR_CLIENT_VERSION,
+                    clientNameId = "28",
+                    userAgent = ANDROID_VR_UA,
+                    visitorData = visitorData,
+                    extraClientFields = mapOf(
+                        "deviceMake" to "Oculus",
+                        "deviceModel" to "Quest 3",
+                        "androidSdkVersion" to 32,
+                        "osName" to "Android",
+                        "osVersion" to "12L"
+                    )
+                )
+                if (androidVr.info != null) {
+                    lastAnonBotBlockedAtMs = 0L
+                    return androidVr
+                }
+
+                val ios = resolveViaClient(
+                    videoId = videoId,
+                    clientName = "IOS",
+                    clientVersion = IOS_CLIENT_VERSION,
+                    clientNameId = "5",
+                    userAgent = IOS_UA,
+                    visitorData = visitorData,
+                    extraClientFields = mapOf(
+                        "deviceMake" to "Apple",
+                        "deviceModel" to "iPhone16,2",
+                        "osName" to "iPhone",
+                        "osVersion" to "18.3.2.22D82"
+                    )
+                )
+                if (ios.info != null) {
+                    lastAnonBotBlockedAtMs = 0L
+                    return ios
+                }
+                if (hasCookies && (looksLikeBotBlock(androidVr.error) || looksLikeBotBlock(ios.error))) {
+                    lastAnonBotBlockedAtMs = System.currentTimeMillis()
+                }
+            }
         }
 
-        // Tier 1b: Fast anonymous InnerTube /player clients (~300ms each) with
-        // real session visitorData + X-Goog-Visitor-Id (same headers yt-dlp sends).
-        val visionOs = resolveViaClient(
-            videoId = videoId,
-            clientName = "VISIONOS",
-            clientVersion = VISIONOS_CLIENT_VERSION,
-            clientNameId = "101",
-            userAgent = VISIONOS_UA,
-            visitorData = visitorData,
-            extraClientFields = mapOf(
-                "deviceMake" to "Apple",
-                "deviceModel" to "RealityDevice17,1",
-                "osName" to "visionOS",
-                "osVersion" to "26.5.23O471"
-            )
+        // Tier 2: Authenticated yt-dlp + cached QuickJS preprocessed player
+        onStatus?.invoke(
+            if (hasCookies && !hasWarmJsSolverCache(context)) {
+                "Preparing YouTube engine (first time only)…"
+            } else {
+                "Resolving stream…"
+            }
         )
-        if (visionOs.info != null) return visionOs
-
-        val androidVr = resolveViaClient(
-            videoId = videoId,
-            clientName = "ANDROID_VR",
-            clientVersion = ANDROID_VR_CLIENT_VERSION,
-            clientNameId = "28",
-            userAgent = ANDROID_VR_UA,
-            visitorData = visitorData,
-            extraClientFields = mapOf(
-                "deviceMake" to "Oculus",
-                "deviceModel" to "Quest 3",
-                "androidSdkVersion" to 32,
-                "osName" to "Android",
-                "osVersion" to "12L"
-            )
-        )
-        if (androidVr.info != null) return androidVr
-
-        val ios = resolveViaClient(
-            videoId = videoId,
-            clientName = "IOS",
-            clientVersion = IOS_CLIENT_VERSION,
-            clientNameId = "5",
-            userAgent = IOS_UA,
-            visitorData = visitorData,
-            extraClientFields = mapOf(
-                "deviceMake" to "Apple",
-                "deviceModel" to "iPhone16,2",
-                "osName" to "iPhone",
-                "osVersion" to "18.3.2.22D82"
-            )
-        )
-        if (ios.info != null) return ios
-
-        // Tier 2: Bulletproof fallback via bundled yt-dlp + QuickJS + cookies.txt
-        onStatus?.invoke("Resolving via yt-dlp engine…")
-        Log.d(TAG, "InnerTube fast clients failed ($videoId: ${visionOs.error}), trying yt-dlp")
+        Log.d(TAG, "InnerTube fast clients skipped/failed ($videoId: $tier1Error), trying yt-dlp")
         val ytDlpResult = resolveViaYtDlp(context, videoId)
         if (ytDlpResult.info != null) return ytDlpResult
 
         val reason = ytDlpResult.error?.takeIf { it.isNotBlank() }
-            ?: visionOs.error?.takeIf { it.isNotBlank() }
+            ?: tier1Error?.takeIf { it.isNotBlank() }
             ?: "Couldn't load stream for this video"
         return ResolveResult(null, reason)
-    }
-
-    private fun resolveViaAuthedClients(
-        videoId: String,
-        visitorData: String?,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders
-    ): ResolveResult {
-        val tv = resolveViaClient(
-            videoId = videoId,
-            clientName = "TVHTML5",
-            clientVersion = TV_SAMSUNG_CLIENT_VERSION,
-            clientNameId = "7",
-            userAgent = TV_SAMSUNG_UA,
-            visitorData = visitorData,
-            extraClientFields = mapOf(
-                "deviceMake" to "Samsung",
-                "deviceModel" to "UKS9800",
-                "osName" to "Tizen",
-                "osVersion" to "2.4.0"
-            ),
-            authHeaders = authHeaders
-        )
-        if (tv.info != null) return tv
-
-        val webEmbedded = resolveViaClient(
-            videoId = videoId,
-            clientName = "WEB_EMBEDDED_PLAYER",
-            clientVersion = WEB_EMBEDDED_CLIENT_VERSION,
-            clientNameId = "56",
-            userAgent = WEB_SAFARI_UA,
-            visitorData = visitorData,
-            extraClientFields = emptyMap(),
-            authHeaders = authHeaders
-        )
-        if (webEmbedded.info != null) return webEmbedded
-
-        return ResolveResult(null, tv.error ?: webEmbedded.error)
     }
 
     private fun ensureVisitorData(): String? {

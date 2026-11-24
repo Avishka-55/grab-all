@@ -79,6 +79,10 @@ object RuntimePaths {
     fun cookiesFile(context: Context): File =
         File(context.filesDir, "cookies/youtube-cookies.txt")
 
+    /** Persistent yt-dlp cache (stores preprocessed YouTube JS player solver). */
+    fun ytDlpCacheDir(context: Context): File =
+        File(context.filesDir, "yt-dlp-cache")
+
     /** Staging dir for finished downloads before the MediaStore publish. */
     fun stagingDir(context: Context): File =
         File(context.filesDir, "staging")
