@@ -2,6 +2,7 @@ package com.graball.youtube
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -20,26 +21,25 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Real logged-in `m.youtube.com` stream extractor using a hidden Android
- * WebView that shares the user's authenticated Google/YouTube `CookieManager`.
+ * Fast, ad-free logged-in `m.youtube.com` stream extractor backed by a
+ * pre-warmed hidden Android WebView sharing the user's `CookieManager`.
  *
- * Why this is bulletproof on VPN:
- * - Uses YouTube's OWN official mobile webpage & JS engine (real login cookies,
- *   real PO token, real `sig` + `n` decryption — zero `yt-dlp-ejs`, zero Python,
- *   zero QuickJS, zero manual `SAPISIDHASH` computation).
- * - Blocks YouTube ad endpoints in `shouldInterceptRequest` and disables MSE
- *   (`window.MediaSource = undefined`) so YouTube's player bypasses SABR/UMP
- *   and sets a clean, directly playable `googlevideo.com/videoplayback` MP4 URL
- *   on `<video>.src` (and/or issues clean non-UMP adaptive video+audio GETs).
- * - Immediately unloads the hidden WebView (`about:blank`) the moment the real
- *   stream URL is captured (~1.5-2.5s) and hands the 100% ad-free stream to
- *   GrabAll's native ExoPlayer (with SponsorBlock, PiP, Screen-Off Audio, and
- *   unthrottled 2 MB chunked playback) and FastYouTubeDownloader.
+ * Speed optimizations for VPN playback (~1-2s tap-to-play):
+ * - [warmUp] pre-creates the WebView & Chromium renderer process as soon as
+ *   YouTubeActivity opens (eliminating ~800ms cold WebView boot on first tap).
+ * - Blocks all non-essential subresources (thumbnails, avatars, CSS, fonts,
+ *   analytics, `/next` recommendations, and ads) in `shouldInterceptRequest`
+ *   so only HTML + player JS + `/player` travel over the VPN.
+ * - Hooks `HTMLMediaElement.prototype.src` + starts a fast 100ms watcher in
+ *   `onPageStarted` (not waiting for `onPageFinished`) so the decrypted
+ *   `googlevideo.com/videoplayback` URL is handed to ExoPlayer the instant
+ *   YouTube's JS computes it.
  */
 object YouTubeWebStreamExtractor {
 
     private const val TAG = "YouTubeWebExtractor"
-    private const val EXTRACT_TIMEOUT_SEC = 14L
+    private const val EXTRACT_TIMEOUT_SEC = 12L
+    private const val IDLE_UNLOAD_DELAY_MS = 20_000L
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val extractLock = Any()
@@ -52,6 +52,16 @@ object YouTubeWebStreamExtractor {
 
     @Volatile
     private var currentSession: ExtractSession? = null
+
+    private val idleUnloadRunnable = Runnable {
+        if (currentSession == null) {
+            try {
+                webView?.stopLoading()
+                webView?.loadUrl("about:blank")
+            } catch (_: Exception) {
+            }
+        }
+    }
 
     private class ExtractSession(
         val videoId: String,
@@ -128,6 +138,21 @@ object YouTubeWebStreamExtractor {
     }
 
     /**
+     * Pre-boots the hidden WebView & Chromium renderer process in the background
+     * so the first video tap skips ~600-1200ms of cold WebView creation.
+     */
+    fun warmUp(context: Context) {
+        if (webView != null) return
+        val appContext = context.applicationContext
+        mainHandler.post {
+            try {
+                ensureWebViewOnMain(appContext)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    /**
      * Extracts playable stream URLs for [videoId] using the hidden logged-in
      * `m.youtube.com` WebView. Call off the main thread.
      */
@@ -135,6 +160,7 @@ object YouTubeWebStreamExtractor {
         synchronized(extractLock) {
             val session = ExtractSession(videoId)
             currentSession = session
+            mainHandler.removeCallbacks(idleUnloadRunnable)
 
             val started = startLoadOnMain(context.applicationContext, videoId)
             if (!started) {
@@ -146,11 +172,13 @@ object YouTubeWebStreamExtractor {
                 session.latch.await(EXTRACT_TIMEOUT_SEC, TimeUnit.SECONDS)
             } catch (_: InterruptedException) {
             } finally {
-                // Stop loading / media immediately so hidden WebView uses zero bandwidth & CPU
-                stopHiddenWebView()
+                // Immediately silence & halt network activity, then unload to
+                // about:blank after a brief idle window so back-to-back taps stay hot.
+                haltHiddenMedia()
                 if (currentSession === session) {
                     currentSession = null
                 }
+                mainHandler.postDelayed(idleUnloadRunnable, IDLE_UNLOAD_DELAY_MS)
             }
 
             val videoStreams = mutableListOf<StreamFormat>()
@@ -238,69 +266,72 @@ object YouTubeWebStreamExtractor {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
+    private fun ensureWebViewOnMain(appContext: Context): WebView {
+        webView?.let { return it }
+        val wv = WebView(appContext).apply {
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            cm.setAcceptThirdPartyCookies(this, true)
+            val cleanUa = WebViewCookieSync.cleanBrowserUserAgent(settings.userAgentString)
+            activeUserAgent = cleanUa
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.loadsImagesAutomatically = false
+            settings.blockNetworkImage = true
+            settings.mediaPlaybackRequiresUserGesture = false
+            settings.userAgentString = cleanUa
+            addJavascriptInterface(jsBridge, "GrabAllWebExt")
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView,
+                    request: WebResourceRequest
+                ): WebResourceResponse? {
+                    val uri = request.url
+                    if (isBlockedNonEssentialRequest(uri)) {
+                        return emptyResponse()
+                    }
+                    val urlStr = uri.toString()
+                    val session = currentSession
+                    if (session != null && isGoogleVideoMedia(uri, urlStr)) {
+                        if (!session.finished && !session.adShowing) {
+                            handleCapturedMediaUrl(session, urlStr, fromVideoElement = false)
+                        }
+                        // Never let the hidden WebView actually download video bytes!
+                        return WebResourceResponse(
+                            "application/octet-stream",
+                            null,
+                            ByteArrayInputStream(ByteArray(0))
+                        )
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+
+                override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                    if (url.startsWith("https://m.youtube.com/watch")) {
+                        injectEarlyHookAndWatcher(view)
+                    }
+                }
+
+                override fun onPageFinished(view: WebView, url: String) {
+                    if (url.startsWith("https://m.youtube.com/watch")) {
+                        injectEarlyHookAndWatcher(view)
+                    }
+                }
+            }
+        }
+        webView = wv
+        return wv
+    }
+
     private fun startLoadOnMain(appContext: Context, videoId: String): Boolean {
         val latch = CountDownLatch(1)
         var ok = false
         mainHandler.post {
             try {
-                var wv = webView
-                if (wv == null) {
-                    wv = WebView(appContext).apply {
-                        val cm = CookieManager.getInstance()
-                        cm.setAcceptCookie(true)
-                        cm.setAcceptThirdPartyCookies(this, true)
-                        val cleanUa = WebViewCookieSync.cleanBrowserUserAgent(settings.userAgentString)
-                        activeUserAgent = cleanUa
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.mediaPlaybackRequiresUserGesture = false
-                        settings.userAgentString = cleanUa
-                        addJavascriptInterface(jsBridge, "GrabAllWebExt")
-                        webViewClient = object : WebViewClient() {
-                            override fun shouldInterceptRequest(
-                                view: WebView,
-                                request: WebResourceRequest
-                            ): WebResourceResponse? {
-                                val uri = request.url
-                                if (isAdOrTelemetryRequest(uri)) {
-                                    return WebResourceResponse(
-                                        "text/plain",
-                                        "utf-8",
-                                        ByteArrayInputStream(ByteArray(0))
-                                    )
-                                }
-                                val urlStr = uri.toString()
-                                val session = currentSession
-                                if (session != null && !session.finished && isGoogleVideoMedia(uri, urlStr)) {
-                                    // Don't intercept if page reports an ad is currently showing
-                                    if (!session.adShowing) {
-                                        handleCapturedMediaUrl(session, urlStr, fromVideoElement = false)
-                                    }
-                                    // Return empty response so hidden WebView doesn't waste data playing it!
-                                    if (session.finished) {
-                                        return WebResourceResponse(
-                                            "application/octet-stream",
-                                            null,
-                                            ByteArrayInputStream(ByteArray(0))
-                                        )
-                                    }
-                                }
-                                return super.shouldInterceptRequest(view, request)
-                            }
-
-                            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
-                                injectBootstrapHook(view)
-                            }
-
-                            override fun onPageFinished(view: WebView, url: String) {
-                                injectExtractorWatcher(view)
-                            }
-                        }
-                    }
-                    webView = wv
-                }
+                val wv = ensureWebViewOnMain(appContext)
                 wv.onResume()
                 wv.resumeTimers()
+                wv.stopLoading()
                 wv.loadUrl("https://m.youtube.com/watch?v=$videoId")
                 ok = true
             } catch (e: Throwable) {
@@ -316,45 +347,65 @@ object YouTubeWebStreamExtractor {
         }
     }
 
-    private fun stopHiddenWebView() {
+    private fun haltHiddenMedia() {
         mainHandler.post {
             try {
                 val wv = webView ?: return@post
+                wv.evaluateJavascript(
+                    "(function(){try{if(window.__graballExtTimer){clearInterval(window.__graballExtTimer);window.__graballExtTimer=0;}var v=document.querySelector('video');if(v){v.pause();v.removeAttribute('src');v.load();}}catch(e){}})();",
+                    null
+                )
                 wv.stopLoading()
-                wv.loadUrl("about:blank")
             } catch (_: Exception) {
             }
         }
     }
 
     /**
-     * Disables MSE (`window.MediaSource = undefined`) early so m.youtube.com
-     * falls back from SABR/UMP to a direct progressive MP4 `video.src` URL
-     * decrypted by YouTube's own official player JS with the user's real login!
+     * Injected right at `onPageStarted` (and idempotently re-ensured on
+     * `onPageFinished`):
+     * 1. Disables MSE (`MediaSource`/`ManagedMediaSource`) so YouTube serves a
+     *    clean progressive MP4 `<video>.src` instead of SABR/UMP.
+     * 2. Hooks `HTMLMediaElement.prototype.src` setter so we capture the URL
+     *    the exact microsecond YouTube's JS assigns it.
+     * 3. Polls every 100ms for `ytInitialPlayerResponse` metadata + `<video>.src`
+     *    and auto-triggers play without waiting for `onPageFinished`.
      */
-    private fun injectBootstrapHook(view: WebView) {
+    private fun injectEarlyHookAndWatcher(view: WebView) {
         val js = """
             (function() {
               try {
                 Object.defineProperty(window, 'MediaSource', { get: function() { return undefined; }, configurable: true });
                 Object.defineProperty(window, 'ManagedMediaSource', { get: function() { return undefined; }, configurable: true });
               } catch (e) {}
-            })();
-        """.trimIndent()
-        view.evaluateJavascript(js, null)
-    }
 
-    /**
-     * Reads `ytInitialPlayerResponse` metadata, strips ad slots, mutes video,
-     * auto-starts playback, and forwards `<video>.src` to Kotlin the instant
-     * YouTube's JS assigns the decrypted `googlevideo.com` URL.
-     */
-    private fun injectExtractorWatcher(view: WebView) {
-        val js = """
-            (function() {
+              if (!window.__graballSrcHooked) {
+                window.__graballSrcHooked = true;
+                try {
+                  var desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+                  if (desc && desc.set && desc.get) {
+                    Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+                      configurable: true,
+                      get: function() { return desc.get.call(this); },
+                      set: function(val) {
+                        try {
+                          if (typeof val === 'string' && val.indexOf('googlevideo.com/videoplayback') !== -1) {
+                            GrabAllWebExt.onVideoSrc(val);
+                          }
+                        } catch (e) {}
+                        return desc.set.call(this, val);
+                      }
+                    });
+                  }
+                } catch (e) {}
+              }
+
               if (window.__graballExtRunning) return;
               window.__graballExtRunning = true;
+              var reportedMeta = false;
+
               function reportMeta() {
+                if (reportedMeta) return;
                 try {
                   var pr = window.ytInitialPlayerResponse;
                   if (pr && pr.videoDetails) {
@@ -364,6 +415,7 @@ object YouTubeWebStreamExtractor {
                     var thumbs = d.thumbnail && d.thumbnail.thumbnails;
                     var thumb = (thumbs && thumbs.length) ? thumbs[thumbs.length - 1].url : "";
                     var hls = (pr.streamingData && pr.streamingData.hlsManifestUrl) ? pr.streamingData.hlsManifestUrl : "";
+                    reportedMeta = true;
                     GrabAllWebExt.onMetadata(JSON.stringify({
                       videoId: d.videoId || "",
                       title: d.title || "",
@@ -377,6 +429,7 @@ object YouTubeWebStreamExtractor {
                   }
                 } catch (e) {}
               }
+
               function tick() {
                 try {
                   reportMeta();
@@ -396,6 +449,10 @@ object YouTubeWebStreamExtractor {
                       if (src && src.indexOf('googlevideo.com/videoplayback') !== -1) {
                         GrabAllWebExt.onVideoSrc(src);
                         v.pause();
+                        if (window.__graballExtTimer) {
+                          clearInterval(window.__graballExtTimer);
+                          window.__graballExtTimer = 0;
+                        }
                         return;
                       }
                       if (v.paused) {
@@ -408,8 +465,9 @@ object YouTubeWebStreamExtractor {
                   }
                 } catch (e) {}
               }
+
               tick();
-              setInterval(tick, 250);
+              window.__graballExtTimer = setInterval(tick, 100);
             })();
         """.trimIndent()
         view.evaluateJavascript(js, null)
@@ -427,7 +485,7 @@ object YouTubeWebStreamExtractor {
         // Reject obvious ad stream markers
         if (rawUrl.contains("ctier=L") || rawUrl.contains("&oad=") || rawUrl.contains("?oad=")) return
 
-        // Duration sanity check: if we know the video duration (> 30s) and the
+        // Duration sanity check: if we know the video duration (> 35s) and the
         // stream's `dur=` is wildly shorter (e.g. a 15s pre-roll ad), skip it!
         val urlDur = extractDur(rawUrl)
         if (session.durationSec > 35L && urlDur > 0.0 && urlDur < session.durationSec - 15.0) {
@@ -465,29 +523,71 @@ object YouTubeWebStreamExtractor {
         return path.contains("/videoplayback") || path.contains("/hls_variant/") || urlStr.contains(".m3u8")
     }
 
-    private fun isAdOrTelemetryRequest(uri: Uri): Boolean {
+    /**
+     * Blocks ads, telemetry, images, avatars, stylesheets, fonts, and
+     * secondary recommendations so the hidden WebView only fetches the watch
+     * HTML, YouTube player JS, and stream metadata over VPN.
+     */
+    private fun isBlockedNonEssentialRequest(uri: Uri): Boolean {
         val host = uri.host?.lowercase() ?: return false
+        if (host.endsWith(".googlevideo.com")) return false
+
         if (host.contains("doubleclick.net") ||
             host.contains("googlesyndication.com") ||
             host.contains("googleadservices.com") ||
             host.startsWith("adservice.google.") ||
             host == "ads.youtube.com" ||
-            host == "s0.2mdn.net"
+            host == "s0.2mdn.net" ||
+            host == "i.ytimg.com" ||
+            host == "i9.ytimg.com" ||
+            host.endsWith(".ggpht.com") ||
+            host.endsWith(".googleusercontent.com") ||
+            host == "fonts.googleapis.com" ||
+            host == "fonts.gstatic.com" ||
+            host == "play.google.com"
         ) {
             return true
         }
+
+        val path = uri.path?.lowercase().orEmpty()
+        if (path.endsWith(".jpg") ||
+            path.endsWith(".jpeg") ||
+            path.endsWith(".png") ||
+            path.endsWith(".webp") ||
+            path.endsWith(".gif") ||
+            path.endsWith(".ico") ||
+            path.endsWith(".svg") ||
+            path.endsWith(".woff") ||
+            path.endsWith(".woff2") ||
+            path.endsWith(".ttf") ||
+            path.endsWith(".css")
+        ) {
+            return true
+        }
+
         if (host == "youtube.com" || host.endsWith(".youtube.com")) {
-            val path = uri.path?.lowercase().orEmpty()
             if (path.contains("/pagead/") ||
-                path.contains("/api/stats/ads") ||
+                path.contains("/api/stats/") ||
                 path.contains("/ptracking") ||
-                path.contains("/get_midroll_info")
+                path.contains("/get_midroll_info") ||
+                path.contains("/generate_204") ||
+                path.contains("/youtubei/v1/log_event") ||
+                path.contains("/youtubei/v1/next") ||
+                path.contains("/youtubei/v1/browse") ||
+                path.contains("/youtubei/v1/guide") ||
+                path.contains("/youtubei/v1/account/")
             ) {
                 return true
             }
         }
         return false
     }
+
+    private fun emptyResponse(): WebResourceResponse = WebResourceResponse(
+        "text/plain",
+        "utf-8",
+        ByteArrayInputStream(ByteArray(0))
+    )
 
     private fun stripStreamingRangeParams(url: String): String {
         return url

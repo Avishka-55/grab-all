@@ -57,19 +57,31 @@ object YouTubeInnerTube {
     private const val WEB_SAFARI_UA =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
 
-    /** Short cooldown during which anonymous Tier 1 is skipped after a VPN bot-check. */
-    private const val ANON_BOT_BLOCK_COOLDOWN_MS = 3L * 60L * 1000L
+    /** Cooldown during which anonymous Tier 1 is skipped after a VPN bot-check. */
+    private const val ANON_BOT_BLOCK_COOLDOWN_MS = 15L * 60L * 1000L
+
+    /** Cooldown during which Tier 2A (V8 TVHTML5) is skipped after failing on the current network. */
+    private const val V8_FAIL_COOLDOWN_MS = 15L * 60L * 1000L
 
     @Volatile
     private var lastAnonBotBlockedAtMs: Long = 0L
 
+    @Volatile
+    private var lastV8FailedAtMs: Long = 0L
+
     fun resetAnonBotBlockHint() {
         lastAnonBotBlockedAtMs = 0L
+        lastV8FailedAtMs = 0L
     }
 
     private fun isAnonBotBlockedRecently(): Boolean {
         val ts = lastAnonBotBlockedAtMs
         return ts > 0L && (System.currentTimeMillis() - ts) < ANON_BOT_BLOCK_COOLDOWN_MS
+    }
+
+    private fun isV8FailedRecently(): Boolean {
+        val ts = lastV8FailedAtMs
+        return ts > 0L && (System.currentTimeMillis() - ts) < V8_FAIL_COOLDOWN_MS
     }
 
     private fun looksLikeBotBlock(error: String?): Boolean {
@@ -533,7 +545,7 @@ object YouTubeInnerTube {
     fun resolveForDownload(context: Context, videoId: String): ResolveResult {
         val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
         val hasCookies = authHeaders != null
-        val visitorData = ensureVisitorData()
+        val visitorData by lazy { ensureVisitorData() }
         var tier1Error: String? = null
 
         if (!hasCookies || !isAnonBotBlockedRecently()) {
@@ -616,21 +628,26 @@ object YouTubeInnerTube {
             }
         }
 
-        // Tier 2A: Fast authenticated InnerTube + persistent V8 WebView solver (~0.5-1.5s on VPN!)
-        if (authHeaders != null) {
-            val v8 = resolveViaAuthedV8(
-                context = context,
-                videoId = videoId,
-                visitorData = visitorData,
-                authHeaders = authHeaders,
-                includeHlsFallback = false
-            )
-            if (v8.info != null &&
-                (v8.info.audioStreams.isNotEmpty() || v8.info.muxedStreams.isNotEmpty())
-            ) {
-                return v8
+        // Tier 2A: Only run inline when V8 is already warm in memory and not cooled down.
+        if (authHeaders != null && !isV8FailedRecently()) {
+            if (YouTubeJsSolver.isWarmInMemory()) {
+                val v8 = resolveViaAuthedV8(
+                    context = context,
+                    videoId = videoId,
+                    visitorData = visitorData,
+                    authHeaders = authHeaders,
+                    includeHlsFallback = false
+                )
+                if (v8.info != null &&
+                    (v8.info.audioStreams.isNotEmpty() || v8.info.muxedStreams.isNotEmpty())
+                ) {
+                    return v8
+                }
+                lastV8FailedAtMs = System.currentTimeMillis()
+                Log.d(TAG, "Download Tier 2A V8 failed ($videoId: ${v8.error}), switching to Tier 2B WebView capture")
+            } else {
+                YouTubeJsSolver.prewarmInBackground(context)
             }
-            Log.d(TAG, "Download Tier 2A V8 failed ($videoId: ${v8.error}), trying Tier 2B WebView capture")
         }
 
         // Tier 2B: Real logged-in m.youtube.com stream capture (~1.5-2.5s on VPN!)
@@ -655,7 +672,7 @@ object YouTubeInnerTube {
     ): ResolveResult {
         val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
         val hasCookies = authHeaders != null
-        val visitorData = ensureVisitorData()
+        val visitorData by lazy { ensureVisitorData() }
         var tier1Error: String? = null
 
         // Tier 1 (No-VPN instant bypass, ~300ms): try anonymous fast clients first
@@ -729,34 +746,35 @@ object YouTubeInnerTube {
             }
         }
 
-        // Tier 2A (VPN fast path, ~0.5-1.5s): Cookie-authenticated TVHTML5 / WEB_SAFARI
-        // decrypted in-memory via persistent hidden WebView V8 JIT solver (<10ms warm!).
-        if (authHeaders != null) {
-            onStatus?.invoke(
-                if (YouTubeJsSolver.isWarmInMemory()) {
-                    "Connecting to YouTube…"
-                } else {
-                    "Preparing fast engine…"
+        // Tier 2A (VPN ultra-fast path, ~0.4s): ONLY run inline when V8 is already
+        // warm in RAM and hasn't failed on this VPN! Never make the user wait on a
+        // cold 5-15s V8 compile — instead pre-warm V8 silently in the background
+        // while Tier 2B starts playing immediately.
+        if (authHeaders != null && !isV8FailedRecently()) {
+            if (YouTubeJsSolver.isWarmInMemory()) {
+                onStatus?.invoke("Loading video…")
+                val v8 = resolveViaAuthedV8(
+                    context = context,
+                    videoId = videoId,
+                    visitorData = visitorData,
+                    authHeaders = authHeaders,
+                    includeHlsFallback = true
+                )
+                if (v8.info != null) {
+                    return v8
                 }
-            )
-            val v8 = resolveViaAuthedV8(
-                context = context,
-                videoId = videoId,
-                visitorData = visitorData,
-                authHeaders = authHeaders,
-                includeHlsFallback = true
-            )
-            if (v8.info != null) {
-                return v8
+                lastV8FailedAtMs = System.currentTimeMillis()
+                Log.d(TAG, "Tier 2A V8 authed InnerTube failed ($videoId: ${v8.error}), cooling down 15m and switching to WebView capture")
+            } else {
+                YouTubeJsSolver.prewarmInBackground(context)
             }
-            Log.d(TAG, "Tier 2A V8 authed InnerTube failed ($videoId: ${v8.error}), trying Tier 2B WebView capture")
         }
 
-        // Tier 2B (VPN direct logged-in YouTube WebView capture, ~1.5-2.5s):
-        // Uses YouTube's own official m.youtube.com player JS with your real
-        // logged-in cookies to capture a clean, ad-free stream for ExoPlayer!
+        // Tier 2B (Fast logged-in m.youtube.com WebView capture, ~1-2s on VPN):
+        // Uses YouTube's official mobile player JS with your real login cookies
+        // (with images/CSS/fonts/ads blocked) to hand a clean stream to ExoPlayer.
         if (authHeaders != null || WebViewCookieSync.hasLoggedInYouTubeSession()) {
-            onStatus?.invoke("Loading with YouTube login…")
+            onStatus?.invoke("Loading video…")
             val webCap = YouTubeWebStreamExtractor.extract(context, videoId)
             if (webCap.info != null) {
                 return webCap

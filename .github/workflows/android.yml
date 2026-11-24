@@ -13,6 +13,7 @@ permissions:
 jobs:
   build-debug:
     name: Build debug APK
+    if: "!startsWith(github.ref, 'refs/tags/')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,14 +23,26 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+          cache-read-only: false
+      - name: Cache Android SDK 34
+        id: android-sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_HOME }}/platforms/android-34
+            ${{ env.ANDROID_HOME }}/build-tools/34.0.0
+          key: android-sdk-34-v1
       - name: Install Android SDK packages
+        if: steps.android-sdk-cache.outputs.cache-hit != 'true'
         run: |
-          echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0"
+          if [ ! -d "$ANDROID_HOME/platforms/android-34" ] || [ ! -d "$ANDROID_HOME/build-tools/34.0.0" ]; then
+            echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0"
+          fi
       - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+        run: gradle :app:assembleDebug --build-cache --stacktrace
       - name: Upload debug APK
         continue-on-error: true
         uses: actions/upload-artifact@v4
@@ -52,12 +65,24 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+          cache-read-only: false
+      - name: Cache Android SDK 34
+        id: android-sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_HOME }}/platforms/android-34
+            ${{ env.ANDROID_HOME }}/build-tools/34.0.0
+          key: android-sdk-34-v1
       - name: Install Android SDK packages
+        if: steps.android-sdk-cache.outputs.cache-hit != 'true'
         run: |
-          echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0"
+          if [ ! -d "$ANDROID_HOME/platforms/android-34" ] || [ ! -d "$ANDROID_HOME/build-tools/34.0.0" ]; then
+            echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0"
+          fi
       - name: Decode keystore (only when secrets exist)
         if: env.KEYSTORE_BASE64 != ''
         env:
@@ -70,13 +95,13 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -f app/keystore.jks ]; then
-            gradle :app:assembleRelease --stacktrace \
+            gradle :app:assembleRelease --build-cache --stacktrace \
               -PKEYSTORE_FILE=keystore.jks \
               -PKEYSTORE_PASSWORD="$KEYSTORE_PASSWORD" \
               -PKEY_ALIAS="$KEY_ALIAS" \
               -PKEY_PASSWORD="$KEY_PASSWORD"
           else
-            gradle :app:assembleRelease --stacktrace
+            gradle :app:assembleRelease --build-cache --stacktrace
           fi
       - name: Publish GitHub Release
         env:

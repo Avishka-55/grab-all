@@ -152,6 +152,28 @@ object YouTubeJsSolver {
     /** Returns true if a warm V8 solver is already compiled in RAM. */
     fun isWarmInMemory(): Boolean = readyInfo != null && webView != null
 
+    /** Silently pre-warms the V8 solver on a background thread without blocking playback. */
+    @Volatile
+    private var prewarming: Boolean = false
+
+    fun prewarmInBackground(context: Context) {
+        if (isWarmInMemory() || prewarming) return
+        prewarming = true
+        val appCtx = context.applicationContext
+        Thread {
+            try {
+                ensureReady(appCtx)
+            } catch (_: Throwable) {
+            } finally {
+                prewarming = false
+            }
+        }.apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+            start()
+        }
+    }
+
     /** Forces a fresh player lookup on the next call (e.g. if YouTube rotated `sts`). */
     fun invalidate() {
         synchronized(initLock) {

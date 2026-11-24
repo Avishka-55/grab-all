@@ -148,6 +148,12 @@ class YouTubeActivity : AppCompatActivity() {
         accountBtn.setOnClickListener { onAccountButtonTapped() }
         lastAccountFingerprint = currentAccountFingerprint()
         refreshAccountButton()
+        if (isSignedInToYouTube()) {
+            // Pre-boot hidden WebView + V8 solver while user browses so first
+            // video tap on VPN plays immediately without cold-start lag.
+            YouTubeWebStreamExtractor.warmUp(applicationContext)
+            YouTubeJsSolver.prewarmInBackground(applicationContext)
+        }
 
         tabViews = mapOf(
             Tab.EXPLORE to findViewById(R.id.ytTabExplore),
