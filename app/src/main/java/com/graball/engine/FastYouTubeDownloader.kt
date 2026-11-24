@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
 /**
@@ -304,8 +305,7 @@ class FastYouTubeDownloader(
         // Tracks live fractional progress (0.0..0.95) for each active playlist index
         // so the UI ticks smoothly right from track #1 instead of hanging at 0%.
         val inFlightProgress = ConcurrentHashMap<Int, Float>()
-        @Volatile
-        var latestStatusDetail: String? = "Resolving streams…"
+        val latestStatusDetail = AtomicReference<String?>("Resolving streams…")
 
         // Bounded backpressure so downloaders stay ahead of ffmpeg without filling disk,
         // and cap yt-dlp fallback subprocesses to 2 so mobile CPUs never thrash.
@@ -365,7 +365,7 @@ class FastYouTubeDownloader(
                     else ->
                         "$done of $total"
                 }
-                val fallbackDetail = if (speedStr == null) latestStatusDetail else null
+                val fallbackDetail = if (speedStr == null) latestStatusDetail.get() else null
                 callback.onProgress(pct, speedStr, etaStr, itemLabel, fallbackDetail)
             }
         }
@@ -397,7 +397,7 @@ class FastYouTubeDownloader(
                 return
             }
             callback.onLogLine("[FastYT] Fallback to yt-dlp for track: ${track.title}")
-            latestStatusDetail = "Fallback engine: ${track.title.take(36)}"
+            latestStatusDetail.set("Fallback engine: ${track.title.take(36)}")
             emitPlaylistProgress(force = false)
             if (!acquirePermit(ytDlpFallbackGate)) {
                 inFlightProgress.remove(idx)
@@ -413,7 +413,7 @@ class FastYouTubeDownloader(
                             inFlightProgress[idx] = 0.05f + (trackPct.coerceIn(0f, 100f) / 100f) * 0.88f
                         }
                         if (!status.isNullOrBlank()) {
-                            latestStatusDetail = status
+                            latestStatusDetail.set(status)
                         }
                         emitPlaylistProgress(force = false)
                     }
