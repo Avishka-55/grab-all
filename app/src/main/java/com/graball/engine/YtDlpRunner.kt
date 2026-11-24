@@ -154,18 +154,26 @@ class YtDlpRunner(
                 }
             }
             try {
-                // Fast-path for YouTube: try android_vr (direct unfragmented adaptive
-                // streams — no HLS fragment overhead) then visionos (JS-free HLS).
-                // Only fall back to full default clients if fast clients produce
-                // nothing (never restart a partially-completed playlist!).
+                // Fast-path for YouTube:
+                // - When signed in (cookiesFile exists): go STRAIGHT to yt-dlp's
+                //   cookie-capable clients (default authed clients: web_embedded,
+                //   tv_samsung, web — then web_safari,mweb fallback). Never waste
+                //   Attempt 1 on android_vr/visionos, which have SUPPORTS_COOKIES=False
+                //   and ignore the user's login on VPN IPs!
+                // - When anonymous: try android_vr,visionos (fast JS-free) first,
+                //   then fall back to default full clients.
                 val isYouTube = isYouTubeUrl(url)
-                val attempts: List<List<String>> = if (isYouTube) {
-                    listOf(
+                val hasCookies = cookiesFile != null && cookiesFile.exists() && cookiesFile.length() > 0L
+                val attempts: List<List<String>> = when {
+                    isYouTube && hasCookies -> listOf(
+                        extraArgs,
+                        listOf("--extractor-args", "youtube:player_client=web_safari,mweb") + extraArgs
+                    )
+                    isYouTube -> listOf(
                         listOf("--extractor-args", "youtube:player_client=android_vr,visionos") + extraArgs,
                         extraArgs
                     )
-                } else {
-                    listOf(extraArgs)
+                    else -> listOf(extraArgs)
                 }
 
                 val destinations = mutableListOf<File>()
@@ -297,20 +305,26 @@ class YtDlpRunner(
         if (quickJsBinary != null && quickJsBinary.exists()) {
             RuntimeExtractor.ensureExecutable(quickJsBinary)
         }
-        // Same fast JS-free visionos path that download() uses: skips the slow
-        // 2024 QuickJS challenge (~1.5s instead of timing out at 35s with "Read interrupted").
-        val fastAttempts = if (isYouTubeUrl(url)) {
-            listOf(
-                listOf("--extractor-args", "youtube:player_client=visionos"),
-                emptyList()
+        // When cookies exist, skip cookie-less visionos and go straight to
+        // yt-dlp's authenticated clients with a generous 60s timeout so QuickJS
+        // can finish solving YouTube's JS challenge on ARM CPUs without being killed.
+        val hasCookies = cookiesFile != null && cookiesFile.exists() && cookiesFile.length() > 0L
+        val jsTimeoutSec = maxOf(timeoutSec, 60L)
+        val fastAttempts: List<Pair<List<String>, Long>> = when {
+            isYouTubeUrl(url) && hasCookies -> listOf(
+                emptyList<String>() to jsTimeoutSec,
+                listOf("--extractor-args", "youtube:player_client=web_safari,mweb") to jsTimeoutSec
             )
-        } else {
-            listOf(emptyList())
+            isYouTubeUrl(url) -> listOf(
+                listOf("--extractor-args", "youtube:player_client=visionos") to timeoutSec,
+                emptyList<String>() to jsTimeoutSec
+            )
+            else -> listOf(emptyList<String>() to jsTimeoutSec)
         }
 
         var lastErr = "yt-dlp returned no stream info"
-        for (extraClientArgs in fastAttempts) {
-            val (json, err) = runExtractOnce(url, extraClientArgs, timeoutSec)
+        for ((extraClientArgs, attemptTimeout) in fastAttempts) {
+            val (json, err) = runExtractOnce(url, extraClientArgs, attemptTimeout)
             if (json != null) return json to ""
             if (err.isNotBlank()) lastErr = err
         }

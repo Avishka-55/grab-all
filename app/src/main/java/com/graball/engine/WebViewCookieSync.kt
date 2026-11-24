@@ -2,57 +2,51 @@ package com.graball.engine
 
 import android.content.Context
 import android.webkit.CookieManager
-import java.io.File
+import java.security.MessageDigest
 
 /**
- * Bidirectional sync between Android WebView's [CookieManager] and GrabAll's
- * Netscape-format `youtube-cookies.txt` ([RuntimePaths.cookiesFile]):
+ * On-device YouTube session cookie manager bridging Android WebView's
+ * [CookieManager] with `yt-dlp` (`youtube-cookies.txt`) and GrabAll's native
+ * `YouTubeInnerTube` API (`Cookie` + `Authorization: SAPISIDHASH`).
  *
- * - WebView → file ([exportYouTubeCookiesIfLoggedIn]): when the user signs into
- *   YouTube inside BrowseActivity, captures YouTube / Google session cookies
- *   and writes a valid `# Netscape HTTP Cookie File` so yt-dlp and
- *   FastYouTubeDownloader immediately use the session.
- * - File → WebView ([injectCookiesIntoWebView]): fallback for users who import
- *   a `cookies.txt` file in Settings — injects those cookies into
- *   [CookieManager] so BrowseActivity opens YouTube already logged in.
+ * Strictly matches yt-dlp's `_has_auth_cookies` requirement: a YouTube session
+ * is only considered authenticated when BOTH `LOGIN_INFO` AND at least one
+ * SAPISID cookie (`SAPISID`, `__Secure-1PAPISID`, or `__Secure-3PAPISID`) are
+ * present on `.youtube.com`.
  */
 object WebViewCookieSync {
 
     private const val NETSCAPE_HEADER = "# Netscape HTTP Cookie File"
+    private const val YOUTUBE_ORIGIN = "https://www.youtube.com"
 
-    /** Cookie names that only exist for an authenticated YouTube/Google session. */
-    private val AUTH_COOKIE_NAMES = setOf(
+    /** SID cookies used by YouTube & yt-dlp for SAPISIDHASH authentication. */
+    private val SID_COOKIE_NAMES = setOf(
         "SAPISID",
-        "__Secure-3PAPISID",
-        "LOGIN_INFO"
+        "__Secure-1PAPISID",
+        "__Secure-3PAPISID"
+    )
+
+    private val YOUTUBE_CHECK_URLS = listOf(
+        "https://www.youtube.com",
+        "https://m.youtube.com",
+        "https://youtube.com"
     )
 
     private val EXPORT_SOURCES = listOf(
+        "https://youtube.com" to ".youtube.com",
         "https://www.youtube.com" to ".youtube.com",
         "https://m.youtube.com" to ".youtube.com",
         "https://accounts.google.com" to ".google.com",
         "https://www.google.com" to ".google.com"
     )
 
+    data class YouTubeAuthHeaders(
+        val cookieHeader: String,
+        val authorizationHeader: String
+    )
+
     @Volatile
     private var lastExportedHash: Int = 0
-
-    /**
-     * Returns true if [CookieManager] currently holds a logged-in YouTube
-     * session (e.g. `SAPISID`, `__Secure-3PAPISID`, or `LOGIN_INFO`).
-     */
-    fun hasLoggedInYouTubeSession(): Boolean {
-        val manager = safeCookieManager() ?: return false
-        val urls = listOf("https://www.youtube.com", "https://m.youtube.com")
-        for (url in urls) {
-            val raw = manager.getCookie(url) ?: continue
-            val names = parseCookiePairs(raw).map { it.first }
-            if (names.any { it in AUTH_COOKIE_NAMES }) {
-                return true
-            }
-        }
-        return false
-    }
 
     /**
      * Strip WebView-identifying tokens (`; wv` and `Version/4.0`) from the
@@ -68,12 +62,32 @@ object WebViewCookieSync {
     }
 
     /**
-     * If [CookieManager] holds a logged-in YouTube session, writes the YouTube
-     * and Google cookies to [RuntimePaths.cookiesFile] in Netscape format.
+     * Returns true ONLY when [CookieManager] holds a complete YouTube login
+     * (`LOGIN_INFO` AND at least one SAPISID cookie on YouTube), matching
+     * yt-dlp's `_has_auth_cookies` requirement so we never capture a half-baked
+     * mid-redirect cookie jar.
+     */
+    fun hasLoggedInYouTubeSession(): Boolean {
+        val manager = safeCookieManager() ?: return false
+        val names = HashSet<String>()
+        for (url in YOUTUBE_CHECK_URLS) {
+            val raw = manager.getCookie(url) ?: continue
+            for ((name, value) in parseCookiePairs(raw)) {
+                if (value.isNotEmpty()) {
+                    names.add(name)
+                }
+            }
+        }
+        return "LOGIN_INFO" in names && names.any { it in SID_COOKIE_NAMES }
+    }
+
+    /**
+     * If [CookieManager] holds a complete logged-in YouTube session, writes the
+     * YouTube and Google cookies to [RuntimePaths.cookiesFile] in Netscape format.
      *
      * Returns true if the cookies file was written or updated; false if no
-     * logged-in session is present or (when [forceWrite] is false) the exported
-     * content is unchanged.
+     * complete logged-in session is present or (when [forceWrite] is false) the
+     * exported content is unchanged.
      */
     fun exportYouTubeCookiesIfLoggedIn(
         context: Context,
@@ -127,115 +141,99 @@ object WebViewCookieSync {
     }
 
     /**
-     * Reads [RuntimePaths.cookiesFile] (Netscape format) and injects all
-     * YouTube / Google cookies into [CookieManager] so BrowseActivity's WebView
-     * sees the imported logged-in session.
-     *
-     * Returns the number of cookies injected.
+     * Builds YouTube InnerTube `Cookie` + `Authorization: SAPISIDHASH ...`
+     * headers from the saved on-device session (preferring `youtube-cookies.txt`
+     * and falling back to live WebView cookies). Returns null when not signed in.
      */
-    fun injectCookiesIntoWebView(context: Context): Int {
+    fun buildYouTubeAuthHeaders(context: Context): YouTubeAuthHeaders? {
+        val cookies = LinkedHashMap<String, String>()
         val file = RuntimePaths.cookiesFile(context)
-        return injectCookiesFromFile(file)
+        if (file.isFile) {
+            try {
+                for (rawLine in file.readText().lineSequence()) {
+                    var line = rawLine.trim()
+                    if (line.isEmpty()) continue
+                    if (line.startsWith("#HttpOnly_")) {
+                        line = line.removePrefix("#HttpOnly_")
+                    } else if (line.startsWith("#")) {
+                        continue
+                    }
+                    val fields = line.split('\t')
+                    if (fields.size < 7) continue
+                    val domain = fields[0].lowercase()
+                    if (!domain.contains("youtube.com")) continue
+                    val name = fields[5].trim()
+                    val value = fields[6].trim()
+                    if (name.isNotEmpty() && value.isNotEmpty()) {
+                        cookies[name] = value
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        if ("LOGIN_INFO" !in cookies || SID_COOKIE_NAMES.none { it in cookies }) {
+            val manager = safeCookieManager()
+            if (manager != null) {
+                for (url in YOUTUBE_CHECK_URLS) {
+                    val raw = manager.getCookie(url) ?: continue
+                    for ((name, value) in parseCookiePairs(raw)) {
+                        if (value.isNotEmpty()) {
+                            cookies[name] = value
+                        }
+                    }
+                }
+            }
+        }
+
+        if ("LOGIN_INFO" !in cookies) return null
+        val sapisid = cookies["SAPISID"]
+        val sapisid1p = cookies["__Secure-1PAPISID"]
+        val sapisid3p = cookies["__Secure-3PAPISID"]
+        if (sapisid == null && sapisid1p == null && sapisid3p == null) return null
+
+        val ts = System.currentTimeMillis() / 1000L
+        val authParts = mutableListOf<String>()
+        if (sapisid != null) {
+            authParts += "SAPISIDHASH ${ts}_${sha1Hex("$ts $sapisid $YOUTUBE_ORIGIN")}"
+        }
+        if (sapisid1p != null) {
+            authParts += "SAPISID1PHASH ${ts}_${sha1Hex("$ts $sapisid1p $YOUTUBE_ORIGIN")}"
+        }
+        if (sapisid3p != null) {
+            authParts += "SAPISID3PHASH ${ts}_${sha1Hex("$ts $sapisid3p $YOUTUBE_ORIGIN")}"
+        }
+        if (authParts.isEmpty()) return null
+
+        val cookieHeader = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        return YouTubeAuthHeaders(
+            cookieHeader = cookieHeader,
+            authorizationHeader = authParts.joinToString(" ")
+        )
     }
 
-    fun injectCookiesFromFile(file: File): Int {
-        if (!file.isFile) return 0
-        val manager = safeCookieManager() ?: return 0
-        val text = try {
-            file.readText()
+    /**
+     * Signs out cleanly on-device: deletes `youtube-cookies.txt` and clears
+     * WebView cookies so both native YouTube/yt-dlp and YouTube Web are logged out.
+     */
+    fun clearYouTubeSession(context: Context) {
+        lastExportedHash = 0
+        try {
+            RuntimePaths.cookiesFile(context).delete()
         } catch (_: Exception) {
-            return 0
         }
-        if (text.isBlank()) return 0
-
-        manager.setAcceptCookie(true)
-        val nowSec = System.currentTimeMillis() / 1000L
-        var count = 0
-
-        for (rawLine in text.lineSequence()) {
-            var line = rawLine.trim()
-            if (line.isEmpty()) continue
-
-            var httpOnly = false
-            if (line.startsWith("#HttpOnly_")) {
-                httpOnly = true
-                line = line.removePrefix("#HttpOnly_")
-            } else if (line.startsWith("#")) {
-                continue
-            }
-
-            val fields = if (line.contains('\t')) {
-                line.split('\t')
-            } else {
-                line.split(Regex("\\s+"))
-            }
-            if (fields.size < 7) continue
-
-            val domain = fields[0].trim()
-            if (!domain.contains("youtube.com", ignoreCase = true) &&
-                !domain.contains("google.com", ignoreCase = true)
-            ) {
-                continue
-            }
-
-            val path = fields[2].trim().ifEmpty { "/" }
-            val secure = fields[3].equals("TRUE", ignoreCase = true)
-            val expiry = fields[4].trim().toLongOrNull() ?: 0L
-            if (expiry in 1 until nowSec) {
-                // Skip already-expired cookies.
-                continue
-            }
-            val name = fields[5].trim()
-            if (name.isEmpty()) continue
-            val value = if (fields.size > 7) {
-                fields.subList(6, fields.size).joinToString("\t")
-            } else {
-                fields[6]
-            }
-
-            val host = domain.removePrefix(".")
-            if (host.isEmpty()) continue
-            val url = "https://$host"
-
-            val header = buildString {
-                append(name)
-                append('=')
-                append(value)
-                append("; Path=")
-                append(path)
-                // RFC 6265: __Host- cookies must NOT specify a Domain attribute.
-                if (domain.startsWith(".") && !name.startsWith("__Host-")) {
-                    append("; Domain=")
-                    append(domain)
-                }
-                if (secure || name.startsWith("__Secure-") || name.startsWith("__Host-")) {
-                    append("; Secure")
-                }
-                if (httpOnly) {
-                    append("; HttpOnly")
-                }
-                if (expiry > nowSec) {
-                    append("; Max-Age=")
-                    append(expiry - nowSec)
-                }
-            }
-
-            try {
-                manager.setCookie(url, header)
-                count++
-            } catch (_: Exception) {
-                // Skip malformed cookie entries.
-            }
+        val manager = safeCookieManager() ?: return
+        try {
+            manager.removeAllCookies(null)
+            manager.flush()
+        } catch (_: Exception) {
         }
+    }
 
-        if (count > 0) {
-            try {
-                manager.flush()
-            } catch (_: Exception) {
-                // Ignore flush errors.
-            }
-        }
-        return count
+    private fun sha1Hex(input: String): String {
+        val digest = MessageDigest.getInstance("SHA-1")
+            .digest(input.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
     }
 
     private fun parseCookiePairs(raw: String): List<Pair<String, String>> {

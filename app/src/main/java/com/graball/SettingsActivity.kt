@@ -10,13 +10,12 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.graball.engine.AppUpdateChecker
-import com.graball.engine.CookieImporter
 import com.graball.engine.DownloadPrefs
 import com.graball.engine.RuntimePaths
+import com.graball.engine.WebViewCookieSync
 import com.graball.engine.YtDlpUpdater
 import com.graball.youtube.ThumbnailLoader
 import com.graball.youtube.YouTubePlaybackService
@@ -24,13 +23,15 @@ import com.graball.youtube.YouTubeStore
 import java.io.File
 
 /**
- * Settings screen: YouTube session cookies import, screen-off audio-only toggle,
+ * Settings screen: on-device YouTube sign-in, screen-off audio-only toggle,
  * SponsorBlock toggle, cache management, yt-dlp self-updater, and GrabAll app
  * update checker.
  */
 class SettingsActivity : AppCompatActivity() {
 
     private lateinit var cookiesStatus: TextView
+    private lateinit var loginBtn: Button
+    private lateinit var logoutBtn: Button
     private lateinit var cacheSizeText: TextView
     private lateinit var ytDlpVersionText: TextView
     private lateinit var ytDlpStatusText: TextView
@@ -40,21 +41,12 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var appUpdateStatusText: TextView
     private lateinit var appUpdateBtn: Button
 
-    private val importLauncher =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            if (uri != null) {
-                val result = CookieImporter.importCookies(this, uri)
-                Toast.makeText(this, result.message, Toast.LENGTH_SHORT).show()
-                if (result.ok) {
-                    cookiesStatus.text = getString(R.string.cookies_saved)
-                }
-            }
-        }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
         cookiesStatus = findViewById(R.id.settingsCookiesStatus)
+        loginBtn = findViewById(R.id.settingsLoginButton)
+        logoutBtn = findViewById(R.id.settingsLogoutButton)
         cacheSizeText = findViewById(R.id.settingsCacheSize)
         ytDlpVersionText = findViewById(R.id.settingsYtDlpVersion)
         ytDlpStatusText = findViewById(R.id.settingsYtDlpStatus)
@@ -76,11 +68,13 @@ class SettingsActivity : AppCompatActivity() {
         findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
             NavHelper.switchTab(this, PlayerActivity::class.java)
         }
-        findViewById<Button>(R.id.settingsLoginButton).setOnClickListener {
+        loginBtn.setOnClickListener {
             startActivity(Intent(this, LoginActivity::class.java))
         }
-        findViewById<Button>(R.id.settingsImportButton).setOnClickListener {
-            importLauncher.launch("*/*")
+        logoutBtn.setOnClickListener {
+            WebViewCookieSync.clearYouTubeSession(this)
+            refreshSessionUi()
+            Toast.makeText(this, "Signed out of YouTube", Toast.LENGTH_SHORT).show()
         }
 
         val screenOffCheck = findViewById<CheckBox>(R.id.settingsScreenOffAudio)
@@ -235,13 +229,20 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        cookiesStatus.text = if (RuntimePaths.cookiesFile(this).exists()) {
+        refreshSessionUi()
+        refreshCacheSize()
+        refreshYtDlpUi()
+    }
+
+    private fun refreshSessionUi() {
+        val signedIn = RuntimePaths.cookiesFile(this).exists() &&
+            WebViewCookieSync.buildYouTubeAuthHeaders(this) != null
+        cookiesStatus.text = if (signedIn) {
             getString(R.string.cookies_saved)
         } else {
             getString(R.string.cookies_missing)
         }
-        refreshCacheSize()
-        refreshYtDlpUi()
+        logoutBtn.visibility = if (signedIn) View.VISIBLE else View.GONE
     }
 
     private fun refreshYtDlpUi() {

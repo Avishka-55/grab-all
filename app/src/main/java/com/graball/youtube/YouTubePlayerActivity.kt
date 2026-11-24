@@ -25,6 +25,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.annotation.OptIn
@@ -35,7 +36,10 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.graball.BrowseActivity
+import com.graball.LoginActivity
 import com.graball.R
+import com.graball.engine.WebViewCookieSync
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
@@ -71,6 +75,10 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var videoMeta: TextView
     private lateinit var playerErrorRow: LinearLayout
     private lateinit var videoError: TextView
+    private lateinit var actionLike: TextView
+    private lateinit var actionSubscribe: TextView
+    private lateinit var actionComments: TextView
+    private lateinit var actionOpenWeb: TextView
     private lateinit var actionBgAudio: TextView
     private lateinit var actionQuality: TextView
     private lateinit var actionSpeed: TextView
@@ -83,6 +91,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private var lastRelatedVideoId: String? = null
+    private var currentEngagement: YouTubeInnerTube.VideoEngagement? = null
     private var lastSponsorSkipShown: String? = null
     private var isFullscreen = false
     private var inPipMode = false
@@ -131,6 +140,10 @@ class YouTubePlayerActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.btnPlayerRetry).setOnClickListener {
             YouTubePlaybackService.instance?.retryCurrent()
         }
+        actionLike = findViewById(R.id.actionLike)
+        actionSubscribe = findViewById(R.id.actionSubscribe)
+        actionComments = findViewById(R.id.actionComments)
+        actionOpenWeb = findViewById(R.id.actionOpenWeb)
         actionBgAudio = findViewById(R.id.actionBgAudio)
         actionQuality = findViewById(R.id.actionQuality)
         actionSpeed = findViewById(R.id.actionSpeed)
@@ -178,6 +191,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
                 DownloadSheetHelper.show(this, item)
             }
         }
+
+        actionLike.setOnClickListener { toggleLike() }
+        actionSubscribe.setOnClickListener { toggleSubscribe() }
+        actionComments.setOnClickListener { showCommentsDialog() }
+        actionOpenWeb.setOnClickListener { openCurrentVideoInWeb() }
 
         actionBgAudio.setOnClickListener {
             val svc = YouTubePlaybackService.instance ?: return@setOnClickListener
@@ -441,14 +459,217 @@ class YouTubePlayerActivity : AppCompatActivity() {
     }
 
     private fun loadRelated(videoId: String) {
+        currentEngagement = null
+        updateEngagementChips(null)
         io.execute {
-            val items = YouTubeInnerTube.fetchRelated(videoId)
+            val (items, engagement) = YouTubeInnerTube.fetchWatchData(this, videoId)
             runOnUiThread {
-                if (!isFinishing) {
+                if (!isFinishing && lastRelatedVideoId == videoId) {
                     relatedAdapter.submitList(items, videoId)
+                    currentEngagement = engagement
+                    updateEngagementChips(engagement)
                 }
             }
         }
+    }
+
+    private fun updateEngagementChips(eng: YouTubeInnerTube.VideoEngagement?) {
+        val liked = eng?.isLiked == true
+        val likeLabel = eng?.likeCount?.takeIf { it.isNotBlank() }
+        actionLike.text = when {
+            liked && likeLabel != null -> "👍 $likeLabel"
+            liked -> "👍 Liked"
+            likeLabel != null -> "👍 $likeLabel"
+            else -> "👍 Like"
+        }
+        actionLike.setBackgroundResource(
+            if (liked) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+        )
+
+        val subscribed = eng?.isSubscribed == true
+        actionSubscribe.text = if (subscribed) "✓ Subscribed" else "🔔 Subscribe"
+        actionSubscribe.setBackgroundResource(
+            if (subscribed) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+        )
+
+        val commentCount = eng?.commentCount?.takeIf { it.isNotBlank() }
+        actionComments.text = if (commentCount != null) "💬 $commentCount" else "💬 Comments"
+    }
+
+    private fun requireYouTubeLogin(): Boolean {
+        if (WebViewCookieSync.buildYouTubeAuthHeaders(this) != null) return true
+        AlertDialog.Builder(this)
+            .setTitle("Sign in to YouTube")
+            .setMessage("Sign in with your Google account inside GrabAll to like videos, subscribe to channels, and comment.")
+            .setPositiveButton("Log in") { _, _ ->
+                startActivity(Intent(this, LoginActivity::class.java))
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+        return false
+    }
+
+    private fun toggleLike() {
+        val videoId = YouTubePlaybackService.currentState.currentItem?.id ?: return
+        if (!requireYouTubeLogin()) return
+        val prev = currentEngagement
+        val nextLiked = !(prev?.isLiked ?: false)
+        val optimistic = (prev ?: YouTubeInnerTube.VideoEngagement(
+            channelId = null,
+            channelName = "",
+            isSubscribed = false,
+            isLiked = false,
+            likeCount = "",
+            commentCount = "",
+            commentsToken = null
+        )).copy(isLiked = nextLiked)
+        currentEngagement = optimistic
+        updateEngagementChips(optimistic)
+
+        io.execute {
+            val ok = YouTubeInnerTube.setLike(this, videoId, nextLiked)
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                if (ok) {
+                    Toast.makeText(
+                        this,
+                        if (nextLiked) "Liked video" else "Removed like",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    currentEngagement = prev
+                    updateEngagementChips(prev)
+                    Toast.makeText(
+                        this,
+                        "Couldn't update like — try signing in again in Settings",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun toggleSubscribe() {
+        if (YouTubePlaybackService.currentState.currentItem == null) return
+        if (!requireYouTubeLogin()) return
+        val prev = currentEngagement
+        val channelId = prev?.channelId
+        if (channelId.isNullOrBlank()) {
+            openCurrentVideoInWeb()
+            return
+        }
+        val nextSub = !prev.isSubscribed
+        val optimistic = prev.copy(isSubscribed = nextSub)
+        currentEngagement = optimistic
+        updateEngagementChips(optimistic)
+
+        io.execute {
+            val ok = YouTubeInnerTube.setSubscribe(this, channelId, nextSub)
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                if (ok) {
+                    Toast.makeText(
+                        this,
+                        if (nextSub) "Subscribed" else "Unsubscribed",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    currentEngagement = prev
+                    updateEngagementChips(prev)
+                    Toast.makeText(
+                        this,
+                        "Couldn't update subscription — try opening in YouTube Web",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun showCommentsDialog() {
+        if (YouTubePlaybackService.currentState.currentItem == null) return
+        val token = currentEngagement?.commentsToken
+        if (token.isNullOrBlank()) {
+            AlertDialog.Builder(this)
+                .setTitle("Comments")
+                .setMessage("Comments aren't loaded for this video yet. Open it in Ad-Free YouTube Web to read and post comments?")
+                .setPositiveButton("Open in YouTube Web") { _, _ -> openCurrentVideoInWeb() }
+                .setNegativeButton("Close", null)
+                .show()
+            return
+        }
+
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+        }
+        val statusText = TextView(this).apply {
+            text = "Loading comments…"
+            setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_subtext))
+            textSize = 13f
+        }
+        container.addView(statusText)
+        val scroll = ScrollView(this).apply {
+            setBackgroundColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_bg))
+            addView(container)
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(
+                currentEngagement?.commentCount?.takeIf { it.isNotBlank() }
+                    ?.let { "Comments ($it)" } ?: "Comments"
+            )
+            .setView(scroll)
+            .setPositiveButton("Comment in YouTube Web") { _, _ -> openCurrentVideoInWeb() }
+            .setNegativeButton("Close", null)
+            .create()
+        dialog.show()
+
+        io.execute {
+            val comments = YouTubeInnerTube.fetchComments(this, token)
+            runOnUiThread {
+                if (isFinishing || !dialog.isShowing) return@runOnUiThread
+                container.removeAllViews()
+                if (comments.isEmpty()) {
+                    statusText.text = "No comments found. Tap 'Comment in YouTube Web' to view or post."
+                    container.addView(statusText)
+                    return@runOnUiThread
+                }
+                val gap = (10 * resources.displayMetrics.density).toInt()
+                for (c in comments) {
+                    val header = TextView(this).apply {
+                        val meta = listOf(c.author, c.timeText, c.likes.takeIf { it.isNotBlank() }?.let { "👍 $it" })
+                            .filterNotNull()
+                            .filter { it.isNotBlank() }
+                            .joinToString(" · ")
+                        text = meta
+                        setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_subtext))
+                        textSize = 12f
+                    }
+                    val body = TextView(this).apply {
+                        text = c.text
+                        setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_text))
+                        textSize = 13f
+                        setPadding(0, 2, 0, gap)
+                    }
+                    container.addView(header)
+                    container.addView(body)
+                }
+            }
+        }
+    }
+
+    private fun openCurrentVideoInWeb() {
+        val videoId = YouTubePlaybackService.currentState.currentItem?.id
+        val url = if (!videoId.isNullOrBlank()) {
+            "https://m.youtube.com/watch?v=$videoId"
+        } else {
+            "https://m.youtube.com"
+        }
+        startActivity(
+            Intent(this, BrowseActivity::class.java).putExtra("start_url", url)
+        )
     }
 
     // ---- PiP & Fullscreen ----

@@ -148,6 +148,12 @@ class YouTubeActivity : AppCompatActivity() {
         tabViews.forEach { (tab, view) ->
             view.setOnClickListener { selectTab(tab) }
         }
+        findViewById<TextView>(R.id.ytTabWeb).setOnClickListener {
+            startActivity(
+                Intent(this, com.graball.BrowseActivity::class.java)
+                    .putExtra("start_url", "https://m.youtube.com")
+            )
+        }
 
         filterChips = mapOf(
             YouTubeInnerTube.SearchFilter.ALL to findViewById(R.id.chipAll),

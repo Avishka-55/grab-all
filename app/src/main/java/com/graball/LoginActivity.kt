@@ -13,26 +13,22 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import com.graball.engine.CookieImporter
 import com.graball.engine.WebViewCookieSync
 
 /**
- * Dedicated on-device YouTube / Google sign-in launched from Settings.
+ * Dedicated on-device YouTube / Google sign-in launched from Settings or the
+ * YouTube player.
  *
  * Opens Google's YouTube ServiceLogin page inside an in-app WebView with a
  * clean Chrome Mobile User-Agent (WebView `; wv` and `Version/4.0` markers
  * stripped) and multi-window popup support for 2FA/OAuth challenges.
  *
- * As soon as Google redirects back to YouTube with an authenticated session
- * (`SAPISID` / `LOGIN_INFO`), cookies are auto-saved in Netscape format to
- * `youtube-cookies.txt` for yt-dlp / FastYouTubeDownloader and this screen
- * closes — while BrowseActivity is also logged in automatically via Android's
- * shared WebView CookieManager.
- *
- * Also keeps the cookies.txt file import button as a fallback for devices with
- * outdated system WebViews.
+ * As soon as Google redirects back to YouTube with a full authenticated
+ * session (`LOGIN_INFO` + `SAPISID`), cookies are auto-saved in Netscape format
+ * to `youtube-cookies.txt` for yt-dlp / YouTubeInnerTube and this screen closes
+ * — while BrowseActivity is also logged in automatically via Android's shared
+ * WebView CookieManager.
  */
 class LoginActivity : AppCompatActivity() {
 
@@ -45,11 +41,6 @@ class LoginActivity : AppCompatActivity() {
     private var popupDialog: Dialog? = null
     private var popupWebView: WebView? = null
     private var autoSaved = false
-
-    private val importLauncher =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            if (uri != null) importCookies(uri)
-        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -167,9 +158,6 @@ class LoginActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.doneButton).setOnClickListener { saveLogin() }
-        findViewById<Button>(R.id.importButton).setOnClickListener {
-            importLauncher.launch("*/*")
-        }
         if (savedInstanceState == null) {
             webView.loadUrl(GOOGLE_YOUTUBE_LOGIN_URL)
         }
@@ -216,15 +204,11 @@ class LoginActivity : AppCompatActivity() {
             Toast.makeText(this, "YouTube login saved", Toast.LENGTH_SHORT).show()
             finish()
         } else {
-            Toast.makeText(this, "No login found — sign in first", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun importCookies(uri: Uri) {
-        val result = CookieImporter.importCookies(this, uri)
-        Toast.makeText(this, result.message, Toast.LENGTH_SHORT).show()
-        if (result.ok) {
-            finish()
+            Toast.makeText(
+                this,
+                "Sign-in not complete yet — wait for YouTube home page to finish loading",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 }

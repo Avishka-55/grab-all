@@ -12,8 +12,10 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.io.ByteArrayInputStream
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -147,6 +149,20 @@ class BrowseActivity : AppCompatActivity() {
             }
         }
         webView.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView,
+                request: WebResourceRequest
+            ): WebResourceResponse? {
+                if (isYouTubeAdRequest(request.url)) {
+                    return WebResourceResponse(
+                        "text/plain",
+                        "utf-8",
+                        ByteArrayInputStream(ByteArray(0))
+                    )
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 loading.visibility = android.view.View.VISIBLE
             }
@@ -155,6 +171,9 @@ class BrowseActivity : AppCompatActivity() {
                 loading.visibility = android.view.View.GONE
                 currentUrl = url
                 updateFabState()
+                if (isYouTubeUrl(url)) {
+                    injectYouTubeAdBlocker(view)
+                }
                 syncYouTubeSessionIfNeeded(url)
             }
 
@@ -172,6 +191,9 @@ class BrowseActivity : AppCompatActivity() {
             ) {
                 currentUrl = url
                 updateFabState()
+                if (isYouTubeUrl(url)) {
+                    injectYouTubeAdBlocker(view)
+                }
                 syncYouTubeSessionIfNeeded(url)
             }
 
@@ -282,19 +304,8 @@ class BrowseActivity : AppCompatActivity() {
             refreshPanelLink()
         }
         if (savedInstanceState == null) {
-            // The Music tab passes m.youtube.com/music; everything
-            // else opens plain YouTube.
             val startUrl = intent.getStringExtra("start_url")
-                ?: "https://www.youtube.com"
-            // Option 3 fallback: if cookies.txt was imported in Settings and the
-            // WebView does not yet have a logged-in YouTube session, inject the
-            // imported cookies before loading YouTube.
-            if (isYouTubeUrl(startUrl) &&
-                !WebViewCookieSync.hasLoggedInYouTubeSession() &&
-                RuntimePaths.cookiesFile(this).exists()
-            ) {
-                WebViewCookieSync.injectCookiesIntoWebView(this)
-            }
+                ?: "https://m.youtube.com"
             webView.loadUrl(startUrl)
         }
     }
@@ -324,6 +335,94 @@ class BrowseActivity : AppCompatActivity() {
     private fun isYouTubeUrl(url: String?): Boolean {
         val host = url?.let { Uri.parse(it).host }?.lowercase() ?: return false
         return host == "youtube.com" || host.endsWith(".youtube.com") || host == "youtu.be"
+    }
+
+    /**
+     * Layer 1 YouTube Ad-Blocker: blocks known ad & tracking endpoints at the
+     * network layer while leaving `accounts.google.com` and `googlevideo.com`
+     * completely untouched so login and playback stay seamless.
+     */
+    private fun isYouTubeAdRequest(uri: Uri?): Boolean {
+        if (uri == null) return false
+        val host = uri.host?.lowercase() ?: return false
+        if (host == "accounts.google.com" || host.endsWith(".googlevideo.com")) {
+            return false
+        }
+        if (host.contains("doubleclick.net") ||
+            host.contains("googlesyndication.com") ||
+            host.contains("googleadservices.com") ||
+            host.startsWith("adservice.google.") ||
+            host == "ads.youtube.com" ||
+            host == "s0.2mdn.net"
+        ) {
+            return true
+        }
+        if (host == "youtube.com" || host.endsWith(".youtube.com")) {
+            val path = uri.path?.lowercase().orEmpty()
+            if (path.contains("/pagead/") ||
+                path.contains("/api/stats/ads") ||
+                path.contains("/ptracking") ||
+                path.contains("/get_midroll_info")
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Layer 2 YouTube Ad-Blocker: injects CSS to hide sponsored feed/banner
+     * slots and a lightweight observer that immediately skips/fast-forwards any
+     * in-stream video ads on m.youtube.com.
+     */
+    private fun injectYouTubeAdBlocker(view: WebView) {
+        val js = """
+            (function() {
+              if (!document.getElementById('graball-adblock-css')) {
+                var style = document.createElement('style');
+                style.id = 'graball-adblock-css';
+                style.textContent = [
+                  'ytm-promoted-sparkles-web-renderer',
+                  'ytm-promoted-video-renderer',
+                  'ytm-companion-ad-renderer',
+                  'ytm-in-feed-ad-layout-renderer',
+                  'ytm-statement-banner-renderer',
+                  'ad-slot-renderer',
+                  '.ad-showing .ytp-ad-module',
+                  '.ytp-ad-overlay-container',
+                  '.ytp-ad-player-overlay',
+                  '#player-ads'
+                ].join(',') + ' { display: none !important; }';
+                (document.head || document.documentElement).appendChild(style);
+              }
+              if (window.__graballAdSkipInstalled) return;
+              window.__graballAdSkipInstalled = true;
+              function skipAds() {
+                try {
+                  var skipBtns = document.querySelectorAll(
+                    '.ytp-ad-skip-button, .ytp-skip-ad-button, .ytp-ad-skip-button-modern, .ytp-ad-overlay-close-button'
+                  );
+                  for (var i = 0; i < skipBtns.length; i++) {
+                    skipBtns[i].click();
+                  }
+                  var player = document.querySelector('.html5-video-player');
+                  if (player && (player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting'))) {
+                    var v = player.querySelector('video');
+                    if (v) {
+                      v.muted = true;
+                      if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) {
+                        v.currentTime = v.duration;
+                      }
+                    }
+                  }
+                } catch (e) {}
+              }
+              setInterval(skipAds, 250);
+              var obs = new MutationObserver(skipAds);
+              obs.observe(document.documentElement, { childList: true, subtree: true });
+            })();
+        """.trimIndent()
+        view.evaluateJavascript(js, null)
     }
 
     private fun syncYouTubeSessionIfNeeded(url: String?, showToast: Boolean = true) {

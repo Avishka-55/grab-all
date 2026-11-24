@@ -158,7 +158,7 @@ class FastYouTubeDownloader(
         callback.onLogLine("[FastYT] Resolving direct stream for $videoId…")
         callback.onProgress(null, null, null, null, "Resolving fast stream…")
 
-        val resolved = YouTubeInnerTube.resolveForDownload(videoId)
+        val resolved = YouTubeInnerTube.resolveForDownload(context, videoId)
         val info = resolved.info
         if (info == null) {
             callback.onLogLine("[FastYT] Direct stream unavailable (${resolved.error}), using yt-dlp engine")
@@ -456,7 +456,7 @@ class FastYouTubeDownloader(
                             val baseName = "$prefix - $safeTitle"
                             val tempTag = "t${idx}_${track.id}"
 
-                            val resolved = YouTubeInnerTube.resolveForDownload(track.id)
+                            val resolved = YouTubeInnerTube.resolveForDownload(context, track.id)
                             val info = resolved.info
                             if (cancelled) {
                                 inFlightProgress.remove(idx)

@@ -5,6 +5,7 @@ import android.util.Log
 import com.graball.engine.DownloadService
 import com.graball.engine.RuntimeExtractor
 import com.graball.engine.RuntimePaths
+import com.graball.engine.WebViewCookieSync
 import com.graball.engine.YtDlpRunner
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -50,9 +51,34 @@ object YouTubeInnerTube {
     private const val IOS_UA =
         "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
 
+    private const val TV_SAMSUNG_CLIENT_VERSION = "5.20260707"
+    private const val TV_SAMSUNG_UA =
+        "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1"
+
+    private const val WEB_EMBEDDED_CLIENT_VERSION = "2.20260708.00.00"
+    private const val WEB_SAFARI_UA =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+
     data class ResolveResult(
         val info: VideoStreamInfo?,
         val error: String? = null
+    )
+
+    data class VideoEngagement(
+        val channelId: String?,
+        val channelName: String,
+        val isSubscribed: Boolean,
+        val isLiked: Boolean,
+        val likeCount: String,
+        val commentCount: String,
+        val commentsToken: String?
+    )
+
+    data class YtComment(
+        val author: String,
+        val text: String,
+        val timeText: String,
+        val likes: String
     )
 
     private val client = OkHttpClient.Builder()
@@ -365,13 +391,99 @@ object YouTubeInnerTube {
     }
 
     /**
-     * Fast InnerTube-only stream resolution optimized for direct HTTP downloads
-     * (never spawns Python/yt-dlp). Prefers ANDROID_VR -> IOS -> VISIONOS so
-     * direct adaptive M4A/H.264 URLs (compatible with multi-connection Range
-     * chunking) are preferred over HLS manifests.
+     * Fetches Up Next related videos + engagement metadata (channelId, Like
+     * status, Subscribe status, comment count, and comments continuation token)
+     * in a single `/youtubei/v1/next` call (authenticated when signed in).
      */
-    fun resolveForDownload(videoId: String): ResolveResult {
+    fun fetchWatchData(
+        context: Context,
+        videoId: String
+    ): Pair<List<YtItem>, VideoEngagement?> {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+        val body = JSONObject().apply {
+            put("context", webContext())
+            put("videoId", videoId)
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders
+        ) ?: return emptyList<YtItem>() to null
+
+        val items = mutableListOf<YtItem>()
+        val seen = mutableSetOf(videoId)
+        collectItems(root, items, seen)
+        val engagement = parseVideoEngagement(root)
+        return items.filter { !it.isPlaylist }.take(30) to engagement
+    }
+
+    /** Fetches top comments for a video using its `/next` continuation token. */
+    fun fetchComments(context: Context, continuationToken: String): List<YtComment> {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+        val body = JSONObject().apply {
+            put("context", webContext())
+            put("continuation", continuationToken)
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders
+        ) ?: return emptyList()
+
+        val out = mutableListOf<YtComment>()
+        val seen = mutableSetOf<String>()
+        collectComments(root, out, seen)
+        return out.take(40)
+    }
+
+    /** Likes or removes like on a video using the user's on-device YouTube session. */
+    fun setLike(context: Context, videoId: String, like: Boolean): Boolean {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context) ?: return false
+        val endpoint = if (like) {
+            "https://www.youtube.com/youtubei/v1/like/like?prettyPrint=false"
+        } else {
+            "https://www.youtube.com/youtubei/v1/like/removelike?prettyPrint=false"
+        }
+        val body = JSONObject().apply {
+            put("context", webContext())
+            put("target", JSONObject().apply { put("videoId", videoId) })
+        }
+        return postInnerTube(endpoint, body, authHeaders = authHeaders) != null
+    }
+
+    /** Subscribes or unsubscribes to a channel using the user's on-device YouTube session. */
+    fun setSubscribe(context: Context, channelId: String, subscribe: Boolean): Boolean {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context) ?: return false
+        val endpoint = if (subscribe) {
+            "https://www.youtube.com/youtubei/v1/subscription/subscribe?prettyPrint=false"
+        } else {
+            "https://www.youtube.com/youtubei/v1/subscription/unsubscribe?prettyPrint=false"
+        }
+        val body = JSONObject().apply {
+            put("context", webContext())
+            put("channelIds", JSONArray().put(channelId))
+        }
+        return postInnerTube(endpoint, body, authHeaders = authHeaders) != null
+    }
+
+    /**
+     * Fast InnerTube-only stream resolution optimized for direct HTTP downloads
+     * (never spawns Python/yt-dlp). When signed in, tries cookie-authenticated
+     * TVHTML5 / WEB_EMBEDDED_PLAYER first so VPN IPs resolve directly in ~400ms;
+     * otherwise tries ANDROID_VR -> IOS -> VISIONOS.
+     */
+    fun resolveForDownload(context: Context, videoId: String): ResolveResult {
         val visitorData = ensureVisitorData()
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+        if (authHeaders != null) {
+            val authed = resolveViaAuthedClients(videoId, visitorData, authHeaders)
+            if (authed.info != null &&
+                (authed.info.audioStreams.isNotEmpty() || authed.info.muxedStreams.isNotEmpty())
+            ) {
+                return authed
+            }
+        }
+
         val androidVr = resolveViaClient(
             videoId = videoId,
             clientName = "ANDROID_VR",
@@ -445,8 +557,16 @@ object YouTubeInnerTube {
     ): ResolveResult {
         onStatus?.invoke("Connecting to YouTube…")
         val visitorData = ensureVisitorData()
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
 
-        // Tier 1: Fast direct InnerTube /player clients (~300ms each) with
+        // Tier 1a: When signed in, try cookie-authenticated InnerTube clients
+        // first so VPN IPs bypass YouTube's anonymous robot-check in ~400ms.
+        if (authHeaders != null) {
+            val authed = resolveViaAuthedClients(videoId, visitorData, authHeaders)
+            if (authed.info != null) return authed
+        }
+
+        // Tier 1b: Fast anonymous InnerTube /player clients (~300ms each) with
         // real session visitorData + X-Goog-Visitor-Id (same headers yt-dlp sends).
         val visionOs = resolveViaClient(
             videoId = videoId,
@@ -509,6 +629,43 @@ object YouTubeInnerTube {
         return ResolveResult(null, reason)
     }
 
+    private fun resolveViaAuthedClients(
+        videoId: String,
+        visitorData: String?,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders
+    ): ResolveResult {
+        val tv = resolveViaClient(
+            videoId = videoId,
+            clientName = "TVHTML5",
+            clientVersion = TV_SAMSUNG_CLIENT_VERSION,
+            clientNameId = "7",
+            userAgent = TV_SAMSUNG_UA,
+            visitorData = visitorData,
+            extraClientFields = mapOf(
+                "deviceMake" to "Samsung",
+                "deviceModel" to "UKS9800",
+                "osName" to "Tizen",
+                "osVersion" to "2.4.0"
+            ),
+            authHeaders = authHeaders
+        )
+        if (tv.info != null) return tv
+
+        val webEmbedded = resolveViaClient(
+            videoId = videoId,
+            clientName = "WEB_EMBEDDED_PLAYER",
+            clientVersion = WEB_EMBEDDED_CLIENT_VERSION,
+            clientNameId = "56",
+            userAgent = WEB_SAFARI_UA,
+            visitorData = visitorData,
+            extraClientFields = emptyMap(),
+            authHeaders = authHeaders
+        )
+        if (webEmbedded.info != null) return webEmbedded
+
+        return ResolveResult(null, tv.error ?: webEmbedded.error)
+    }
+
     private fun ensureVisitorData(): String? {
         cachedVisitorData?.takeIf { it.isNotBlank() }?.let { return it }
         val body = JSONObject().apply { put("context", webContext()) }
@@ -523,7 +680,8 @@ object YouTubeInnerTube {
         clientNameId: String,
         userAgent: String,
         visitorData: String?,
-        extraClientFields: Map<String, Any>
+        extraClientFields: Map<String, Any>,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null
     ): ResolveResult {
         val clientObj = JSONObject().apply {
             put("clientName", clientName)
@@ -547,7 +705,8 @@ object YouTubeInnerTube {
             userAgent = userAgent,
             clientNameId = clientNameId,
             clientVersion = clientVersion,
-            visitorData = visitorData
+            visitorData = visitorData,
+            authHeaders = authHeaders
         ) ?: return ResolveResult(null, "Network error reaching YouTube")
 
         val playStatus = root.optJSONObject("playabilityStatus")
@@ -825,7 +984,8 @@ object YouTubeInnerTube {
         userAgent: String = WEB_UA,
         clientNameId: String = "1",
         clientVersion: String = WEB_CLIENT_VERSION,
-        visitorData: String? = cachedVisitorData
+        visitorData: String? = cachedVisitorData,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null
     ): JSONObject? {
         return try {
             val reqBuilder = Request.Builder()
@@ -836,6 +996,12 @@ object YouTubeInnerTube {
                 .header("X-YouTube-Client-Version", clientVersion)
             if (!visitorData.isNullOrBlank()) {
                 reqBuilder.header("X-Goog-Visitor-Id", visitorData)
+            }
+            if (authHeaders != null) {
+                reqBuilder.header("Cookie", authHeaders.cookieHeader)
+                reqBuilder.header("Authorization", authHeaders.authorizationHeader)
+                reqBuilder.header("X-Origin", "https://www.youtube.com")
+                reqBuilder.header("X-Goog-AuthUser", "0")
             }
             val req = reqBuilder
                 .post(body.toString().toRequestBody(JSON_MEDIA))
@@ -853,6 +1019,179 @@ object YouTubeInnerTube {
         } catch (e: Exception) {
             Log.w(TAG, "InnerTube request failed: ${e.message}")
             null
+        }
+    }
+
+    private fun parseVideoEngagement(root: JSONObject): VideoEngagement? {
+        var channelId: String? = null
+        var channelName = ""
+        var isSubscribed = false
+        var isLiked = false
+        var likeCount = ""
+        var commentCount = ""
+        var commentsToken: String? = null
+
+        fun scan(node: Any?) {
+            when (node) {
+                is JSONObject -> {
+                    if (node.has("videoSecondaryInfoRenderer")) {
+                        val sec = node.optJSONObject("videoSecondaryInfoRenderer")
+                        val owner = sec?.optJSONObject("owner")?.optJSONObject("videoOwnerRenderer")
+                        if (owner != null) {
+                            channelName = extractText(owner.optJSONObject("title")).ifBlank { channelName }
+                            val cid = owner.optJSONObject("navigationEndpoint")
+                                ?.optJSONObject("browseEndpoint")
+                                ?.optString("browseId")
+                                ?.takeIf { it.startsWith("UC") }
+                            if (cid != null) channelId = cid
+                        }
+                        val sub = sec?.optJSONObject("subscribeButton")?.optJSONObject("subscribeButtonRenderer")
+                        if (sub != null) {
+                            isSubscribed = sub.optBoolean("subscribed", false)
+                            val cid = sub.optString("channelId").takeIf { it.startsWith("UC") }
+                            if (cid != null) channelId = cid
+                        }
+                    }
+                    if (node.has("segmentedLikeDislikeButtonViewModel")) {
+                        val seg = node.optJSONObject("segmentedLikeDislikeButtonViewModel")
+                        val likeVm = seg?.optJSONObject("likeButtonViewModel")
+                            ?.optJSONObject("likeButtonViewModel")
+                        val toggle = likeVm?.optJSONObject("toggleButtonViewModel")
+                            ?.optJSONObject("toggleButtonViewModel")
+                        val toggled = toggle?.optBoolean("isTogglingDisabled", false) == false
+                        val defBtn = toggle?.optJSONObject("defaultButtonViewModel")
+                            ?.optJSONObject("buttonViewModel")
+                        val title = defBtn?.optString("title").orEmpty()
+                        if (title.isNotBlank() && likeCount.isBlank()) {
+                            likeCount = title
+                        }
+                        val statusEntity = likeVm?.optString("likeStatusEntityKey").orEmpty()
+                        if (toggled && statusEntity.isNotBlank()) {
+                            // Resolved below from frameworkUpdates if present
+                        }
+                    }
+                    if (node.has("likeStatusEntity")) {
+                        val status = node.optJSONObject("likeStatusEntity")?.optString("likeStatus")
+                        if (status == "LIKE") isLiked = true
+                    }
+                    if (node.has("subscriptionStateEntity")) {
+                        val subEntity = node.optJSONObject("subscriptionStateEntity")
+                        if (subEntity != null && subEntity.has("subscribed")) {
+                            isSubscribed = subEntity.optBoolean("subscribed", isSubscribed)
+                        }
+                    }
+                    if (node.has("itemSectionRenderer")) {
+                        val sec = node.optJSONObject("itemSectionRenderer")
+                        val sectionId = sec?.optString("sectionIdentifier").orEmpty()
+                        val targetId = sec?.optString("targetId").orEmpty()
+                        if (sectionId == "comment-item-section" || targetId == "comments-section") {
+                            val token = findContinuationToken(sec)
+                            if (!token.isNullOrBlank()) commentsToken = token
+                        }
+                    }
+                    if (node.has("commentsEntryPointHeaderRenderer")) {
+                        val hdr = node.optJSONObject("commentsEntryPointHeaderRenderer")
+                        val c = extractText(hdr?.optJSONObject("commentCount"))
+                        if (c.isNotBlank()) commentCount = c
+                    }
+                    if (node.has("engagementPanelSectionListRenderer")) {
+                        val panel = node.optJSONObject("engagementPanelSectionListRenderer")
+                        if (panel?.optString("panelIdentifier") == "engagement-panel-comments-section") {
+                            val hdr = panel.optJSONObject("header")
+                                ?.optJSONObject("engagementPanelTitleHeaderRenderer")
+                            val c = extractText(hdr?.optJSONObject("contextualInfo"))
+                            if (c.isNotBlank() && commentCount.isBlank()) commentCount = c
+                            val token = findContinuationToken(panel)
+                            if (!token.isNullOrBlank() && commentsToken == null) commentsToken = token
+                        }
+                    }
+                    val keys = node.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        if (k in AD_KEYS) continue
+                        scan(node.opt(k))
+                    }
+                }
+                is JSONArray -> {
+                    for (i in 0 until node.length()) {
+                        scan(node.opt(i))
+                    }
+                }
+            }
+        }
+
+        scan(root)
+        return VideoEngagement(
+            channelId = channelId,
+            channelName = channelName,
+            isSubscribed = isSubscribed,
+            isLiked = isLiked,
+            likeCount = likeCount,
+            commentCount = commentCount,
+            commentsToken = commentsToken
+        )
+    }
+
+    private fun collectComments(
+        node: Any?,
+        out: MutableList<YtComment>,
+        seen: MutableSet<String>
+    ) {
+        when (node) {
+            is JSONObject -> {
+                // Modern YouTube commentEntityPayload (2024-2026 InnerTube format)
+                if (node.has("commentEntityPayload")) {
+                    val p = node.optJSONObject("commentEntityPayload")
+                    val props = p?.optJSONObject("properties")
+                    val authorObj = p?.optJSONObject("author")
+                    val toolbar = p?.optJSONObject("toolbar")
+                    val text = props?.optJSONObject("content")?.optString("content").orEmpty().trim()
+                    val author = authorObj?.optString("displayName").orEmpty().trim()
+                    val timeText = props?.optString("publishedTime").orEmpty().trim()
+                    val likes = toolbar?.optString("likeCountNotliked").orEmpty().trim()
+                    val key = props?.optString("commentId").orEmpty().ifBlank { "$author|$text" }
+                    if (text.isNotBlank() && seen.add(key)) {
+                        out.add(
+                            YtComment(
+                                author = author.ifBlank { "YouTube User" },
+                                text = text,
+                                timeText = timeText,
+                                likes = likes
+                            )
+                        )
+                    }
+                }
+                // Legacy commentRenderer fallback
+                if (node.has("commentRenderer")) {
+                    val c = node.optJSONObject("commentRenderer")
+                    val text = extractText(c?.optJSONObject("contentText"))
+                    val author = extractText(c?.optJSONObject("authorText"))
+                    val timeText = extractText(c?.optJSONObject("publishedTimeText"))
+                    val likes = extractText(c?.optJSONObject("voteCount"))
+                    val key = c?.optString("commentId").orEmpty().ifBlank { "$author|$text" }
+                    if (text.isNotBlank() && seen.add(key)) {
+                        out.add(
+                            YtComment(
+                                author = author.ifBlank { "YouTube User" },
+                                text = text,
+                                timeText = timeText,
+                                likes = likes
+                            )
+                        )
+                    }
+                }
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    if (k in AD_KEYS) continue
+                    collectComments(node.opt(k), out, seen)
+                }
+            }
+            is JSONArray -> {
+                for (i in 0 until node.length()) {
+                    collectComments(node.opt(i), out, seen)
+                }
+            }
         }
     }
 

@@ -24,6 +24,7 @@ class SitesActivity : AppCompatActivity() {
 
     private val sites = listOf(
         "YouTube" to "https://www.youtube.com",
+        "YouTube Web (Ad-Free)" to "https://m.youtube.com",
         "TikTok" to "https://www.tiktok.com",
         "Instagram" to "https://www.instagram.com",
         "Facebook" to "https://www.facebook.com",

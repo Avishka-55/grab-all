@@ -160,12 +160,25 @@
             android:id="@+id/ytTabQueue"
             android:layout_width="0dp"
             android:layout_height="34dp"
+            android:layout_marginEnd="6dp"
             android:layout_weight="1"
             android:background="@drawable/yt_chip_bg"
             android:gravity="center"
             android:text="Queue"
             android:textColor="@color/graball_subtext"
             android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/ytTabWeb"
+            android:layout_width="0dp"
+            android:layout_height="34dp"
+            android:layout_weight="1"
+            android:background="@drawable/yt_chip_bg"
+            android:gravity="center"
+            android:text="🌐 Web"
+            android:textColor="@color/graball_text"
+            android:textSize="12sp"
+            android:textStyle="bold" />
     </LinearLayout>
 
     <!-- Search Filter Chips (All / Videos / Playlists / Music) -->
