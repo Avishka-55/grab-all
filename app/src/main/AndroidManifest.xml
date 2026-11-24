@@ -55,7 +55,8 @@
             android:exported="false" />
         <activity
             android:name=".DownloadsActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:launchMode="singleTop" />
         <activity
             android:name=".StatusActivity"
             android:exported="false" />

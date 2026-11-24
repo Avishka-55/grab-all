@@ -91,8 +91,23 @@ class PlayerActivity : AppCompatActivity() {
 
     private enum class ViewMode { FOLDERS, FOLDER_SONGS, PLAYLISTS, PLAYLIST_SONGS, ALL_MUSIC }
     private enum class ActiveSource { NONE, LOCAL, YOUTUBE }
+    private enum class SortMode(val key: String, val label: String, val shortLabel: String) {
+        DATE_DESC("date_desc", "Date Added (Newest first)", "Newest"),
+        DATE_ASC("date_asc", "Date Added (Oldest first)", "Oldest"),
+        NAME_ASC("name_asc", "Name (A → Z)", "A–Z"),
+        NAME_DESC("name_desc", "Name (Z → A)", "Z–A"),
+        SIZE_DESC("size_desc", "File Size (Largest first)", "Largest"),
+        SIZE_ASC("size_asc", "File Size (Smallest first)", "Smallest"),
+        DURATION_DESC("dur_desc", "Duration (Longest first)", "Longest");
+
+        companion object {
+            fun fromKey(k: String?): SortMode =
+                values().firstOrNull { it.key == k } ?: DATE_DESC
+        }
+    }
 
     // Library UI
+    private lateinit var btnSortMusic: TextView
     private lateinit var searchInput: EditText
     private lateinit var tabsRow: LinearLayout
     private lateinit var tabFolders: TextView
@@ -167,7 +182,10 @@ class PlayerActivity : AppCompatActivity() {
     private var tracksByPath: Map<String, AudioTrack> = emptyMap()
     private var playlists: MutableList<MusicPlaylist> = mutableListOf()
     private var viewMode: ViewMode = ViewMode.ALL_MUSIC
+    private var sortMode: SortMode = SortMode.DATE_DESC
     private var openFolderPath: String? = null
+    private var pendingOpenFolderPath: String? = null
+    private var pendingOpenFolderName: String? = null
     private var openPlaylistName: String? = null
     private var searchQuery: String = ""
 
@@ -374,6 +392,13 @@ class PlayerActivity : AppCompatActivity() {
                 if (folder.tracks.isNotEmpty()) playFolderTracks(folder.tracks, 0, folder.name)
             }
         }
+        btnSortMusic = findViewById(R.id.btnSortMusic)
+        sortMode = SortMode.fromKey(
+            getSharedPreferences(MUSIC_PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_SORT_MODE, null)
+        )
+        btnSortMusic.text = "↕ ${sortMode.shortLabel}"
+        btnSortMusic.setOnClickListener { showSortDialog() }
         findViewById<TextView>(R.id.btnEqualizer).setOnClickListener { openSystemEqualizer() }
         findViewById<TextView>(R.id.btnManageFolders).setOnClickListener { showManageFoldersDialog() }
 
@@ -555,6 +580,8 @@ class PlayerActivity : AppCompatActivity() {
 
         if (intent?.action == Intent.ACTION_VIEW && intent.data != null) {
             handleIncomingAudioIntent(intent)
+        } else if (capturePendingFolderExtra(intent)) {
+            applyPendingFolderIfReady()
         } else if (intent?.getBooleanExtra("open_now_playing", false) == true) {
             openNowPlayingSheet(animate = false)
         }
@@ -565,8 +592,48 @@ class PlayerActivity : AppCompatActivity() {
         setIntent(intent)
         if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
             handleIncomingAudioIntent(intent)
+        } else if (capturePendingFolderExtra(intent)) {
+            loadLibrary()
+            applyPendingFolderIfReady()
         } else if (intent.getBooleanExtra("open_now_playing", false)) {
             openNowPlayingSheet(animate = true)
+        }
+    }
+
+    private fun capturePendingFolderExtra(incoming: Intent?): Boolean {
+        val path = incoming?.getStringExtra(EXTRA_OPEN_FOLDER_PATH)
+        val name = incoming?.getStringExtra(EXTRA_OPEN_FOLDER_NAME)
+        if (path.isNullOrBlank() && name.isNullOrBlank()) return false
+        pendingOpenFolderPath = path
+        pendingOpenFolderName = name
+        incoming?.removeExtra(EXTRA_OPEN_FOLDER_PATH)
+        incoming?.removeExtra(EXTRA_OPEN_FOLDER_NAME)
+        return true
+    }
+
+    private fun applyPendingFolderIfReady() {
+        val targetPath = pendingOpenFolderPath
+        val targetName = pendingOpenFolderName
+        if (targetPath.isNullOrBlank() && targetName.isNullOrBlank()) return
+        val matched = allFolders.firstOrNull { f ->
+            (!targetPath.isNullOrBlank() && f.path.equals(targetPath, ignoreCase = true)) ||
+                (!targetName.isNullOrBlank() && f.name.equals(targetName, ignoreCase = true))
+        }
+        if (matched != null) {
+            pendingOpenFolderPath = null
+            pendingOpenFolderName = null
+            if (isNowPlayingOpen) closeNowPlayingSheet()
+            viewMode = ViewMode.FOLDER_SONGS
+            openFolderPath = matched.path
+            openPlaylistName = null
+            renderCurrentView()
+        } else if (allFolders.isNotEmpty()) {
+            // Folder not yet indexed or empty; switch to Folders tab so user sees all GrabAll folders
+            pendingOpenFolderPath = null
+            pendingOpenFolderName = null
+            viewMode = ViewMode.FOLDERS
+            openFolderPath = null
+            renderCurrentView()
         }
     }
 
@@ -1887,6 +1954,7 @@ class PlayerActivity : AppCompatActivity() {
         )
 
         renderCurrentView()
+        applyPendingFolderIfReady()
     }
 
     private fun isMusicFile(name: String): Boolean {
@@ -1951,6 +2019,61 @@ class PlayerActivity : AppCompatActivity() {
             .show()
     }
 
+    // ---- Sorting ----
+
+    private fun showSortDialog() {
+        val modes = SortMode.values()
+        val labels = modes.map { it.label }.toTypedArray()
+        val currentIdx = modes.indexOf(sortMode).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Sort Music By")
+            .setSingleChoiceItems(labels, currentIdx) { dialog, which ->
+                sortMode = modes[which]
+                btnSortMusic.text = "↕ ${sortMode.shortLabel}"
+                getSharedPreferences(MUSIC_PREFS, Context.MODE_PRIVATE).edit()
+                    .putString(KEY_SORT_MODE, sortMode.key)
+                    .apply()
+                renderCurrentView()
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun sortTracks(tracks: List<AudioTrack>): List<AudioTrack> {
+        return when (sortMode) {
+            SortMode.DATE_DESC -> tracks.sortedByDescending { it.file.lastModified() }
+            SortMode.DATE_ASC -> tracks.sortedBy { it.file.lastModified() }
+            SortMode.NAME_ASC -> tracks.sortedBy { it.file.nameWithoutExtension.trim().lowercase() }
+            SortMode.NAME_DESC -> tracks.sortedByDescending { it.file.nameWithoutExtension.trim().lowercase() }
+            SortMode.SIZE_DESC -> tracks.sortedByDescending { it.file.length() }
+            SortMode.SIZE_ASC -> tracks.sortedBy { it.file.length() }
+            SortMode.DURATION_DESC -> tracks.sortedWith(
+                compareByDescending<AudioTrack> { it.durationMs }
+                    .thenByDescending { it.file.length() }
+            )
+        }
+    }
+
+    private fun sortFolders(folders: List<MusicFolder>): List<MusicFolder> {
+        return when (sortMode) {
+            SortMode.NAME_ASC -> folders.sortedBy { it.name.lowercase() }
+            SortMode.NAME_DESC -> folders.sortedByDescending { it.name.lowercase() }
+            SortMode.DATE_DESC -> folders.sortedByDescending { f ->
+                f.tracks.maxOfOrNull { it.file.lastModified() } ?: 0L
+            }
+            SortMode.DATE_ASC -> folders.sortedBy { f ->
+                f.tracks.maxOfOrNull { it.file.lastModified() } ?: 0L
+            }
+            SortMode.SIZE_DESC, SortMode.DURATION_DESC -> folders.sortedByDescending { f ->
+                f.tracks.sumOf { it.file.length() }
+            }
+            SortMode.SIZE_ASC -> folders.sortedBy { f ->
+                f.tracks.sumOf { it.file.length() }
+            }
+        }
+    }
+
     // ---- Rendering ----
 
     private fun renderCurrentView() {
@@ -1981,7 +2104,7 @@ class PlayerActivity : AppCompatActivity() {
                             it.tracks.any { t -> t.file.name.lowercase().contains(q) }
                     }
                 }
-                val rows = filtered.map { MusicRow.FolderRow(it) }
+                val rows = sortFolders(filtered).map { MusicRow.FolderRow(it) }
                 adapter.submitRows(rows, service?.currentFile())
                 showEmptyIfNeeded(
                     rows.isEmpty(),
@@ -2005,11 +2128,12 @@ class PlayerActivity : AppCompatActivity() {
                 btnFolderBack.text = "← Folders"
                 val volTag = if (folder.isSdCard) "SD · " else ""
                 folderHeaderName.text = "$volTag${folder.name} (${folder.tracks.size})"
-                val tracks = if (q.isEmpty()) {
+                val baseTracks = if (q.isEmpty()) {
                     folder.tracks
                 } else {
                     folder.tracks.filter { it.file.name.lowercase().contains(q) }
                 }
+                val tracks = sortTracks(baseTracks)
                 val rows = tracks.mapIndexed { idx, t ->
                     MusicRow.TrackRow(t, tracks, idx, folder.name, inPlaylistName = null)
                 }
@@ -2065,8 +2189,7 @@ class PlayerActivity : AppCompatActivity() {
                 tabsRow.visibility = View.VISIBLE
                 btnNewPlaylist.visibility = View.GONE
                 folderHeaderBar.visibility = View.GONE
-                val allTracks = visibleFolders.flatMap { it.tracks }
-                    .sortedByDescending { it.file.lastModified() }
+                val allTracks = sortTracks(visibleFolders.flatMap { it.tracks })
                 val tracks = if (q.isEmpty()) {
                     allTracks
                 } else {
@@ -2349,6 +2472,9 @@ class PlayerActivity : AppCompatActivity() {
         private const val MUSIC_PREFS = "graball_music_folders"
         private const val KEY_INCLUDED_FOLDERS = "included_folders"
         private const val KEY_HIDDEN_FOLDERS = "hidden_folders"
+        private const val KEY_SORT_MODE = "sort_mode"
+        const val EXTRA_OPEN_FOLDER_PATH = "open_folder_path"
+        const val EXTRA_OPEN_FOLDER_NAME = "open_folder_name"
 
         private val RECORDING_KEYWORDS = listOf(
             "whatsapp voice notes",

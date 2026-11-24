@@ -3,6 +3,7 @@ package com.graball.engine
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -937,6 +938,17 @@ class DownloadService : Service() {
     }
 
     private fun buildNotification(text: String, percent: Int?): Notification {
+        val openDownloadsIntent = Intent(this, com.graball.DownloadsActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        val piFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val contentPi = PendingIntent.getActivity(this, 101, openDownloadsIntent, piFlags)
+        val active = sessions.isNotEmpty()
+
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -946,7 +958,9 @@ class DownloadService : Service() {
         builder.setContentTitle("GrabAll")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setOngoing(true)
+            .setContentIntent(contentPi)
+            .setOngoing(active)
+            .setAutoCancel(!active)
         if (percent != null) {
             builder.setProgress(100, percent, false)
         }

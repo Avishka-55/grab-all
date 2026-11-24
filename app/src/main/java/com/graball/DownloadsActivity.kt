@@ -1,6 +1,7 @@
 package com.graball
 
 import android.app.AlertDialog
+import android.app.DownloadManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -11,6 +12,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.TextUtils
 import android.view.Gravity
@@ -25,6 +28,7 @@ import androidx.core.content.FileProvider
 import com.graball.engine.DownloadHistory
 import com.graball.engine.DownloadProgressBus
 import com.graball.engine.DownloadService
+import com.graball.engine.FastYouTubeDownloader
 import com.graball.engine.MediaStorePublisher
 import java.io.File
 
@@ -322,7 +326,7 @@ class DownloadsActivity : AppCompatActivity() {
         val open = makeChipButton("▶ Open", primary = true).apply {
             visibility = View.GONE
             setOnClickListener {
-                rowOutput[url]?.let { openOutput(it) }
+                rowOutput[url]?.let { openOutput(url, it) }
             }
         }
 
@@ -488,8 +492,181 @@ class DownloadsActivity : AppCompatActivity() {
         }
     }
 
-    /** Open a finished download in the device's default app (or GrabAll Music for audio). */
-    private fun openOutput(output: String) {
+    /**
+     * Open a finished download smartly:
+     * - Audio playlist -> opens straight into that folder in GrabAll Music Player
+     * - Non-audio playlist -> opens the folder in the device's file manager
+     * - Single audio file -> opens directly in GrabAll Music Player
+     * - Single video/other file -> opens via system ACTION_VIEW chooser
+     */
+    private fun openOutput(url: String, output: String) {
+        val mode = rowMode[url] ?: DownloadProgressBus.modes[url].orEmpty()
+        val isAudio = mode.contains("Audio", ignoreCase = true) || isAudioOutput(output)
+        val isPlaylist = mode.contains("First ", ignoreCase = true) ||
+            mode.contains("All videos", ignoreCase = true) ||
+            FastYouTubeDownloader.extractPlaylistId(url) != null ||
+            (!output.startsWith("content://") && output.contains('/'))
+
+        if (isPlaylist) {
+            val folderName = resolvePlaylistFolderName(url, output)
+            val grabAllRoot = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "GrabAll"
+            )
+            val folderDir = if (!folderName.isNullOrBlank()) {
+                File(grabAllRoot, folderName)
+            } else {
+                grabAllRoot
+            }
+            if (isAudio) {
+                val intent = Intent(this, PlayerActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    putExtra(PlayerActivity.EXTRA_OPEN_FOLDER_PATH, folderDir.absolutePath)
+                    if (!folderName.isNullOrBlank()) {
+                        putExtra(PlayerActivity.EXTRA_OPEN_FOLDER_NAME, folderName)
+                    }
+                }
+                startActivity(intent)
+                @Suppress("DEPRECATION")
+                overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+                return
+            } else {
+                if (openFolderInFileManager(folderName, folderDir)) {
+                    return
+                }
+                // Fall back to opening the latest video file if no file manager handled folder URI
+                Toast.makeText(
+                    this,
+                    "Saved in Downloads/GrabAll/${folderName ?: ""}".trimEnd('/'),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+
+        // Single audio file -> open straight inside GrabAll Music Player
+        if (isAudio) {
+            if (openSingleAudioInGrabAll(output)) return
+        }
+
+        openFileWithSystem(output)
+    }
+
+    private fun isAudioOutput(output: String): Boolean {
+        val audioExts = setOf("mp3", "m4a", "aac", "ogg", "opus", "flac", "wav")
+        if (output.startsWith("content://")) {
+            val mime = try { contentResolver.getType(Uri.parse(output)) } catch (_: Exception) { null }
+            if (mime != null && mime.startsWith("audio/", ignoreCase = true)) return true
+            val name = queryContentDisplayName(Uri.parse(output)) ?: return false
+            return name.substringAfterLast('.', "").lowercase() in audioExts
+        }
+        return output.substringAfterLast('.', "").lowercase() in audioExts
+    }
+
+    private fun resolvePlaylistFolderName(url: String, output: String): String? {
+        if (output.startsWith("content://") && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                contentResolver.query(
+                    Uri.parse(output),
+                    arrayOf(MediaStore.Downloads.RELATIVE_PATH),
+                    null,
+                    null,
+                    null
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val rel = cursor.getString(0).orEmpty().trim('/')
+                        // e.g. "Download/GrabAll/My Playlist"
+                        val idx = rel.indexOf("GrabAll/", ignoreCase = true)
+                        if (idx >= 0) {
+                            val sub = rel.substring(idx + "GrabAll/".length).trim('/')
+                            if (sub.isNotBlank()) return sub
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        } else if (!output.startsWith("content://") && output.contains('/')) {
+            val sub = output.substringBefore('/').trim()
+            if (sub.isNotBlank()) return sub
+        }
+        val title = rowDisplayTitle[url]?.takeIf {
+            it.isNotBlank() && !it.startsWith("YouTube Playlist")
+        }
+        return title?.let { MediaStorePublisher.sanitizeSubfolder(it) }
+    }
+
+    private fun openFolderInFileManager(folderName: String?, folderDir: File): Boolean {
+        val relSub = if (!folderName.isNullOrBlank()) "Download/GrabAll/$folderName" else "Download/GrabAll"
+        // 1) Official Android DocumentsUI / Files directory URI (Android 8+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val docUri = DocumentsContract.buildDocumentUri(
+                    "com.android.externalstorage.documents",
+                    "primary:$relSub"
+                )
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(docUri, DocumentsContract.Document.MIME_TYPE_DIR)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(intent)
+                return true
+            } catch (_: Exception) {
+            }
+        }
+        // 2) Common third-party / OEM file managers (resource/folder)
+        try {
+            val uri = Uri.fromFile(folderDir)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "resource/folder")
+            }
+            startActivity(intent)
+            return true
+        } catch (_: Exception) {
+        }
+        // 3) System Downloads app
+        try {
+            startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
+            Toast.makeText(
+                this,
+                "Folder: Downloads/GrabAll/${folderName ?: ""}".trimEnd('/'),
+                Toast.LENGTH_LONG
+            ).show()
+            return true
+        } catch (_: Exception) {
+        }
+        return false
+    }
+
+    private fun openSingleAudioInGrabAll(output: String): Boolean {
+        return try {
+            val uri: Uri
+            val mime: String
+            if (output.startsWith("content://")) {
+                uri = Uri.parse(output)
+                mime = contentResolver.getType(uri) ?: "audio/*"
+            } else {
+                val file = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "GrabAll/$output"
+                )
+                if (!file.isFile) return false
+                uri = FileProvider.getUriForFile(this, "com.graball.fileprovider", file)
+                mime = MediaStorePublisher.mimeFor(file.name)
+            }
+            val intent = Intent(this, PlayerActivity::class.java).apply {
+                action = Intent.ACTION_VIEW
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(intent)
+            @Suppress("DEPRECATION")
+            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun openFileWithSystem(output: String) {
         if (output.startsWith("content://")) {
             try {
                 val uri = Uri.parse(output)

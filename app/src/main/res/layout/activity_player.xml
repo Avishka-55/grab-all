@@ -134,7 +134,7 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent">
 
-            <!-- Header Row: Title + Equalizer + Folder Filter -->
+            <!-- Header Row: Title + Sort + Equalizer + Folder Filter -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -146,35 +146,50 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
                     android:text="@string/player_title"
                     android:textColor="@color/graball_text"
-                    android:textSize="26sp"
+                    android:textSize="22sp"
                     android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnSortMusic"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_marginEnd="6dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="9dp"
+                    android:paddingEnd="9dp"
+                    android:text="↕ Newest"
+                    android:textColor="@color/graball_text"
+                    android:textSize="11.5sp" />
 
                 <TextView
                     android:id="@+id/btnEqualizer"
                     android:layout_width="wrap_content"
-                    android:layout_height="34dp"
+                    android:layout_height="32dp"
                     android:layout_marginEnd="6dp"
                     android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
-                    android:paddingStart="10dp"
-                    android:paddingEnd="10dp"
+                    android:paddingStart="9dp"
+                    android:paddingEnd="9dp"
                     android:text="🎚 EQ"
                     android:textColor="@color/graball_text"
-                    android:textSize="12sp" />
+                    android:textSize="11.5sp" />
 
                 <TextView
                     android:id="@+id/btnManageFolders"
                     android:layout_width="wrap_content"
-                    android:layout_height="34dp"
+                    android:layout_height="32dp"
                     android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
+                    android:paddingStart="9dp"
+                    android:paddingEnd="9dp"
                     android:text="⚙ Filter"
                     android:textColor="@color/graball_text"
-                    android:textSize="12sp" />
+                    android:textSize="11.5sp" />
             </LinearLayout>
 
             <!-- Search Input -->
