@@ -1,25 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- One status in the grid: thumbnail on top, Save button below. -->
+<!-- Sleek WhatsApp Status tile: rounded thumbnail + video badge + compact Save pill -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:layout_margin="4dp"
     android:background="@drawable/card_bg"
     android:orientation="vertical"
-    android:padding="8dp">
+    android:padding="6dp">
 
-    <ImageView
-        android:id="@+id/statusThumb"
+    <FrameLayout
+        android:id="@+id/statusThumbBox"
         android:layout_width="match_parent"
-        android:layout_height="160dp"
-        android:scaleType="centerCrop" />
+        android:layout_height="176dp"
+        android:background="#12121A">
 
-    <Button
+        <ImageView
+            android:id="@+id/statusThumb"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="centerCrop" />
+
+        <!-- Subtle Play badge shown only on video statuses -->
+        <TextView
+            android:id="@+id/statusVideoBadge"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_gravity="center"
+            android:background="@drawable/circle_translucent_bg"
+            android:gravity="center"
+            android:text="▶"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <TextView
         android:id="@+id/statusSave"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:background="@drawable/btn_small"
-        android:text="@string/status_save"
-        android:textColor="@color/graball_text" />
+        android:layout_height="32dp"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/yt_chip_bg"
+        android:gravity="center"
+        android:text="⬇ Save"
+        android:textColor="@color/graball_text"
+        android:textSize="12sp"
+        android:textStyle="bold" />
 
 </LinearLayout>
