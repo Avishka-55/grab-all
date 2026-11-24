@@ -28,7 +28,16 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.view.KeyEvent
+import android.widget.Toast
+import androidx.annotation.OptIn
 import androidx.core.content.ContextCompat
+import androidx.media3.common.AudioAttributes as Media3AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
 import com.graball.youtube.YouTubePlaybackService
 import java.io.File
 import java.util.concurrent.Executors
@@ -36,11 +45,14 @@ import kotlin.random.Random
 
 /**
  * GrabAll's local music player service.
- * Plays audio strictly from the active folder/playlist passed by PlayerActivity,
- * displays native Android MediaStyle lockscreen/shade notifications with real
+ * Powered by Media3 ExoPlayer (with automatic Android MediaPlayer fallback for
+ * MIDI / OEM codecs) so MP3, M4A, M4B, AAC, FLAC, WAV, OGG, OPUS, WEBA, MKA,
+ * AIFF, WMA, AMR, 3GA, AC3, and MIDI all play smoothly across Android 5-16.
+ * Displays native Android MediaStyle lockscreen/shade notifications with real
  * embedded album cover art & ID3 metadata, and coordinates cleanly with
  * YouTubePlaybackService so local music and YouTube audio never overlap.
  */
+@OptIn(UnstableApi::class)
 class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     AudioManager.OnAudioFocusChangeListener {
 
@@ -114,8 +126,10 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     private val mainHandler = Handler(Looper.getMainLooper())
     private val artExecutor = Executors.newSingleThreadExecutor()
 
-    private var player: MediaPlayer? = null
+    private var exoPlayer: ExoPlayer? = null
+    private var legacyPlayer: MediaPlayer? = null
     private var isPrepared = false
+    private var usedLegacyFallback = false
     private var pendingSeekMs = 0
     private var playbackGen = 0
     private var hasAudioFocus = false
@@ -127,6 +141,8 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     private var wasPlayingBeforeFocusLoss = false
     private var audioManager: AudioManager? = null
     private var focusRequest: AudioFocusRequest? = null
+
+    private fun hasAnyPlayer(): Boolean = exoPlayer != null || legacyPlayer != null
 
     private var currentArtPath: String? = null
     private var currentArt: Bitmap? = null
@@ -293,7 +309,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         val durMs = duration().toLong().coerceAtLeast(0L)
         val posMs = position().toLong().coerceAtLeast(0L)
         val playing = isPlaying()
-        val preparing = !isPrepared && player != null
+        val preparing = !isPrepared && hasAnyPlayer()
 
         try {
             val mdBuilder = MediaMetadata.Builder()
@@ -398,21 +414,41 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     fun currentTrackMeta(): AlbumArtLoader.TrackMeta? = currentMeta
     fun currentArtBitmap(): Bitmap? = currentArt
 
-    fun isPlaying(): Boolean =
-        if (!isPrepared) false else try { player?.isPlaying == true } catch (_: Exception) { false }
+    fun isPlaying(): Boolean {
+        exoPlayer?.let { return try { it.isPlaying } catch (_: Exception) { false } }
+        return if (!isPrepared) false else try { legacyPlayer?.isPlaying == true } catch (_: Exception) { false }
+    }
 
-    fun isActiveOrPreparing(): Boolean = isPlaying() || (!isPrepared && player != null)
+    fun isActiveOrPreparing(): Boolean = isPlaying() || (!isPrepared && hasAnyPlayer())
 
     // Guarding with isPrepared prevents calling getCurrentPosition()/getDuration()
     // during MediaPlayer.Preparing state, which otherwise triggers native error (-38, 0)!
-    fun position(): Int =
-        if (!isPrepared) 0 else try { player?.currentPosition ?: 0 } catch (_: Exception) { 0 }
+    fun position(): Int {
+        exoPlayer?.let {
+            return try { it.currentPosition.toInt().coerceAtLeast(0) } catch (_: Exception) { 0 }
+        }
+        return if (!isPrepared) 0 else try { legacyPlayer?.currentPosition ?: 0 } catch (_: Exception) { 0 }
+    }
 
-    fun duration(): Int =
-        if (!isPrepared) 0 else try { player?.duration ?: 0 } catch (_: Exception) { 0 }
+    fun duration(): Int {
+        exoPlayer?.let {
+            return try {
+                val d = it.duration
+                if (d != C.TIME_UNSET && d > 0L) d.toInt() else 0
+            } catch (_: Exception) {
+                0
+            }
+        }
+        return if (!isPrepared) 0 else try { legacyPlayer?.duration ?: 0 } catch (_: Exception) { 0 }
+    }
 
-    fun audioSessionId(): Int =
-        try { player?.audioSessionId ?: 0 } catch (_: Exception) { 0 }
+    fun audioSessionId(): Int {
+        exoPlayer?.let {
+            val id = try { it.audioSessionId } catch (_: Exception) { 0 }
+            if (id != C.AUDIO_SESSION_ID_UNSET && id != 0) return id
+        }
+        return try { legacyPlayer?.audioSessionId ?: 0 } catch (_: Exception) { 0 }
+    }
 
     fun isShuffleEnabled(): Boolean = shuffleEnabled
     fun getRepeatMode(): RepeatMode = repeatMode
@@ -445,15 +481,24 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     fun seekTo(ms: Int) {
+        val target = ms.coerceAtLeast(0)
+        exoPlayer?.let {
+            try { it.seekTo(target.toLong()) } catch (_: Exception) { }
+            syncMediaSession()
+            return
+        }
         if (!isPrepared) return
-        try { player?.seekTo(ms.coerceAtLeast(0)) } catch (_: Exception) { }
+        try { legacyPlayer?.seekTo(target) } catch (_: Exception) { }
         syncMediaSession()
     }
 
     fun pause() {
         persistLastPlayed()
+        exoPlayer?.let {
+            try { it.pause() } catch (_: Exception) { }
+        }
         if (isPrepared) {
-            try { player?.pause() } catch (_: Exception) { }
+            try { legacyPlayer?.pause() } catch (_: Exception) { }
         }
         @Suppress("DEPRECATION")
         stopForeground(false)
@@ -462,7 +507,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     fun resume() {
         YouTubePlaybackService.stopAndClear(applicationContext)
-        if (player == null) {
+        if (!hasAnyPlayer()) {
             val ext = externalUri
             if (currentFile() != null) {
                 startPlayback()
@@ -471,9 +516,17 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
             }
             return
         }
+        exoPlayer?.let { exo ->
+            if (ensureAudioFocus()) {
+                try { exo.play() } catch (_: Exception) { }
+                startForegroundCompat(buildNotification())
+            }
+            updateNotification()
+            return
+        }
         if (!isPrepared) return
         if (ensureAudioFocus()) {
-            try { player?.start() } catch (_: Exception) { }
+            try { legacyPlayer?.start() } catch (_: Exception) { }
             startForegroundCompat(buildNotification())
         }
         updateNotification()
@@ -533,6 +586,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         val file = currentFile() ?: return
         val gen = ++playbackGen
         pendingSeekMs = initialSeekMs
+        usedLegacyFallback = false
         persistLastPlayed(overridePosMs = initialSeekMs)
         // Enforce single active player: stop YouTube & clear its notification cleanly
         YouTubePlaybackService.stopAndClear(applicationContext)
@@ -541,6 +595,114 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         releasePlayer(abandonAudioFocus = false)
         ensureAudioFocus()
         loadTrackArtAndMetaAsync(file)
+        if (AudioFormats.isMidiFile(file.name)) {
+            usedLegacyFallback = true
+            startLegacyFilePlayback(file, gen)
+        } else {
+            startExoPlayback(Uri.fromFile(file), gen, fallbackFile = file, fallbackUri = null)
+        }
+    }
+
+    private fun startUriPlayback(uri: Uri) {
+        val gen = ++playbackGen
+        pendingSeekMs = 0
+        usedLegacyFallback = false
+        YouTubePlaybackService.stopAndClear(applicationContext)
+        releasePlayer(abandonAudioFocus = false)
+        ensureAudioFocus()
+        loadUriArtAndMetaAsync(uri)
+        if (AudioFormats.isMidiFile(externalTitle) || AudioFormats.isMidiFile(uri.lastPathSegment.orEmpty())) {
+            usedLegacyFallback = true
+            startLegacyUriPlayback(uri, gen)
+        } else {
+            startExoPlayback(uri, gen, fallbackFile = null, fallbackUri = uri)
+        }
+    }
+
+    private fun createExoPlayer(): ExoPlayer {
+        val attrs = Media3AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .build()
+        return ExoPlayer.Builder(this)
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            .setAudioAttributes(attrs, false)
+            .build()
+    }
+
+    private fun startExoPlayback(uri: Uri, gen: Int, fallbackFile: File?, fallbackUri: Uri?) {
+        try {
+            val exo = createExoPlayer()
+            exoPlayer = exo
+            exo.addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (gen != playbackGen || exo !== exoPlayer) return
+                    when (playbackState) {
+                        Player.STATE_READY -> {
+                            val firstReady = !isPrepared
+                            isPrepared = true
+                            if (firstReady) {
+                                val seek = pendingSeekMs
+                                pendingSeekMs = 0
+                                val dur = exo.duration
+                                if (seek > 1000 && (dur == C.TIME_UNSET || dur <= 0L || seek < dur - 2000L)) {
+                                    exo.seekTo(seek.toLong())
+                                }
+                                persistLastPlayed()
+                                startForegroundCompat(buildNotification())
+                            }
+                            updateNotification()
+                        }
+                        Player.STATE_ENDED -> {
+                            onTrackCompleted()
+                        }
+                    }
+                }
+
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    if (gen != playbackGen || exo !== exoPlayer) return
+                    updateNotification()
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    if (gen != playbackGen || exo !== exoPlayer) return
+                    if (!usedLegacyFallback) {
+                        usedLegacyFallback = true
+                        releasePlayer(abandonAudioFocus = false)
+                        if (fallbackFile != null) {
+                            startLegacyFilePlayback(fallbackFile, gen)
+                        } else if (fallbackUri != null) {
+                            startLegacyUriPlayback(fallbackUri, gen)
+                        }
+                    } else {
+                        isPrepared = false
+                        releasePlayer(abandonAudioFocus = false)
+                        Toast.makeText(
+                            applicationContext,
+                            "Unsupported or unreadable audio format",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            })
+            exo.setMediaItem(MediaItem.fromUri(uri))
+            exo.playWhenReady = true
+            exo.prepare()
+            startForegroundCompat(buildNotification())
+        } catch (_: Exception) {
+            releasePlayer(abandonAudioFocus = false)
+            if (!usedLegacyFallback) {
+                usedLegacyFallback = true
+                if (fallbackFile != null) {
+                    startLegacyFilePlayback(fallbackFile, gen)
+                } else if (fallbackUri != null) {
+                    startLegacyUriPlayback(fallbackUri, gen)
+                }
+            }
+        }
+    }
+
+    private fun startLegacyFilePlayback(file: File, gen: Int) {
         try {
             val mp = MediaPlayer().apply {
                 setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
@@ -554,16 +716,21 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 setOnCompletionListener(this@PlayerService)
                 setOnErrorListener { failedMp, what, _ ->
                     // Ignore stale players or benign -38 state-query errors
-                    if (gen != playbackGen || failedMp !== player || what == -38) {
+                    if (gen != playbackGen || failedMp !== legacyPlayer || what == -38) {
                         true
                     } else {
                         isPrepared = false
                         releasePlayer(abandonAudioFocus = false)
+                        Toast.makeText(
+                            applicationContext,
+                            "Unsupported or unreadable audio format",
+                            Toast.LENGTH_SHORT
+                        ).show()
                         true
                     }
                 }
                 setOnPreparedListener { readyMp ->
-                    if (gen != playbackGen || readyMp !== player) {
+                    if (gen != playbackGen || readyMp !== legacyPlayer) {
                         try { readyMp.release() } catch (_: Exception) { }
                         return@setOnPreparedListener
                     }
@@ -584,20 +751,14 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 }
                 prepareAsync()
             }
-            player = mp
+            legacyPlayer = mp
             startForegroundCompat(buildNotification())
         } catch (_: Exception) {
             releasePlayer(abandonAudioFocus = false)
         }
     }
 
-    private fun startUriPlayback(uri: Uri) {
-        val gen = ++playbackGen
-        pendingSeekMs = 0
-        YouTubePlaybackService.stopAndClear(applicationContext)
-        releasePlayer(abandonAudioFocus = false)
-        ensureAudioFocus()
-        loadUriArtAndMetaAsync(uri)
+    private fun startLegacyUriPlayback(uri: Uri, gen: Int) {
         try {
             val mp = MediaPlayer().apply {
                 setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
@@ -610,16 +771,21 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 setDataSource(applicationContext, uri)
                 setOnCompletionListener(this@PlayerService)
                 setOnErrorListener { failedMp, what, _ ->
-                    if (gen != playbackGen || failedMp !== player || what == -38) {
+                    if (gen != playbackGen || failedMp !== legacyPlayer || what == -38) {
                         true
                     } else {
                         isPrepared = false
                         releasePlayer(abandonAudioFocus = false)
+                        Toast.makeText(
+                            applicationContext,
+                            "Unsupported or unreadable audio format",
+                            Toast.LENGTH_SHORT
+                        ).show()
                         true
                     }
                 }
                 setOnPreparedListener { readyMp ->
-                    if (gen != playbackGen || readyMp !== player) {
+                    if (gen != playbackGen || readyMp !== legacyPlayer) {
                         try { readyMp.release() } catch (_: Exception) { }
                         return@setOnPreparedListener
                     }
@@ -633,7 +799,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 }
                 prepareAsync()
             }
-            player = mp
+            legacyPlayer = mp
             startForegroundCompat(buildNotification())
         } catch (_: Exception) {
             releasePlayer(abandonAudioFocus = false)
@@ -748,15 +914,21 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
 
     private fun releasePlayer(abandonAudioFocus: Boolean) {
         isPrepared = false
-        val old = player
-        player = null
-        if (old != null) {
-            try { old.setOnPreparedListener(null) } catch (_: Exception) { }
-            try { old.setOnCompletionListener(null) } catch (_: Exception) { }
-            try { old.setOnErrorListener(null) } catch (_: Exception) { }
-            try { old.stop() } catch (_: Exception) { }
-            try { old.reset() } catch (_: Exception) { }
-            try { old.release() } catch (_: Exception) { }
+        val oldExo = exoPlayer
+        exoPlayer = null
+        if (oldExo != null) {
+            try { oldExo.stop() } catch (_: Exception) { }
+            try { oldExo.release() } catch (_: Exception) { }
+        }
+        val oldLegacy = legacyPlayer
+        legacyPlayer = null
+        if (oldLegacy != null) {
+            try { oldLegacy.setOnPreparedListener(null) } catch (_: Exception) { }
+            try { oldLegacy.setOnCompletionListener(null) } catch (_: Exception) { }
+            try { oldLegacy.setOnErrorListener(null) } catch (_: Exception) { }
+            try { oldLegacy.stop() } catch (_: Exception) { }
+            try { oldLegacy.reset() } catch (_: Exception) { }
+            try { oldLegacy.release() } catch (_: Exception) { }
         }
         if (abandonAudioFocus) {
             abandonFocus()
@@ -764,7 +936,11 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     override fun onCompletion(mp: MediaPlayer) {
-        if (mp !== player) return
+        if (mp !== legacyPlayer) return
+        onTrackCompleted()
+    }
+
+    private fun onTrackCompleted() {
         val ext = externalUri
         if (ext != null && playlist.isEmpty()) {
             if (repeatMode == RepeatMode.ONE) {
@@ -878,7 +1054,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
             ?: file?.nameWithoutExtension
             ?: externalTitle.takeIf { it.isNotBlank() }
             ?: "GrabAll Music"
-        val playing = isPlaying() || (!isPrepared && player != null)
+        val playing = isPlaying() || (!isPrepared && hasAnyPlayer())
         val sub = buildString {
             if (!meta?.artist.isNullOrBlank()) {
                 append(meta!!.artist)

@@ -416,10 +416,10 @@ class YtDlpRunner(
             pythonBinary.absolutePath,
             ytDlpScript.absolutePath,
             "--newline",
-            // Multi-fragment & chunked HTTP acceleration (saturates 50+ Mbps
-            // links on HLS/DASH and bypasses per-stream throttling).
+            // Multi-fragment & 2M chunked HTTP acceleration (saturates 50+ Mbps
+            // links on HLS/DASH and bypasses YouTube's per-stream throttle).
             "--concurrent-fragments", "6",
-            "--http-chunk-size", "10M",
+            "--http-chunk-size", "2M",
             "--buffer-size", "16K",
             // Resume resilience: a network switch kills the socket, so
             // let yt-dlp itself retry (from the .part file, in the same

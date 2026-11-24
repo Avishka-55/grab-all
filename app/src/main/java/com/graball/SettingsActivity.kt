@@ -140,6 +140,32 @@ class SettingsActivity : AppCompatActivity() {
         }
         refreshConcurrencyChips()
 
+        // ---- Audio Download Format (MP3 vs Fast M4A) ----
+        val chipMp3 = findViewById<TextView>(R.id.chipAudioMp3)
+        val chipM4a = findViewById<TextView>(R.id.chipAudioM4a)
+        val audioFmtStatus = findViewById<TextView>(R.id.settingsAudioFormatStatus)
+        fun refreshAudioFormatChips() {
+            val isM4a = DownloadPrefs.isFastM4a(this)
+            chipMp3.setBackgroundResource(if (!isM4a) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg)
+            chipMp3.setTextColor(ContextCompat.getColor(this, if (!isM4a) R.color.graball_text else R.color.graball_subtext))
+            chipM4a.setBackgroundResource(if (isM4a) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg)
+            chipM4a.setTextColor(ContextCompat.getColor(this, if (isM4a) R.color.graball_text else R.color.graball_subtext))
+            audioFmtStatus.text = if (isM4a) {
+                "M4A skips CPU re-encoding (~10× faster playlists, original AAC quality + cover art)."
+            } else {
+                "MP3 works everywhere (converted via ffmpeg with embedded cover art & ID3 tags)."
+            }
+        }
+        chipMp3.setOnClickListener {
+            DownloadPrefs.setAudioFormat(this, DownloadPrefs.AUDIO_FORMAT_MP3)
+            refreshAudioFormatChips()
+        }
+        chipM4a.setOnClickListener {
+            DownloadPrefs.setAudioFormat(this, DownloadPrefs.AUDIO_FORMAT_M4A)
+            refreshAudioFormatChips()
+        }
+        refreshAudioFormatChips()
+
         // ---- yt-dlp Self-Updater ----
         val nightlyCheck = findViewById<CheckBox>(R.id.settingsYtDlpNightly)
         nightlyCheck.isChecked = YtDlpUpdater.getChannel(this) == YtDlpUpdater.CHANNEL_NIGHTLY

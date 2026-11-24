@@ -13,6 +13,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -46,8 +49,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var audioOnlyCheck: CheckBox
     private lateinit var playlistSpinner: Spinner
     private lateinit var linkInput: EditText
+    private lateinit var clearLinkButton: TextView
     private lateinit var grabPanel: LinearLayout
     private lateinit var grabType: TextView
+    private lateinit var grabCloseButton: TextView
     private lateinit var playlistRow: LinearLayout
     private lateinit var grabQuickRow: LinearLayout
     private lateinit var grabWatchButton: TextView
@@ -111,12 +116,34 @@ class MainActivity : AppCompatActivity() {
         }
         val linkInput = findViewById<EditText>(R.id.linkInput)
         this.linkInput = linkInput
+        clearLinkButton = findViewById(R.id.clearLinkButton)
         grabPanel = findViewById(R.id.grabPanel)
         grabType = findViewById(R.id.grabType)
+        grabCloseButton = findViewById(R.id.grabCloseButton)
         playlistRow = findViewById(R.id.playlistRow)
         grabQuickRow = findViewById(R.id.grabQuickRow)
         grabWatchButton = findViewById(R.id.grabWatchButton)
         grabSecondButton = findViewById(R.id.grabSecondButton)
+
+        fun dismissGrabPanel(clearText: Boolean) {
+            grabPanel.visibility = View.GONE
+            if (clearText && !linkInput.text.isNullOrEmpty()) {
+                linkInput.setText("")
+            }
+        }
+        clearLinkButton.setOnClickListener { dismissGrabPanel(clearText = true) }
+        grabCloseButton.setOnClickListener { dismissGrabPanel(clearText = true) }
+        linkInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                val hasText = !s.isNullOrEmpty()
+                clearLinkButton.visibility = if (hasText) View.VISIBLE else View.GONE
+                if (!hasText && grabPanel.visibility == View.VISIBLE) {
+                    grabPanel.visibility = View.GONE
+                }
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
 
         grabWatchButton.setOnClickListener {
             val url = linkInput.text.toString().trim()
@@ -374,6 +401,8 @@ class MainActivity : AppCompatActivity() {
             )
             // No row here anymore: the row is born on the Downloads
             // screen, from the first progress update for this URL.
+            grabPanel.visibility = View.GONE
+            linkInput.setText("")
             Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
         }
         handleShareIntent(intent)
@@ -485,6 +514,16 @@ class MainActivity : AppCompatActivity() {
         }
         hintHandler.removeCallbacks(hintCycler)
         hintHandler.postDelayed(hintCycler, 2800L)
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (::grabPanel.isInitialized && grabPanel.visibility == View.VISIBLE) {
+            grabPanel.visibility = View.GONE
+            linkInput.setText("")
+            return
+        }
+        super.onBackPressed()
     }
 
     override fun onPause() {

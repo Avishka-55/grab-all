@@ -607,7 +607,8 @@ class DownloadService : Service() {
                             maxHeight = maxHeight,
                             playlistMode = playlistMode,
                             concurrency = DownloadPrefs.resolvedConcurrency(this),
-                            selectedVideoIds = selectedVideoIds?.toSet()
+                            selectedVideoIds = selectedVideoIds?.toSet(),
+                            fastM4a = DownloadPrefs.isFastM4a(this)
                         )
                         session.fastDownloader = fast
                         val fastResult = fast.run(object : FastYouTubeDownloader.Callback {
@@ -734,7 +735,7 @@ class DownloadService : Service() {
                     val runnerDone = CountDownLatch(1)
                     newRunner.download(
                         url, outputTemplate,
-                        formatArgs(audioOnly, maxHeight) +
+                        formatArgs(audioOnly, maxHeight, DownloadPrefs.isFastM4a(this)) +
                             playlistArgs(playlistMode),
                         object : DownloadListener {
                             override fun onProgress(progress: DownloadProgress) {
@@ -1104,13 +1105,25 @@ class DownloadService : Service() {
          * (built with libmp3lame) — the old m4a output confused him,
          * since he calls the files mp3.
          */
-        private fun formatArgs(audioOnly: Boolean, maxHeight: Int?): List<String> {
+        private fun formatArgs(
+            audioOnly: Boolean,
+            maxHeight: Int?,
+            fastM4a: Boolean = false
+        ): List<String> {
             if (audioOnly) {
-                return listOf(
-                    "-f", "bestaudio",
-                    "--extract-audio", "--audio-format", "mp3", "--audio-quality", "4",
-                    "--embed-metadata", "--embed-thumbnail"
-                )
+                return if (fastM4a) {
+                    listOf(
+                        "-f", "bestaudio[ext=m4a]/bestaudio",
+                        "--extract-audio", "--audio-format", "m4a",
+                        "--embed-metadata", "--embed-thumbnail"
+                    )
+                } else {
+                    listOf(
+                        "-f", "bestaudio",
+                        "--extract-audio", "--audio-format", "mp3", "--audio-quality", "4",
+                        "--embed-metadata", "--embed-thumbnail"
+                    )
+                }
             }
             val cap = if (maxHeight != null) "[height<=$maxHeight]" else ""
             // Prefer H.264 (avc1) + AAC (m4a) first so the remuxed MP4

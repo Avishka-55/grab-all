@@ -248,11 +248,24 @@
                     android:imeOptions="actionSearch"
                     android:inputType="text"
                     android:maxLines="1"
-                    android:paddingEnd="8dp"
+                    android:paddingEnd="4dp"
                     android:singleLine="true"
                     android:textColor="@color/graball_text"
                     android:textColorHint="@color/graball_tab_text"
                     android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/clearLinkButton"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:layout_gravity="center_vertical"
+                    android:layout_marginEnd="6dp"
+                    android:gravity="center"
+                    android:text="✕"
+                    android:textColor="@color/graball_tab_text"
+                    android:textSize="15sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
 
                 <Button
                     android:id="@+id/grabButton"
@@ -274,12 +287,34 @@
                 android:padding="16dp"
                 android:visibility="gone">
 
-                <TextView
-                    android:id="@+id/grabType"
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:textColor="@color/graball_text"
-                    android:textSize="13sp" />
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/grabType"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:textColor="@color/graball_text"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/grabCloseButton"
+                        android:layout_width="30dp"
+                        android:layout_height="30dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/yt_chip_bg"
+                        android:gravity="center"
+                        android:text="✕"
+                        android:textColor="@color/graball_subtext"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
 
                 <LinearLayout
                     android:id="@+id/optionsRow"

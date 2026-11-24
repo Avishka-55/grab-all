@@ -195,13 +195,13 @@ object MediaStorePublisher {
     }
 
     fun mimeFor(displayName: String): String {
-        return when (displayName.substringAfterLast('.', "").lowercase()) {
+        val ext = displayName.substringAfterLast('.', "").lowercase()
+        com.graball.AudioFormats.mimeForExtension(ext)?.let { return it }
+        return when (ext) {
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"
             "webp" -> "image/webp"
             "gif" -> "image/gif"
-            "mp3" -> "audio/mpeg"
-            "m4a" -> "audio/mp4"
             "webm" -> "video/webm"
             "mkv" -> "video/x-matroska"
             else -> "video/mp4"

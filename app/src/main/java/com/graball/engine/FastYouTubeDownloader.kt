@@ -16,8 +16,10 @@ import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.io.RandomAccessFile
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -31,14 +33,17 @@ import kotlin.math.min
  * Why it is dramatically faster than serial yt-dlp:
  * 1. Resolves direct adaptive M4A/H.264 stream URLs in ~300ms via InnerTube
  *    (zero CPython startup, zero QuickJS challenge overhead).
- * 2. Downloads single videos & large tracks across 4-6 parallel HTTP Range
- *    connections (2 MB chunks) via OkHttp to saturate 50+ Mbps connections and
- *    bypass YouTube's per-stream throttle.
- * 3. Processes playlists across N parallel worker threads (user-configurable in
- *    Settings: Auto / 1..6), overlapping network I/O with multi-core ffmpeg
- *    MP3/MP4 muxing and publishing each finished track immediately.
- * 4. Falls back automatically to YtDlpRunner (with cookies + QuickJS) only for
- *    individual restricted/age-gated tracks or private playlists.
+ * 2. Downloads ALL YouTube streams >= 512 KB (both single videos/audio and
+ *    playlist tracks) in 1–2 MB ranged chunks using GoogleVideo's native
+ *    `&range=start-end` parameter across parallel OkHttp connections to bypass
+ *    YouTube's ~50-100 KB/s single-stream throttle.
+ * 3. Decouples network downloading (`downloadPool`) from ffmpeg MP3/M4A/MP4
+ *    encoding (`convertPool`) in playlists so Wi-Fi stays saturated while CPU
+ *    encodes finished tracks in parallel.
+ * 4. Optional Fast M4A mode (`fastM4a = true`) uses zero-transcode stream copy
+ *    (`ffmpeg -c:a copy`) for ~10x faster audio saving with embedded cover art.
+ * 5. Falls back automatically to YtDlpRunner (capped to 2 concurrent processes
+ *    with live progress forwarding) only for restricted/age-gated tracks.
  */
 class FastYouTubeDownloader(
     private val context: Context,
@@ -48,7 +53,8 @@ class FastYouTubeDownloader(
     private val maxHeight: Int?,
     private val playlistMode: String,
     private val concurrency: Int,
-    private val selectedVideoIds: Set<String>? = null
+    private val selectedVideoIds: Set<String>? = null,
+    private val fastM4a: Boolean = false
 ) {
     interface Callback {
         fun onTitleResolved(title: String) {}
@@ -65,6 +71,34 @@ class FastYouTubeDownloader(
         val producedCount: Int = 0,
         val skippedCount: Int = 0
     )
+
+    private data class RawAudioStage(
+        val info: VideoStreamInfo,
+        val rawFile: File,
+        val thumbFile: File,
+        val hasThumb: Boolean,
+        val audioMimeType: String
+    ) {
+        fun cleanup() {
+            runCatching { rawFile.delete() }
+            runCatching { File(rawFile.absolutePath + ".part").delete() }
+            runCatching { thumbFile.delete() }
+        }
+    }
+
+    private data class RawVideoStage(
+        val info: VideoStreamInfo,
+        val videoFile: File,
+        val audioFile: File,
+        val audioMimeType: String
+    ) {
+        fun cleanup() {
+            runCatching { videoFile.delete() }
+            runCatching { File(videoFile.absolutePath + ".part").delete() }
+            runCatching { audioFile.delete() }
+            runCatching { File(audioFile.absolutePath + ".part").delete() }
+        }
+    }
 
     @Volatile
     private var cancelled = false
@@ -141,6 +175,7 @@ class FastYouTubeDownloader(
                 targetDir = stagingDir,
                 fileBaseName = safeTitle,
                 albumTitle = "",
+                tempTag = "s_${info.videoId}",
                 parallelConns = parallelConns,
                 onByteProgress = { done, total ->
                     emitSingleProgress(done, total, callback)
@@ -155,6 +190,7 @@ class FastYouTubeDownloader(
                 info = info,
                 targetDir = stagingDir,
                 fileBaseName = safeTitle,
+                tempTag = "s_${info.videoId}",
                 parallelConns = parallelConns,
                 onByteProgress = { done, total ->
                     emitSingleProgress(done, total, callback)
@@ -201,7 +237,7 @@ class FastYouTubeDownloader(
         }
     }
 
-    // ---- Parallel YouTube Playlist Engine (N Concurrent Workers) ----
+    // ---- Decoupled Parallel YouTube Playlist Engine ----
 
     private fun runPlaylist(playlistId: String, callback: Callback): RunResult {
         if (cancelled) return RunResult(handled = true, exitCode = 1, detail = "Cancelled")
@@ -211,7 +247,7 @@ class FastYouTubeDownloader(
             "50" -> 50
             else -> 1500
         }
-        callback.onLogLine("[FastYT] Loading playlist $playlistId (limit=$maxItems, workers=$concurrency)…")
+        callback.onLogLine("[FastYT] Loading playlist $playlistId (limit=$maxItems, workers=$concurrency, fastM4a=$fastM4a)…")
         callback.onProgress(null, null, null, null, "Loading playlist items…")
 
         val details = YouTubeInnerTube.fetchPlaylist(playlistId, maxItems = maxItems)
@@ -249,19 +285,43 @@ class FastYouTubeDownloader(
         }
 
         val workerCount = concurrency.coerceIn(1, 6).coerceAtMost(total)
+        val convertThreads = min(workerCount, 3).coerceAtLeast(1)
         val perTrackConns = if (workerCount >= 3) 2 else 4
         callback.onLogLine(
-            "[FastYT] Playlist \"$playlistTitle\": $total tracks · $workerCount parallel workers (${completedIds.size} already done)"
+            "[FastYT] Playlist \"$playlistTitle\": $total tracks · $workerCount downloaders + $convertThreads converters (${completedIds.size} already done)"
         )
 
         val completedCount = AtomicInteger(0)
         val producedCount = AtomicInteger(0)
         val skippedCount = AtomicInteger(0)
         val failedCount = AtomicInteger(0)
-        val activeWorkers = AtomicInteger(0)
+        val activeDownloaders = AtomicInteger(0)
+        val convertingWorkers = AtomicInteger(0)
         val nextIndex = AtomicInteger(0)
         val startedAtMs = System.currentTimeMillis()
         val indexWidth = fullItems.size.toString().length.coerceAtLeast(2)
+
+        // Tracks live fractional progress (0.0..0.95) for each active playlist index
+        // so the UI ticks smoothly right from track #1 instead of hanging at 0%.
+        val inFlightProgress = ConcurrentHashMap<Int, Float>()
+        @Volatile
+        var latestStatusDetail: String? = "Resolving streams…"
+
+        // Bounded backpressure so downloaders stay ahead of ffmpeg without filling disk,
+        // and cap yt-dlp fallback subprocesses to 2 so mobile CPUs never thrash.
+        val convertBackpressure = Semaphore(workerCount * 2)
+        val ytDlpFallbackGate = Semaphore(2)
+
+        fun acquirePermit(sem: Semaphore): Boolean {
+            while (!cancelled) {
+                try {
+                    if (sem.tryAcquire(250L, TimeUnit.MILLISECONDS)) return true
+                } catch (_: InterruptedException) {
+                    return false
+                }
+            }
+            return false
+        }
 
         fun markCompleted(videoId: String) {
             if (completedIds.add(videoId)) {
@@ -274,36 +334,102 @@ class FastYouTubeDownloader(
         fun emitPlaylistProgress(force: Boolean = false) {
             val now = System.currentTimeMillis()
             synchronized(progressLock) {
-                if (!force && now - lastProgressEmitMs < 350L) return
+                if (!force && now - lastProgressEmitMs < 300L) return
                 lastProgressEmitMs = now
                 val done = completedCount.get()
-                val active = activeWorkers.get()
-                val pct = (done.toFloat() * 100f / total.toFloat()).coerceIn(0f, 99.9f)
+                val activeDl = activeDownloaders.get()
+                val activeConv = convertingWorkers.get()
+                val remainingTracks = (total - done).coerceAtLeast(0)
+                val inFlightSum = inFlightProgress.values.sum()
+                    .coerceIn(0f, remainingTracks.toFloat())
+                val pct = ((done.toFloat() + inFlightSum) * 100f / total.toFloat())
+                    .coerceIn(0f, 99.9f)
                 val speedBps = computeAggregateSpeedBps(now)
                 val speedStr = if (speedBps > 0L) formatSpeed(speedBps) else lastSpeedText
-                val newlyDone = (done - skippedCount.get()).coerceAtLeast(0)
+                val newlyDone = (done - skippedCount.get()).coerceAtLeast(0).toDouble() + inFlightSum.toDouble()
                 val elapsedSec = ((now - startedAtMs) / 1000L).coerceAtLeast(1L)
-                val remaining = (total - done).coerceAtLeast(0)
-                val etaStr = if (newlyDone >= 2 && remaining > 0) {
-                    val secPerTrack = elapsedSec.toDouble() / newlyDone.toDouble()
-                    formatEta((remaining * secPerTrack).toLong())
+                val remainingEffective = (total - done - inFlightSum).coerceAtLeast(0f).toDouble()
+                val etaStr = if (newlyDone >= 1.5 && remainingEffective > 0.05) {
+                    val secPerTrack = elapsedSec.toDouble() / newlyDone
+                    formatEta((remainingEffective * secPerTrack).toLong())
                 } else {
                     null
                 }
-                val itemLabel = if (active > 0) {
-                    "$done of $total · $active parallel"
-                } else {
-                    "$done of $total"
+                val itemLabel = when {
+                    activeDl > 0 && activeConv > 0 ->
+                        "$done of $total · $activeDl dl · $activeConv conv"
+                    activeDl > 0 ->
+                        "$done of $total · $activeDl parallel"
+                    activeConv > 0 ->
+                        "$done of $total · converting ($activeConv)"
+                    else ->
+                        "$done of $total"
                 }
-                callback.onProgress(pct, speedStr, etaStr, itemLabel, null)
+                val fallbackDetail = if (speedStr == null) latestStatusDetail else null
+                callback.onProgress(pct, speedStr, etaStr, itemLabel, fallbackDetail)
             }
         }
 
-        val pool = Executors.newFixedThreadPool(workerCount)
-        val latch = CountDownLatch(workerCount)
+        fun finishTrackResult(idx: Int, track: YtItem, okFile: File?) {
+            if (!cancelled) {
+                if (okFile != null && okFile.isFile && okFile.length() > 0L) {
+                    callback.onFileReady(okFile)
+                    // Remove staging copy once published to keep storage small
+                    // while completed_ids.txt handles resume deduplication.
+                    runCatching { okFile.delete() }
+                    markCompleted(track.id)
+                    producedCount.incrementAndGet()
+                } else {
+                    failedCount.incrementAndGet()
+                    callback.onLogLine("[FastYT] Skipped unavailable track ${idx + 1}/$total: ${track.title}")
+                }
+                completedCount.incrementAndGet()
+            } else if (okFile != null) {
+                runCatching { okFile.delete() }
+            }
+            inFlightProgress.remove(idx)
+            emitPlaylistProgress(force = true)
+        }
+
+        fun runYtDlpFallbackForTrack(idx: Int, track: YtItem, baseName: String) {
+            if (cancelled) {
+                inFlightProgress.remove(idx)
+                return
+            }
+            callback.onLogLine("[FastYT] Fallback to yt-dlp for track: ${track.title}")
+            latestStatusDetail = "Fallback engine: ${track.title.take(36)}"
+            emitPlaylistProgress(force = false)
+            if (!acquirePermit(ytDlpFallbackGate)) {
+                inFlightProgress.remove(idx)
+                return
+            }
+            try {
+                val okFile = fallbackSingleTrackViaYtDlp(
+                    item = track,
+                    playlistDir = playlistDir,
+                    baseName = baseName,
+                    onProgress = { trackPct, status ->
+                        if (trackPct != null) {
+                            inFlightProgress[idx] = 0.05f + (trackPct.coerceIn(0f, 100f) / 100f) * 0.88f
+                        }
+                        if (!status.isNullOrBlank()) {
+                            latestStatusDetail = status
+                        }
+                        emitPlaylistProgress(force = false)
+                    }
+                )
+                finishTrackResult(idx, track, okFile)
+            } finally {
+                ytDlpFallbackGate.release()
+            }
+        }
+
+        val downloadPool = Executors.newFixedThreadPool(workerCount)
+        val convertPool = Executors.newFixedThreadPool(convertThreads)
+        val downloadLatch = CountDownLatch(workerCount)
 
         for (w in 0 until workerCount) {
-            pool.execute {
+            downloadPool.execute {
                 try {
                     while (!cancelled) {
                         val idx = nextIndex.getAndIncrement()
@@ -315,54 +441,224 @@ class FastYouTubeDownloader(
                             emitPlaylistProgress(force = false)
                             continue
                         }
-                        activeWorkers.incrementAndGet()
+                        activeDownloaders.incrementAndGet()
+                        inFlightProgress[idx] = 0.02f
                         emitPlaylistProgress(force = false)
                         try {
                             val prefix = String.format("%0${indexWidth}d", origTrackNum)
                             val safeTitle = sanitizeFileName(track.title).ifBlank { track.id }
                             val baseName = "$prefix - $safeTitle"
-                            val okFile = processPlaylistTrack(
-                                item = track,
-                                playlistDir = playlistDir,
-                                baseName = baseName,
-                                albumTitle = details.title,
-                                parallelConns = perTrackConns,
-                                onTick = { emitPlaylistProgress(force = false) },
-                                callback = callback
-                            )
-                            if (cancelled) break
-                            if (okFile != null && okFile.isFile && okFile.length() > 0L) {
-                                callback.onFileReady(okFile)
-                                // Remove staging copy once published to keep storage small
-                                // while completed_ids.txt handles resume deduplication.
-                                runCatching { okFile.delete() }
-                                markCompleted(track.id)
-                                producedCount.incrementAndGet()
-                            } else {
-                                failedCount.incrementAndGet()
-                                callback.onLogLine("[FastYT] Skipped unavailable track ${idx + 1}/$total: ${track.title}")
+                            val tempTag = "t${idx}_${track.id}"
+
+                            val resolved = YouTubeInnerTube.resolveForDownload(track.id)
+                            val info = resolved.info
+                            if (cancelled) {
+                                inFlightProgress.remove(idx)
+                                break
                             }
-                            completedCount.incrementAndGet()
-                            emitPlaylistProgress(force = true)
+
+                            if (info != null && audioOnly) {
+                                val rawStage = fetchRawAudioAndThumb(
+                                    info = info,
+                                    targetDir = playlistDir,
+                                    tempTag = tempTag,
+                                    parallelConns = perTrackConns,
+                                    onByteProgress = { doneBytes, totalBytes ->
+                                        if (totalBytes > 0L) {
+                                            val frac = (doneBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+                                            inFlightProgress[idx] = 0.05f + frac * 0.70f
+                                        }
+                                        emitPlaylistProgress(force = false)
+                                    }
+                                )
+                                if (cancelled) {
+                                    rawStage?.cleanup()
+                                    inFlightProgress.remove(idx)
+                                    break
+                                }
+                                if (rawStage != null) {
+                                    inFlightProgress[idx] = 0.78f
+                                    emitPlaylistProgress(force = false)
+                                    if (!acquirePermit(convertBackpressure)) {
+                                        rawStage.cleanup()
+                                        inFlightProgress.remove(idx)
+                                        break
+                                    }
+                                    convertingWorkers.incrementAndGet()
+                                    try {
+                                        convertPool.execute {
+                                            try {
+                                                if (cancelled) {
+                                                    rawStage.cleanup()
+                                                    inFlightProgress.remove(idx)
+                                                    return@execute
+                                                }
+                                                inFlightProgress[idx] = 0.85f
+                                                emitPlaylistProgress(force = false)
+                                                val encoded = encodeAudioTrack(
+                                                    stage = rawStage,
+                                                    targetDir = playlistDir,
+                                                    fileBaseName = baseName,
+                                                    albumTitle = details.title,
+                                                    onStage = { },
+                                                    callback = callback
+                                                )
+                                                if (encoded != null && encoded.isFile && encoded.length() > 0L) {
+                                                    finishTrackResult(idx, track, encoded)
+                                                } else if (!cancelled) {
+                                                    runYtDlpFallbackForTrack(idx, track, baseName)
+                                                } else {
+                                                    inFlightProgress.remove(idx)
+                                                }
+                                            } finally {
+                                                convertingWorkers.decrementAndGet()
+                                                convertBackpressure.release()
+                                                emitPlaylistProgress(force = false)
+                                            }
+                                        }
+                                    } catch (_: Exception) {
+                                        rawStage.cleanup()
+                                        inFlightProgress.remove(idx)
+                                        convertingWorkers.decrementAndGet()
+                                        convertBackpressure.release()
+                                    }
+                                    continue
+                                }
+                            } else if (info != null && !audioOnly) {
+                                val hasAdaptive = info.pickVideoStream(maxHeight) != null && info.bestAudio() != null
+                                if (hasAdaptive) {
+                                    val rawVideo = fetchRawVideoStreams(
+                                        info = info,
+                                        targetDir = playlistDir,
+                                        tempTag = tempTag,
+                                        parallelConns = perTrackConns,
+                                        onByteProgress = { doneBytes, totalBytes ->
+                                            if (totalBytes > 0L) {
+                                                val frac = (doneBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+                                                inFlightProgress[idx] = 0.05f + frac * 0.78f
+                                            }
+                                            emitPlaylistProgress(force = false)
+                                        }
+                                    )
+                                    if (cancelled) {
+                                        rawVideo?.cleanup()
+                                        inFlightProgress.remove(idx)
+                                        break
+                                    }
+                                    if (rawVideo != null) {
+                                        inFlightProgress[idx] = 0.86f
+                                        emitPlaylistProgress(force = false)
+                                        if (!acquirePermit(convertBackpressure)) {
+                                            rawVideo.cleanup()
+                                            inFlightProgress.remove(idx)
+                                            break
+                                        }
+                                        convertingWorkers.incrementAndGet()
+                                        try {
+                                            convertPool.execute {
+                                                try {
+                                                    if (cancelled) {
+                                                        rawVideo.cleanup()
+                                                        inFlightProgress.remove(idx)
+                                                        return@execute
+                                                    }
+                                                    inFlightProgress[idx] = 0.90f
+                                                    emitPlaylistProgress(force = false)
+                                                    val muxed = muxVideoTrack(
+                                                        stage = rawVideo,
+                                                        targetDir = playlistDir,
+                                                        fileBaseName = baseName,
+                                                        onStage = { }
+                                                    )
+                                                    if (muxed != null && muxed.isFile && muxed.length() > 0L) {
+                                                        finishTrackResult(idx, track, muxed)
+                                                    } else if (!cancelled) {
+                                                        runYtDlpFallbackForTrack(idx, track, baseName)
+                                                    } else {
+                                                        inFlightProgress.remove(idx)
+                                                    }
+                                                } finally {
+                                                    convertingWorkers.decrementAndGet()
+                                                    convertBackpressure.release()
+                                                    emitPlaylistProgress(force = false)
+                                                }
+                                            }
+                                        } catch (_: Exception) {
+                                            rawVideo.cleanup()
+                                            inFlightProgress.remove(idx)
+                                            convertingWorkers.decrementAndGet()
+                                            convertBackpressure.release()
+                                        }
+                                        continue
+                                    }
+                                } else {
+                                    val muxedFile = downloadMuxedVideoTrack(
+                                        info = info,
+                                        targetDir = playlistDir,
+                                        fileBaseName = baseName,
+                                        parallelConns = perTrackConns,
+                                        onByteProgress = { doneBytes, totalBytes ->
+                                            if (totalBytes > 0L) {
+                                                val frac = (doneBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+                                                inFlightProgress[idx] = 0.05f + frac * 0.90f
+                                            }
+                                            emitPlaylistProgress(force = false)
+                                        }
+                                    )
+                                    if (cancelled) {
+                                        inFlightProgress.remove(idx)
+                                        break
+                                    }
+                                    if (muxedFile != null && muxedFile.isFile && muxedFile.length() > 0L) {
+                                        finishTrackResult(idx, track, muxedFile)
+                                        continue
+                                    }
+                                }
+                            }
+
+                            if (!cancelled) {
+                                runYtDlpFallbackForTrack(idx, track, baseName)
+                            } else {
+                                inFlightProgress.remove(idx)
+                            }
                         } finally {
-                            activeWorkers.decrementAndGet()
+                            activeDownloaders.decrementAndGet()
                         }
                     }
                 } finally {
-                    latch.countDown()
+                    downloadLatch.countDown()
                 }
             }
         }
 
         try {
-            latch.await()
+            downloadLatch.await()
         } catch (_: InterruptedException) {
             cancel()
         } finally {
-            pool.shutdownNow()
+            downloadPool.shutdownNow()
         }
 
+        convertPool.shutdown()
+        try {
+            while (!convertPool.awaitTermination(300L, TimeUnit.MILLISECONDS)) {
+                if (cancelled) {
+                    convertPool.shutdownNow()
+                    break
+                }
+            }
+        } catch (_: InterruptedException) {
+            cancel()
+            convertPool.shutdownNow()
+        }
+
+        // Remove any leftover staging temp files if cancelled mid-flight
         if (cancelled) {
+            runCatching {
+                playlistDir.listFiles()
+                    ?.filter { it.name.startsWith(".tmp_") || it.name.endsWith(".part") }
+                    ?.forEach { it.delete() }
+            }
             return RunResult(
                 handled = true,
                 exitCode = 1,
@@ -386,100 +682,157 @@ class FastYouTubeDownloader(
         )
     }
 
-    private fun processPlaylistTrack(
-        item: YtItem,
-        playlistDir: File,
-        baseName: String,
-        albumTitle: String,
-        parallelConns: Int,
-        onTick: () -> Unit,
-        callback: Callback
-    ): File? {
-        if (cancelled) return null
-        val resolved = YouTubeInnerTube.resolveForDownload(item.id)
-        val info = resolved.info
-        if (info != null) {
-            val out = if (audioOnly) {
-                downloadAudioTrack(
-                    info = info,
-                    targetDir = playlistDir,
-                    fileBaseName = baseName,
-                    albumTitle = albumTitle,
-                    parallelConns = parallelConns,
-                    onByteProgress = { _, _ -> onTick() },
-                    onStage = { },
-                    callback = callback
-                )
-            } else {
-                downloadVideoTrack(
-                    info = info,
-                    targetDir = playlistDir,
-                    fileBaseName = baseName,
-                    parallelConns = parallelConns,
-                    onByteProgress = { _, _ -> onTick() },
-                    onStage = { },
-                    callback = callback
-                )
-            }
-            if (out != null && out.isFile && out.length() > 0L) {
-                return out
-            }
-        }
-        if (cancelled) return null
-
-        // Per-track bulletproof fallback to yt-dlp (e.g. age-gated / cookies / Made-for-Kids)
-        callback.onLogLine("[FastYT] Fallback to yt-dlp for track: ${item.title}")
-        return fallbackSingleTrackViaYtDlp(item, playlistDir, baseName)
-    }
-
-    // ---- Audio Track Download + Fast Single-Pass MP3 + Cover Art ----
+    // ---- Audio Track Download + Fast Single-Pass MP3 / Zero-Transcode M4A + Cover Art ----
 
     private fun downloadAudioTrack(
         info: VideoStreamInfo,
         targetDir: File,
         fileBaseName: String,
         albumTitle: String,
+        tempTag: String,
         parallelConns: Int,
         onByteProgress: (Long, Long) -> Unit,
         onStage: (String) -> Unit,
         callback: Callback
     ): File? {
+        val stage = fetchRawAudioAndThumb(
+            info = info,
+            targetDir = targetDir,
+            tempTag = tempTag,
+            parallelConns = parallelConns,
+            onByteProgress = onByteProgress
+        ) ?: return null
+        return encodeAudioTrack(
+            stage = stage,
+            targetDir = targetDir,
+            fileBaseName = fileBaseName,
+            albumTitle = albumTitle,
+            onStage = onStage,
+            callback = callback
+        )
+    }
+
+    private fun fetchRawAudioAndThumb(
+        info: VideoStreamInfo,
+        targetDir: File,
+        tempTag: String,
+        parallelConns: Int,
+        onByteProgress: (Long, Long) -> Unit
+    ): RawAudioStage? {
         val audio = info.bestAudio() ?: return null
         val rawExt = if (audio.mimeType.contains("webm", true)) "webm" else "m4a"
-        val rawFile = File(targetDir, ".tmp_${info.videoId}_audio.$rawExt")
-        val thumbFile = File(targetDir, ".tmp_${info.videoId}_thumb.jpg")
-        val outFile = File(targetDir, "$fileBaseName.mp3")
+        val rawFile = File(targetDir, ".tmp_${tempTag}_audio.$rawExt")
+        val thumbFile = File(targetDir, ".tmp_${tempTag}_thumb.jpg")
 
+        val ok = downloadUrlFast(
+            url = audio.url,
+            userAgent = info.userAgent,
+            destFile = rawFile,
+            parallelConns = parallelConns,
+            onByteProgress = onByteProgress
+        )
+        if (!ok || cancelled) {
+            runCatching { rawFile.delete() }
+            runCatching { File(rawFile.absolutePath + ".part").delete() }
+            return null
+        }
+
+        val hasThumb = !cancelled && info.thumbnailUrl.startsWith("http") &&
+            downloadSmallFile(info.thumbnailUrl, info.userAgent, thumbFile)
+        if (cancelled) {
+            runCatching { rawFile.delete() }
+            runCatching { thumbFile.delete() }
+            return null
+        }
+        return RawAudioStage(
+            info = info,
+            rawFile = rawFile,
+            thumbFile = thumbFile,
+            hasThumb = hasThumb,
+            audioMimeType = audio.mimeType
+        )
+    }
+
+    private fun encodeAudioTrack(
+        stage: RawAudioStage,
+        targetDir: File,
+        fileBaseName: String,
+        albumTitle: String,
+        onStage: (String) -> Unit,
+        callback: Callback
+    ): File? {
+        val info = stage.info
+        val outFile = File(targetDir, if (fastM4a) "$fileBaseName.m4a" else "$fileBaseName.mp3")
         try {
-            val ok = downloadUrlFast(
-                url = audio.url,
-                userAgent = info.userAgent,
-                destFile = rawFile,
-                parallelConns = parallelConns,
-                onByteProgress = onByteProgress
-            )
-            if (!ok || cancelled) return null
-
-            // Download thumbnail in parallel / quickly for embedded album art
-            val hasThumb = !cancelled && info.thumbnailUrl.startsWith("http") &&
-                downloadSmallFile(info.thumbnailUrl, info.userAgent, thumbFile)
-
             if (cancelled) return null
-            onStage("Converting to MP3 & embedding cover…")
-
             val ffmpeg = resolveFfmpegBinary()
             if (ffmpeg == null) {
                 callback.onLogLine("[FastYT] ffmpeg binary missing, falling back to yt-dlp")
                 return null
             }
 
-            // Single-pass MP3 encode with fast LAME VBR (-q:a 4, ~165 kbps) + ID3 + cover art
+            if (fastM4a) {
+                onStage("Saving fast M4A & cover…")
+                val isMp4Audio = stage.audioMimeType.contains("mp4", true) ||
+                    stage.audioMimeType.contains("aac", true) ||
+                    stage.audioMimeType.contains("m4a", true)
+                val audioCodecArgs = if (isMp4Audio) {
+                    listOf("-c:a", "copy")
+                } else {
+                    listOf("-c:a", "aac", "-b:a", "160k", "-threads", "2")
+                }
+
+                var encoded = false
+                if (stage.hasThumb && stage.thumbFile.length() > 512L) {
+                    val cmd = mutableListOf(
+                        ffmpeg.absolutePath, "-y", "-nostdin", "-loglevel", "error",
+                        "-i", stage.rawFile.absolutePath,
+                        "-i", stage.thumbFile.absolutePath,
+                        "-map", "0:a", "-map", "1:v"
+                    )
+                    cmd += audioCodecArgs
+                    cmd += listOf(
+                        "-c:v", "mjpeg",
+                        "-disposition:v", "attached_pic",
+                        "-metadata", "title=${info.title}",
+                        "-metadata", "artist=${info.channel}"
+                    )
+                    if (albumTitle.isNotBlank()) {
+                        cmd += listOf("-metadata", "album=$albumTitle")
+                    }
+                    cmd += listOf("-movflags", "+faststart", outFile.absolutePath)
+                    encoded = runFfmpeg(cmd) && outFile.isFile && outFile.length() > 0L
+                }
+
+                if (!encoded && !cancelled) {
+                    runCatching { outFile.delete() }
+                    val cmd = mutableListOf(
+                        ffmpeg.absolutePath, "-y", "-nostdin", "-loglevel", "error",
+                        "-i", stage.rawFile.absolutePath,
+                        "-vn"
+                    )
+                    cmd += audioCodecArgs
+                    cmd += listOf(
+                        "-metadata", "title=${info.title}",
+                        "-metadata", "artist=${info.channel}"
+                    )
+                    if (albumTitle.isNotBlank()) {
+                        cmd += listOf("-metadata", "album=$albumTitle")
+                    }
+                    cmd += listOf("-movflags", "+faststart", outFile.absolutePath)
+                    encoded = runFfmpeg(cmd) && outFile.isFile && outFile.length() > 0L
+                }
+                return if (encoded) outFile else null
+            }
+
+            // Standard universal MP3 encode with fast LAME VBR (-q:a 4, ~165 kbps) + ID3 + cover art
+            onStage("Converting to MP3 & embedding cover…")
             var encoded = false
-            if (hasThumb && thumbFile.length() > 512L) {
+            if (stage.hasThumb && stage.thumbFile.length() > 512L) {
                 val cmd = mutableListOf(
                     ffmpeg.absolutePath, "-y", "-nostdin", "-loglevel", "error",
-                    "-i", rawFile.absolutePath,
-                    "-i", thumbFile.absolutePath,
+                    "-i", stage.rawFile.absolutePath,
+                    "-i", stage.thumbFile.absolutePath,
                     "-map", "0:a", "-map", "1:v",
                     "-c:a", "libmp3lame", "-q:a", "4", "-threads", "2",
                     "-c:v", "mjpeg", "-id3v2_version", "3",
@@ -503,7 +856,7 @@ class FastYouTubeDownloader(
                 runCatching { outFile.delete() }
                 val cmd = mutableListOf(
                     ffmpeg.absolutePath, "-y", "-nostdin", "-loglevel", "error",
-                    "-i", rawFile.absolutePath,
+                    "-i", stage.rawFile.absolutePath,
                     "-vn",
                     "-c:a", "libmp3lame", "-q:a", "4", "-threads", "2",
                     "-id3v2_version", "3",
@@ -519,9 +872,7 @@ class FastYouTubeDownloader(
 
             return if (encoded) outFile else null
         } finally {
-            runCatching { rawFile.delete() }
-            runCatching { File(rawFile.absolutePath + ".part").delete() }
-            runCatching { thumbFile.delete() }
+            stage.cleanup()
         }
     }
 
@@ -531,88 +882,133 @@ class FastYouTubeDownloader(
         info: VideoStreamInfo,
         targetDir: File,
         fileBaseName: String,
+        tempTag: String,
         parallelConns: Int,
         onByteProgress: (Long, Long) -> Unit,
         onStage: (String) -> Unit,
         callback: Callback
     ): File? {
-        val video = info.pickVideoStream(maxHeight)
-        val audio = info.bestAudio()
-        val outFile = File(targetDir, "$fileBaseName.mp4")
+        val rawStage = fetchRawVideoStreams(
+            info = info,
+            targetDir = targetDir,
+            tempTag = tempTag,
+            parallelConns = parallelConns,
+            onByteProgress = onByteProgress
+        )
+        if (rawStage != null) {
+            return muxVideoTrack(rawStage, targetDir, fileBaseName, onStage)
+        }
+        if (cancelled) return null
+        return downloadMuxedVideoTrack(info, targetDir, fileBaseName, parallelConns, onByteProgress)
+    }
 
-        if (video != null && audio != null) {
-            val vExt = if (video.mimeType.contains("webm", true)) "webm" else "mp4"
-            val aExt = if (audio.mimeType.contains("webm", true)) "webm" else "m4a"
-            val vFile = File(targetDir, ".tmp_${info.videoId}_video.$vExt")
-            val aFile = File(targetDir, ".tmp_${info.videoId}_audio.$aExt")
-            try {
-                // Download video & audio simultaneously!
-                val vDone = AtomicLong(0L)
-                val vTotal = AtomicLong(0L)
-                val aDone = AtomicLong(0L)
-                val aTotal = AtomicLong(0L)
-                val audioOk = AtomicBoolean(false)
+    private fun fetchRawVideoStreams(
+        info: VideoStreamInfo,
+        targetDir: File,
+        tempTag: String,
+        parallelConns: Int,
+        onByteProgress: (Long, Long) -> Unit
+    ): RawVideoStage? {
+        val video = info.pickVideoStream(maxHeight) ?: return null
+        val audio = info.bestAudio() ?: return null
+        val vExt = if (video.mimeType.contains("webm", true)) "webm" else "mp4"
+        val aExt = if (audio.mimeType.contains("webm", true)) "webm" else "m4a"
+        val vFile = File(targetDir, ".tmp_${tempTag}_video.$vExt")
+        val aFile = File(targetDir, ".tmp_${tempTag}_audio.$aExt")
 
-                val audioThread = Thread {
-                    audioOk.set(
-                        downloadUrlFast(
-                            url = audio.url,
-                            userAgent = info.userAgent,
-                            destFile = aFile,
-                            parallelConns = 1,
-                            onByteProgress = { d, t ->
-                                aDone.set(d)
-                                if (t > 0L) aTotal.set(t)
-                                onByteProgress(vDone.get() + d, vTotal.get() + aTotal.get())
-                            }
-                        )
-                    )
-                }.apply { start() }
+        val vDone = AtomicLong(0L)
+        val vTotal = AtomicLong(0L)
+        val aDone = AtomicLong(0L)
+        val aTotal = AtomicLong(0L)
+        val audioOk = AtomicBoolean(false)
 
-                val videoOk = downloadUrlFast(
-                    url = video.url,
+        // Download video & audio simultaneously; audio also uses 2 ranged connections
+        // so it never hits YouTube's single-stream throttle.
+        val audioConns = min(2, parallelConns).coerceAtLeast(1)
+        val audioThread = Thread {
+            audioOk.set(
+                downloadUrlFast(
+                    url = audio.url,
                     userAgent = info.userAgent,
-                    destFile = vFile,
-                    parallelConns = parallelConns,
+                    destFile = aFile,
+                    parallelConns = audioConns,
                     onByteProgress = { d, t ->
-                        vDone.set(d)
-                        if (t > 0L) vTotal.set(t)
-                        onByteProgress(d + aDone.get(), t + aTotal.get())
+                        aDone.set(d)
+                        if (t > 0L) aTotal.set(t)
+                        onByteProgress(vDone.get() + d, vTotal.get() + aTotal.get())
                     }
                 )
-                try {
-                    audioThread.join()
-                } catch (_: InterruptedException) {
-                    return null
-                }
-                if (!videoOk || !audioOk.get() || cancelled) return null
+            )
+        }.apply { start() }
 
-                onStage("Merging video & audio…")
-                val ffmpeg = resolveFfmpegBinary() ?: return null
-                // Pure stream copy if H.264/MP4 + M4A; fallback to AAC audio copy if Opus
-                val isMp4Audio = audio.mimeType.contains("mp4", true) || audio.mimeType.contains("aac", true)
-                val cmd = mutableListOf(
-                    ffmpeg.absolutePath, "-y", "-nostdin", "-loglevel", "error",
-                    "-i", vFile.absolutePath,
-                    "-i", aFile.absolutePath,
-                    "-map", "0:v:0", "-map", "1:a:0",
-                    "-c:v", "copy",
-                    "-c:a", if (isMp4Audio) "copy" else "aac",
-                    "-movflags", "+faststart",
-                    outFile.absolutePath
-                )
-                val muxed = runFfmpeg(cmd) && outFile.isFile && outFile.length() > 0L
-                return if (muxed) outFile else null
-            } finally {
-                runCatching { vFile.delete() }
-                runCatching { File(vFile.absolutePath + ".part").delete() }
-                runCatching { aFile.delete() }
-                runCatching { File(aFile.absolutePath + ".part").delete() }
+        val videoOk = downloadUrlFast(
+            url = video.url,
+            userAgent = info.userAgent,
+            destFile = vFile,
+            parallelConns = parallelConns,
+            onByteProgress = { d, t ->
+                vDone.set(d)
+                if (t > 0L) vTotal.set(t)
+                onByteProgress(d + aDone.get(), t + aTotal.get())
             }
+        )
+        try {
+            audioThread.join()
+        } catch (_: InterruptedException) {
+            runCatching { vFile.delete() }
+            runCatching { aFile.delete() }
+            return null
         }
 
-        // Fallback to muxed stream
+        if (!videoOk || !audioOk.get() || cancelled) {
+            runCatching { vFile.delete() }
+            runCatching { File(vFile.absolutePath + ".part").delete() }
+            runCatching { aFile.delete() }
+            runCatching { File(aFile.absolutePath + ".part").delete() }
+            return null
+        }
+        return RawVideoStage(info, vFile, aFile, audio.mimeType)
+    }
+
+    private fun muxVideoTrack(
+        stage: RawVideoStage,
+        targetDir: File,
+        fileBaseName: String,
+        onStage: (String) -> Unit
+    ): File? {
+        val outFile = File(targetDir, "$fileBaseName.mp4")
+        try {
+            if (cancelled) return null
+            onStage("Merging video & audio…")
+            val ffmpeg = resolveFfmpegBinary() ?: return null
+            val isMp4Audio = stage.audioMimeType.contains("mp4", true) ||
+                stage.audioMimeType.contains("aac", true)
+            val cmd = mutableListOf(
+                ffmpeg.absolutePath, "-y", "-nostdin", "-loglevel", "error",
+                "-i", stage.videoFile.absolutePath,
+                "-i", stage.audioFile.absolutePath,
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy",
+                "-c:a", if (isMp4Audio) "copy" else "aac",
+                "-movflags", "+faststart",
+                outFile.absolutePath
+            )
+            val muxed = runFfmpeg(cmd) && outFile.isFile && outFile.length() > 0L
+            return if (muxed) outFile else null
+        } finally {
+            stage.cleanup()
+        }
+    }
+
+    private fun downloadMuxedVideoTrack(
+        info: VideoStreamInfo,
+        targetDir: File,
+        fileBaseName: String,
+        parallelConns: Int,
+        onByteProgress: (Long, Long) -> Unit
+    ): File? {
         val muxed = info.pickMuxedStream(maxHeight) ?: return null
+        val outFile = File(targetDir, "$fileBaseName.mp4")
         val ok = downloadUrlFast(
             url = muxed.url,
             userAgent = info.userAgent,
@@ -623,7 +1019,7 @@ class FastYouTubeDownloader(
         return if (ok && !cancelled && outFile.isFile && outFile.length() > 0L) outFile else null
     }
 
-    // ---- Multi-Connection HTTP Range Downloader (Saturates 50+ Mbps!) ----
+    // ---- Multi-Connection Ranged Downloader (Unthrottles ALL YouTube Downloads!) ----
 
     private fun downloadUrlFast(
         url: String,
@@ -635,11 +1031,15 @@ class FastYouTubeDownloader(
         if (cancelled) return false
         destFile.parentFile?.mkdirs()
 
-        // Probe total length & Range support with a tiny 1-byte Range GET
-        val totalBytes = probeContentLength(url, userAgent)
+        // Read `clen=` directly from GoogleVideo URL when present (0ms, no probe round-trip),
+        // falling back to a 1-byte Range probe otherwise.
+        val totalBytes = extractClenFromUrl(url).takeIf { it > 0L }
+            ?: probeContentLength(url, userAgent)
         if (cancelled) return false
 
-        if (totalBytes >= MULTI_CHUNK_THRESHOLD_BYTES && parallelConns > 1) {
+        // Always use ranged chunking for GoogleVideo URLs >= 512 KB (even with 1 connection)
+        // because YouTube throttles un-ranged full-file GETs to ~50-100 KB/s.
+        if (totalBytes >= MULTI_CHUNK_THRESHOLD_BYTES && (parallelConns > 1 || isGoogleVideoUrl(url))) {
             if (downloadRangedParallel(url, userAgent, destFile, totalBytes, parallelConns, onByteProgress)) {
                 return true
             }
@@ -692,9 +1092,14 @@ class FastYouTubeDownloader(
             return false
         }
 
-        val chunkSize = RANGE_CHUNK_BYTES
+        val chunkSize = if (totalBytes < SMALL_FILE_THRESHOLD_BYTES) {
+            SMALL_RANGE_CHUNK_BYTES
+        } else {
+            LARGE_RANGE_CHUNK_BYTES
+        }
+        val useQueryRange = isGoogleVideoUrl(url)
         val numChunks = ((totalBytes + chunkSize - 1L) / chunkSize).toInt()
-        val workers = min(parallelConns, numChunks).coerceAtLeast(1)
+        val workers = min(parallelConns.coerceAtLeast(1), numChunks).coerceAtLeast(1)
         val nextChunk = AtomicInteger(0)
         val fileBytesDone = AtomicLong(0L)
         val failed = AtomicBoolean(false)
@@ -712,20 +1117,36 @@ class FastYouTubeDownloader(
                             if (idx >= numChunks) break
                             val start = idx.toLong() * chunkSize
                             val end = min(totalBytes - 1L, start + chunkSize - 1L)
+                            val expectedLen = end - start + 1L
                             var chunkOk = false
                             for (attempt in 0 until 3) {
                                 if (cancelled || failed.get()) break
                                 var writtenInAttempt = 0L
-                                val req = Request.Builder()
-                                    .url(url)
-                                    .header("User-Agent", userAgent)
-                                    .header("Range", "bytes=$start-$end")
-                                    .build()
+                                val req = if (useQueryRange) {
+                                    // YouTube CDN (`googlevideo.com`) serves `&range=start-end`
+                                    // at full unthrottled speed (HTTP 200 with exact chunk bytes).
+                                    Request.Builder()
+                                        .url(withGoogleVideoRange(url, start, end))
+                                        .header("User-Agent", userAgent)
+                                        .build()
+                                } else {
+                                    Request.Builder()
+                                        .url(url)
+                                        .header("User-Agent", userAgent)
+                                        .header("Range", "bytes=$start-$end")
+                                        .build()
+                                }
                                 val call = httpClient.newCall(req)
                                 activeCalls.add(call)
                                 try {
                                     call.execute().use { resp ->
                                         if (resp.code != 206 && !resp.isSuccessful) {
+                                            return@use
+                                        }
+                                        // If a non-GoogleVideo server ignored Range and returned the
+                                        // full file, abort ranged mode so single-stream downloads it once.
+                                        if (!useQueryRange && resp.code == 200 && totalBytes > expectedLen) {
+                                            failed.set(true)
                                             return@use
                                         }
                                         val body = resp.body ?: return@use
@@ -734,24 +1155,26 @@ class FastYouTubeDownloader(
                                             var n: Int
                                             while (input.read(buf).also { n = it } != -1) {
                                                 if (cancelled || failed.get()) return@use
-                                                raf.write(buf, 0, n)
-                                                writtenInAttempt += n
-                                                val nowFile = fileBytesDone.addAndGet(n.toLong())
-                                                totalBytesCounter.addAndGet(n.toLong())
+                                                val remainingAllowed = expectedLen - writtenInAttempt
+                                                if (remainingAllowed <= 0L) break
+                                                val toWrite = min(n.toLong(), remainingAllowed).toInt()
+                                                raf.write(buf, 0, toWrite)
+                                                writtenInAttempt += toWrite
+                                                val nowFile = fileBytesDone.addAndGet(toWrite.toLong())
+                                                totalBytesCounter.addAndGet(toWrite.toLong())
                                                 onByteProgress(nowFile, totalBytes)
                                             }
                                         }
-                                        if (writtenInAttempt == (end - start + 1L)) {
+                                        if (writtenInAttempt == expectedLen) {
                                             chunkOk = true
                                         }
                                     }
                                 } catch (_: Exception) {
-                                    // Roll back partial attempt count before retry
-                                    if (writtenInAttempt > 0L) {
-                                        fileBytesDone.addAndGet(-writtenInAttempt)
-                                    }
                                 } finally {
                                     activeCalls.remove(call)
+                                    if (!chunkOk && writtenInAttempt > 0L) {
+                                        fileBytesDone.addAndGet(-writtenInAttempt)
+                                    }
                                 }
                                 if (chunkOk) break
                                 try {
@@ -927,7 +1350,8 @@ class FastYouTubeDownloader(
     private fun fallbackSingleTrackViaYtDlp(
         item: YtItem,
         playlistDir: File,
-        baseName: String
+        baseName: String,
+        onProgress: (Float?, String?) -> Unit = { _, _ -> }
     ): File? {
         if (cancelled) return null
         val cookies = RuntimePaths.cookiesFile(context).takeIf { it.exists() }
@@ -949,12 +1373,21 @@ class FastYouTubeDownloader(
         var produced: File? = null
         val outputTemplate = File(playlistDir, "$baseName.%(ext)s").absolutePath
         val extraArgs = if (audioOnly) {
-            listOf(
-                "-f", "bestaudio",
-                "--extract-audio", "--audio-format", "mp3", "--audio-quality", "4",
-                "--embed-metadata", "--embed-thumbnail",
-                "--no-playlist"
-            )
+            if (fastM4a) {
+                listOf(
+                    "-f", "bestaudio[ext=m4a]/bestaudio",
+                    "--extract-audio", "--audio-format", "m4a",
+                    "--embed-metadata", "--embed-thumbnail",
+                    "--no-playlist"
+                )
+            } else {
+                listOf(
+                    "-f", "bestaudio",
+                    "--extract-audio", "--audio-format", "mp3", "--audio-quality", "4",
+                    "--embed-metadata", "--embed-thumbnail",
+                    "--no-playlist"
+                )
+            }
         } else {
             val cap = if (maxHeight != null) "[height<=$maxHeight]" else ""
             val fmt = "bestvideo$cap[vcodec^=avc1]+bestaudio[ext=m4a]/" +
@@ -963,13 +1396,28 @@ class FastYouTubeDownloader(
         }
         try {
             runner.download(item.watchUrl, outputTemplate, extraArgs, object : DownloadListener {
-                override fun onProgress(progress: DownloadProgress) {}
+                override fun onProgress(progress: DownloadProgress) {
+                    val status = when {
+                        !progress.speed.isNullOrBlank() ->
+                            listOfNotNull(progress.speed, progress.eta?.let { "ETA $it" }).joinToString(" · ")
+                        progress.rawLine.isNotBlank() ->
+                            progress.rawLine.trim().take(80)
+                        else -> null
+                    }
+                    onProgress(progress.percent, status)
+                }
+
                 override fun onDownloadedFiles(files: List<File>) {
                     files.lastOrNull { it.isFile && it.length() > 0L }?.let { produced = it }
                 }
+
                 override fun onFinished(exitCode: Int, detail: String) {
                     if (exitCode == 0 && produced == null) {
-                        val expectedExt = if (audioOnly) ".mp3" else ".mp4"
+                        val expectedExt = when {
+                            audioOnly && fastM4a -> ".m4a"
+                            audioOnly -> ".mp3"
+                            else -> ".mp4"
+                        }
                         val candidate = File(playlistDir, "$baseName$expectedExt")
                         if (candidate.isFile && candidate.length() > 0L) {
                             produced = candidate
@@ -977,6 +1425,7 @@ class FastYouTubeDownloader(
                     }
                     latch.countDown()
                 }
+
                 override fun onError(message: String) {
                     latch.countDown()
                 }
@@ -1008,8 +1457,16 @@ class FastYouTubeDownloader(
 
     companion object {
         private const val TAG = "FastYouTubeDownloader"
-        private const val MULTI_CHUNK_THRESHOLD_BYTES = 3_500_000L
-        private const val RANGE_CHUNK_BYTES = 2L * 1024L * 1024L
+
+        // Lowered from 3.5 MB -> 512 KB so normal 2–4 MB audio tracks & short videos
+        // ALSO use ranged chunks and bypass YouTube's single-stream throttle.
+        private const val MULTI_CHUNK_THRESHOLD_BYTES = 512_000L
+        private const val SMALL_FILE_THRESHOLD_BYTES = 20L * 1024L * 1024L
+        private const val SMALL_RANGE_CHUNK_BYTES = 1L * 1024L * 1024L
+        private const val LARGE_RANGE_CHUNK_BYTES = 2L * 1024L * 1024L
+
+        private val CLEN_REGEX = Regex("""[?&]clen=(\d+)""")
+        private val RANGE_PARAM_REGEX = Regex("""([?&])range=[^&]*(&?)""")
 
         private val httpClient: OkHttpClient = OkHttpClient.Builder()
             .dispatcher(
@@ -1039,6 +1496,22 @@ class FastYouTubeDownloader(
 
         fun extractPlaylistId(url: String): String? =
             PLAYLIST_ID_REGEX.find(url)?.groupValues?.getOrNull(1)
+
+        internal fun isGoogleVideoUrl(url: String): Boolean =
+            url.contains("googlevideo.com", ignoreCase = true)
+
+        internal fun extractClenFromUrl(url: String): Long =
+            CLEN_REGEX.find(url)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: -1L
+
+        internal fun withGoogleVideoRange(url: String, start: Long, end: Long): String {
+            val cleaned = RANGE_PARAM_REGEX.replace(url) { m ->
+                val prefix = m.groupValues[1]
+                val trailing = m.groupValues[2]
+                if (trailing == "&") prefix else ""
+            }
+            val sep = if (cleaned.contains('?')) "&" else "?"
+            return "$cleaned${sep}range=$start-$end"
+        }
 
         fun sanitizeFileName(raw: String): String {
             return raw

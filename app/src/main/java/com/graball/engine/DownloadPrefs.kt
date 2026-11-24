@@ -17,6 +17,10 @@ object DownloadPrefs {
     private const val KEY_AUDIO = "audio"
     private const val KEY_PLAYLIST = "playlist"
     private const val KEY_CONCURRENT = "concurrent_downloads"
+    private const val KEY_AUDIO_FORMAT = "audio_format"
+
+    const val AUDIO_FORMAT_MP3 = "mp3"
+    const val AUDIO_FORMAT_M4A = "m4a"
 
     /** Supported explicit values (0 = Auto). */
     val CONCURRENT_OPTIONS = intArrayOf(0, 1, 2, 3, 4, 6)
@@ -79,4 +83,20 @@ object DownloadPrefs {
             else -> 2
         }
     }
+
+    /** Audio-only download format: "mp3" (default) or "m4a" (fast zero re-encode). */
+    fun getAudioFormat(context: Context): String {
+        val raw = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            .getString(KEY_AUDIO_FORMAT, AUDIO_FORMAT_MP3)
+        return if (raw == AUDIO_FORMAT_M4A) AUDIO_FORMAT_M4A else AUDIO_FORMAT_MP3
+    }
+
+    fun setAudioFormat(context: Context, format: String) {
+        val clean = if (format == AUDIO_FORMAT_M4A) AUDIO_FORMAT_M4A else AUDIO_FORMAT_MP3
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+            .putString(KEY_AUDIO_FORMAT, clean)
+            .apply()
+    }
+
+    fun isFastM4a(context: Context): Boolean = getAudioFormat(context) == AUDIO_FORMAT_M4A
 }

@@ -721,10 +721,8 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun isSupportedAudioFile(name: String): Boolean {
-        val ext = name.substringAfterLast('.', "").lowercase()
-        return ext in setOf("mp3", "m4a", "aac", "ogg", "opus", "flac", "wav", "amr", "3gp")
-    }
+    private fun isSupportedAudioFile(name: String): Boolean =
+        AudioFormats.isSupportedOpenAudioFile(name)
 
     override fun onResume() {
         super.onResume()
@@ -1917,22 +1915,54 @@ class PlayerActivity : AppCompatActivity() {
         }
         for (vol in volumeRoots) {
             val grabDir = File(File(vol, Environment.DIRECTORY_DOWNLOADS), "GrabAll")
-            if (!grabDir.isDirectory) continue
-            grabDir.walkTopDown()
-                .filter { it.isFile && isMusicFile(it.name) }
-                .forEach { file ->
-                    if (!byPath.containsKey(file.absolutePath)) {
-                        val parent = file.parentFile ?: grabDir
-                        val isSd = !file.absolutePath.startsWith(internalRoot)
-                        byPath[file.absolutePath] = AudioTrack(
-                            file = file,
-                            folderPath = parent.absolutePath,
-                            folderName = friendlyFolderName(parent, "GrabAll"),
-                            isSdCard = isSd,
-                            durationMs = 0L
-                        )
+            if (grabDir.isDirectory) {
+                grabDir.walkTopDown()
+                    .filter { it.isFile && it.canRead() && isMusicFile(it.name) }
+                    .forEach { file ->
+                        if (!byPath.containsKey(file.absolutePath)) {
+                            val parent = file.parentFile ?: grabDir
+                            val isSd = !file.absolutePath.startsWith(internalRoot)
+                            byPath[file.absolutePath] = AudioTrack(
+                                file = file,
+                                folderPath = parent.absolutePath,
+                                folderName = friendlyFolderName(parent, "GrabAll"),
+                                isSdCard = isSd,
+                                durationMs = 0L
+                            )
+                        }
                     }
+            }
+            // Also scan standard audio directories for formats OEM MediaStore.Audio
+            // sometimes skips (e.g. .opus, .flac, .ogg, .mka, .weba, .m4b, .wma, .aiff).
+            val extraDirs = listOf(
+                File(vol, Environment.DIRECTORY_MUSIC),
+                File(vol, Environment.DIRECTORY_DOWNLOADS),
+                File(vol, Environment.DIRECTORY_PODCASTS),
+                File(vol, "Audiobooks")
+            )
+            for (dir in extraDirs) {
+                if (!dir.isDirectory) continue
+                try {
+                    dir.walkTopDown()
+                        .maxDepth(3)
+                        .onEnter { d -> !d.name.startsWith(".") && !d.name.equals("Android", ignoreCase = true) }
+                        .filter { it.isFile && it.canRead() && isMusicFile(it.name) }
+                        .forEach { file ->
+                            if (!byPath.containsKey(file.absolutePath)) {
+                                val parent = file.parentFile ?: dir
+                                val isSd = !file.absolutePath.startsWith(internalRoot)
+                                byPath[file.absolutePath] = AudioTrack(
+                                    file = file,
+                                    folderPath = parent.absolutePath,
+                                    folderName = friendlyFolderName(parent, dir.name),
+                                    isSdCard = isSd,
+                                    durationMs = 0L
+                                )
+                            }
+                        }
+                } catch (_: Exception) {
                 }
+            }
         }
 
         tracksByPath = byPath
@@ -1968,10 +1998,8 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun isMusicFile(name: String): Boolean {
-        val ext = name.substringAfterLast('.', "").lowercase()
-        return ext in setOf("mp3", "m4a", "opus", "ogg", "wav", "flac", "aac")
-    }
+    private fun isMusicFile(name: String): Boolean =
+        AudioFormats.isMusicFile(name)
 
     private fun isRecordingOrSystemFolder(folderPath: String): Boolean {
         val lower = folderPath.lowercase()
@@ -2393,9 +2421,11 @@ class PlayerActivity : AppCompatActivity() {
                             if (isPlaying) R.color.graball_orange else R.color.graball_text
                         )
                     )
+                    val extBadge = AudioFormats.formatBadge(t.file)
+                    val fmtStr = if (extBadge.isNotEmpty()) " · $extBadge" else ""
                     val durStr = if (t.durationMs > 0) " · ${formatTime(t.durationMs.toInt())}" else ""
                     val volStr = if (t.isSdCard) "SD · " else ""
-                    holder.sub.text = "$volStr${t.folderName}$durStr"
+                    holder.sub.text = "$volStr${t.folderName}$fmtStr$durStr"
                     holder.action.text = if (isPlaying) "Playing" else "▶"
                     holder.action.visibility = View.VISIBLE
                     holder.itemView.setOnClickListener {

@@ -554,14 +554,16 @@ class DownloadsActivity : AppCompatActivity() {
     }
 
     private fun isAudioOutput(output: String): Boolean {
-        val audioExts = setOf("mp3", "m4a", "aac", "ogg", "opus", "flac", "wav")
         if (output.startsWith("content://")) {
             val mime = try { contentResolver.getType(Uri.parse(output)) } catch (_: Exception) { null }
-            if (mime != null && mime.startsWith("audio/", ignoreCase = true)) return true
+            if (mime != null && (mime.startsWith("audio/", ignoreCase = true) ||
+                    mime.equals("application/ogg", ignoreCase = true) ||
+                    mime.equals("application/flac", ignoreCase = true))
+            ) return true
             val name = queryContentDisplayName(Uri.parse(output)) ?: return false
-            return name.substringAfterLast('.', "").lowercase() in audioExts
+            return AudioFormats.isSupportedOpenAudioFile(name)
         }
-        return output.substringAfterLast('.', "").lowercase() in audioExts
+        return AudioFormats.isSupportedOpenAudioFile(output)
     }
 
     /** Returns relative path under Downloads/GrabAll, e.g. "YouTube/My Playlist". */
