@@ -69,12 +69,17 @@ class SettingsActivity : AppCompatActivity() {
             NavHelper.switchTab(this, PlayerActivity::class.java)
         }
         loginBtn.setOnClickListener {
-            startActivity(Intent(this, LoginActivity::class.java))
+            val signedIn = isSignedInToYouTube()
+            startActivity(
+                if (signedIn) {
+                    LoginActivity.createSwitchAccountIntent(this)
+                } else {
+                    LoginActivity.createSignInIntent(this)
+                }
+            )
         }
         logoutBtn.setOnClickListener {
-            WebViewCookieSync.clearYouTubeSession(this)
-            refreshSessionUi()
-            Toast.makeText(this, "Signed out of YouTube", Toast.LENGTH_SHORT).show()
+            startActivity(LoginActivity.createLogoutIntent(this))
         }
 
         val screenOffCheck = findViewById<CheckBox>(R.id.settingsScreenOffAudio)
@@ -234,13 +239,22 @@ class SettingsActivity : AppCompatActivity() {
         refreshYtDlpUi()
     }
 
-    private fun refreshSessionUi() {
-        val signedIn = RuntimePaths.cookiesFile(this).exists() &&
+    private fun isSignedInToYouTube(): Boolean {
+        return WebViewCookieSync.hasLoggedInYouTubeSession() ||
             WebViewCookieSync.buildYouTubeAuthHeaders(this) != null
+    }
+
+    private fun refreshSessionUi() {
+        val signedIn = isSignedInToYouTube()
         cookiesStatus.text = if (signedIn) {
             getString(R.string.cookies_saved)
         } else {
             getString(R.string.cookies_missing)
+        }
+        loginBtn.text = if (signedIn) {
+            "Switch YouTube account"
+        } else {
+            getString(R.string.login_youtube)
         }
         logoutBtn.visibility = if (signedIn) View.VISIBLE else View.GONE
     }

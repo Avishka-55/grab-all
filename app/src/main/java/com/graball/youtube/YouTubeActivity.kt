@@ -75,6 +75,7 @@ class YouTubeActivity : AppCompatActivity() {
     private var openPlaylist: PlaylistDetails? = null
     private var lastExploreItems: List<YtItem> = emptyList()
     private var requestGen = 0
+    private var lastAccountFingerprint: String? = null
 
     private val playbackListener: (YouTubePlaybackState) -> Unit = { state ->
         updateMiniPlayer(state)
@@ -145,6 +146,7 @@ class YouTubeActivity : AppCompatActivity() {
             triggerSearch()
         }
         accountBtn.setOnClickListener { onAccountButtonTapped() }
+        lastAccountFingerprint = currentAccountFingerprint()
         refreshAccountButton()
 
         tabViews = mapOf(
@@ -305,21 +307,38 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun updateForYouTabLabel() {
-        val hasPersonalSeeds = YouTubeStore.getHistory(this).isNotEmpty() ||
+        val hasPersonalSeeds = isSignedInToYouTube() ||
+            YouTubeStore.getHistory(this).isNotEmpty() ||
             YouTubeStore.getBookmarks(this).isNotEmpty() ||
             YouTubeStore.getRecentSearches(this).isNotEmpty()
         tabViews[Tab.EXPLORE]?.text = if (hasPersonalSeeds) "For You" else "Explore"
     }
 
+    private fun currentAccountFingerprint(): String {
+        val signedIn = isSignedInToYouTube()
+        val token = if (signedIn) WebViewCookieSync.getLoginInfoToken().orEmpty() else ""
+        return "$signedIn:$token"
+    }
+
     override fun onResume() {
         super.onResume()
         refreshAccountButton()
+        val fp = currentAccountFingerprint()
+        if (lastAccountFingerprint != null && fp != lastAccountFingerprint) {
+            lastAccountFingerprint = fp
+            updateForYouTabLabel()
+            if (currentTab == Tab.EXPLORE && currentQuery.isNullOrBlank() && openPlaylist == null) {
+                loadExploreForCurrentFilter()
+            }
+        } else {
+            lastAccountFingerprint = fp
+        }
         YouTubePlaybackService.addListener(playbackListener)
     }
 
     private fun isSignedInToYouTube(): Boolean {
-        return WebViewCookieSync.buildYouTubeAuthHeaders(this) != null ||
-            WebViewCookieSync.hasLoggedInYouTubeSession()
+        return WebViewCookieSync.hasLoggedInYouTubeSession() ||
+            WebViewCookieSync.buildYouTubeAuthHeaders(this) != null
     }
 
     private fun refreshAccountButton() {
@@ -332,7 +351,7 @@ class YouTubeActivity : AppCompatActivity() {
 
     private fun onAccountButtonTapped() {
         if (!isSignedInToYouTube()) {
-            startActivity(Intent(this, LoginActivity::class.java))
+            startActivity(LoginActivity.createSignInIntent(this))
             return
         }
         AlertDialog.Builder(this)
@@ -340,7 +359,7 @@ class YouTubeActivity : AppCompatActivity() {
             .setItems(
                 arrayOf(
                     "Open YouTube Web (Ad-Free)",
-                    "Switch account / Re-login",
+                    "Switch account",
                     "Sign out"
                 )
             ) { _, which ->
@@ -349,12 +368,8 @@ class YouTubeActivity : AppCompatActivity() {
                         Intent(this, BrowseActivity::class.java)
                             .putExtra("start_url", "https://m.youtube.com")
                     )
-                    1 -> startActivity(Intent(this, LoginActivity::class.java))
-                    2 -> {
-                        WebViewCookieSync.clearYouTubeSession(this)
-                        refreshAccountButton()
-                        Toast.makeText(this, "Signed out of YouTube", Toast.LENGTH_SHORT).show()
-                    }
+                    1 -> startActivity(LoginActivity.createSwitchAccountIntent(this))
+                    2 -> startActivity(LoginActivity.createLogoutIntent(this))
                 }
             }
             .setNegativeButton("Close", null)

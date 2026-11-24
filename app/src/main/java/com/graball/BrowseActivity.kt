@@ -32,6 +32,8 @@ import com.graball.engine.LinkDetector
 import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
 import com.graball.engine.WebViewCookieSync
+import com.graball.youtube.YouTubeInnerTube
+import com.graball.youtube.YouTubeSessionConfig
 import java.io.File
 import kotlin.math.abs
 
@@ -64,7 +66,8 @@ class BrowseActivity : AppCompatActivity() {
     private var panelKind: LinkKind = LinkKind.UNKNOWN
     private var popupDialog: Dialog? = null
     private var popupWebView: WebView? = null
-    private var sessionSyncToastShown = false
+    private var lastObservedLoginInfo: String? = null
+    private var lastObservedLoggedIn: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,6 +77,8 @@ class BrowseActivity : AppCompatActivity() {
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(webView, true)
+        lastObservedLoggedIn = WebViewCookieSync.hasLoggedInYouTubeSession()
+        lastObservedLoginInfo = WebViewCookieSync.getLoginInfoToken()
         val cleanUserAgent = WebViewCookieSync.cleanBrowserUserAgent(
             webView.settings.userAgentString
         )
@@ -165,6 +170,7 @@ class BrowseActivity : AppCompatActivity() {
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 loading.visibility = android.view.View.VISIBLE
+                syncYouTubeSessionIfNeeded(url)
             }
 
             override fun onPageFinished(view: WebView, url: String) {
@@ -332,10 +338,7 @@ class BrowseActivity : AppCompatActivity() {
         }
     }
 
-    private fun isYouTubeUrl(url: String?): Boolean {
-        val host = url?.let { Uri.parse(it).host }?.lowercase() ?: return false
-        return host == "youtube.com" || host.endsWith(".youtube.com") || host == "youtu.be"
-    }
+    private fun isYouTubeUrl(url: String?): Boolean = WebViewCookieSync.isYouTubeUrl(url)
 
     /**
      * Layer 1 YouTube Ad-Blocker: blocks known ad & tracking endpoints at the
@@ -427,10 +430,29 @@ class BrowseActivity : AppCompatActivity() {
 
     private fun syncYouTubeSessionIfNeeded(url: String?, showToast: Boolean = true) {
         if (!isYouTubeUrl(url)) return
-        val synced = WebViewCookieSync.exportYouTubeCookiesIfLoggedIn(this)
-        if (synced && showToast && !sessionSyncToastShown) {
-            sessionSyncToastShown = true
-            Toast.makeText(this, "YouTube login synced for downloads", Toast.LENGTH_SHORT).show()
+        val nowLoggedIn = WebViewCookieSync.hasLoggedInYouTubeSession()
+        val nowLoginInfo = WebViewCookieSync.getLoginInfoToken()
+
+        if (nowLoggedIn) {
+            val changed = !lastObservedLoggedIn || nowLoginInfo != lastObservedLoginInfo
+            lastObservedLoggedIn = true
+            lastObservedLoginInfo = nowLoginInfo
+            val synced = WebViewCookieSync.exportYouTubeCookiesIfLoggedIn(this, forceWrite = changed)
+            if (changed) {
+                YouTubeSessionConfig.invalidate()
+                YouTubeInnerTube.resetAnonBotBlockHint()
+            }
+            if ((changed || synced) && showToast) {
+                Toast.makeText(this, "YouTube login synced", Toast.LENGTH_SHORT).show()
+            }
+        } else if (lastObservedLoggedIn) {
+            // User signed out directly inside YouTube Web.
+            lastObservedLoggedIn = false
+            lastObservedLoginInfo = null
+            WebViewCookieSync.clearExportedCookiesOnly(this)
+            if (showToast) {
+                Toast.makeText(this, "Signed out of YouTube", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 

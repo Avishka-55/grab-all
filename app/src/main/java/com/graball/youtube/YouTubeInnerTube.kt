@@ -35,9 +35,8 @@ object YouTubeInnerTube {
     private const val TAG = "YouTubeInnerTube"
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
-    private const val WEB_CLIENT_VERSION = "2.20260708.00.00"
-    private const val WEB_UA =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    private const val WEB_CLIENT_VERSION = YouTubeSessionConfig.FALLBACK_WEB_CLIENT_VERSION
+    private const val WEB_UA = YouTubeSessionConfig.DESKTOP_WEB_UA
 
     private const val VISIONOS_CLIENT_VERSION = "1.02"
     private const val VISIONOS_UA =
@@ -109,10 +108,11 @@ object YouTubeInnerTube {
         val likes: String
     )
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .build()
+    private val client: OkHttpClient
+        get() = YouTubeSessionConfig.sharedOkHttpClient
+
+    private val anonClient: OkHttpClient
+        get() = YouTubeSessionConfig.anonymousOkHttpClient
 
     @Volatile
     private var cachedVisitorData: String? = null
@@ -149,7 +149,7 @@ object YouTubeInnerTube {
                 .url(url)
                 .header("User-Agent", WEB_UA)
                 .build()
-            client.newCall(req).execute().use { resp ->
+            anonClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return emptyList()
                 val body = resp.body?.string() ?: return emptyList()
                 val arr = JSONArray(body)
@@ -213,13 +213,42 @@ object YouTubeInnerTube {
     }
 
     /**
-     * Private on-device "For You" recommendation feed built strictly from the
-     * user's local Watch History, Bookmarks, and Recent Searches (never uploaded
-     * to a Google account). Fetches up to 3 seeds in parallel (~500ms), filters
-     * out recently watched videos, interleaves results, and falls back smoothly
-     * to Trending when history is empty.
+     * Fetches the user's real personalized YouTube Home feed (`FEwhat_to_watch`)
+     * when signed in via GrabAll's on-device WebView session, using live scraped
+     * `ytcfg` headers + `SAPISIDHASH` auth + the shared CookieManager jar.
+     */
+    fun fetchSignedInHomeFeed(context: Context): List<YtItem> {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context) ?: return emptyList()
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val body = JSONObject().apply {
+            put("context", webContext(cfg))
+            put("browseId", "FEwhat_to_watch")
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        ) ?: return emptyList()
+        val items = mutableListOf<YtItem>()
+        collectItems(root, items, seen = mutableSetOf())
+        return items.filter { !it.isPlaylist }.take(40)
+    }
+
+    /**
+     * Personalized "For You" feed:
+     * - When signed in to YouTube (and not in Music filter), loads the user's
+     *   real authenticated YouTube Home feed (`FEwhat_to_watch`) first.
+     * - Otherwise (or as fallback), builds a private on-device feed from local
+     *   Watch History, Bookmarks, and Recent Searches, topped up with Trending.
      */
     fun exploreForYou(context: Context, musicMode: Boolean = false): List<YtItem> {
+        if (!musicMode && WebViewCookieSync.buildYouTubeAuthHeaders(context) != null) {
+            val signedInHome = fetchSignedInHomeFeed(context)
+            if (signedInHome.size >= 8) {
+                return signedInHome
+            }
+        }
         val history = YouTubeStore.getHistory(context)
         val bookmarks = YouTubeStore.getBookmarks(context)
         val searches = YouTubeStore.getRecentSearches(context)
@@ -1042,8 +1071,17 @@ object YouTubeInnerTube {
 
     private fun ensureVisitorData(): String? {
         cachedVisitorData?.takeIf { it.isNotBlank() }?.let { return it }
+        val fromCfg = YouTubeSessionConfig.ensureWebConfig().visitorData
+        if (!fromCfg.isNullOrBlank()) {
+            cachedVisitorData = fromCfg
+            return fromCfg
+        }
         val body = JSONObject().apply { put("context", webContext()) }
-        postInnerTube("https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false", body)
+        postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false",
+            body = body,
+            useAnonymousClient = true
+        )
         return cachedVisitorData
     }
 
@@ -1080,7 +1118,8 @@ object YouTubeInnerTube {
             clientNameId = clientNameId,
             clientVersion = clientVersion,
             visitorData = visitorData,
-            authHeaders = authHeaders
+            authHeaders = authHeaders,
+            useAnonymousClient = (authHeaders == null)
         ) ?: return ResolveResult(null, "Network error reaching YouTube")
 
         val playStatus = root.optJSONObject("playabilityStatus")
@@ -1340,16 +1379,25 @@ object YouTubeInnerTube {
 
     // ---- HTTP & JSON Traversal Helpers ----
 
-    private fun webContext(): JSONObject = JSONObject().apply {
+    private fun webContext(
+        config: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig()
+    ): JSONObject = JSONObject().apply {
         put(
             "client",
             JSONObject().apply {
                 put("clientName", "WEB")
-                put("clientVersion", WEB_CLIENT_VERSION)
-                put("hl", "en")
-                put("gl", "US")
+                put("clientVersion", config.clientVersion)
+                put("hl", config.hl)
+                put("gl", config.gl)
+                put("originalUrl", "https://www.youtube.com")
+                put("platform", "DESKTOP")
+                config.visitorData?.takeIf { it.isNotBlank() }?.let {
+                    put("visitorData", it)
+                }
             }
         )
+        put("user", JSONObject().apply { put("lockedSafetyMode", false) })
+        put("request", JSONObject().apply { put("useSsl", true) })
     }
 
     private fun postInnerTube(
@@ -1359,34 +1407,67 @@ object YouTubeInnerTube {
         clientNameId: String = "1",
         clientVersion: String = WEB_CLIENT_VERSION,
         visitorData: String? = cachedVisitorData,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null,
+        webConfig: YouTubeSessionConfig.WebClientConfig? = null,
+        useAnonymousClient: Boolean = false
     ): JSONObject? {
         return try {
+            val isWebDesktop = !useAnonymousClient && clientNameId == "1"
+            val cfg = if (isWebDesktop) {
+                webConfig ?: YouTubeSessionConfig.ensureWebConfig()
+            } else {
+                null
+            }
+            val effectiveUrl = if (cfg != null && !cfg.apiKey.isNullOrBlank() && !url.contains("key=")) {
+                val sep = if ('?' in url) "&" else "?"
+                "$url${sep}key=${cfg.apiKey}"
+            } else {
+                url
+            }
+
             val reqBuilder = Request.Builder()
-                .url(url)
+                .url(effectiveUrl)
                 .header("User-Agent", userAgent)
                 .header("Origin", "https://www.youtube.com")
-                .header("X-YouTube-Client-Name", clientNameId)
-                .header("X-YouTube-Client-Version", clientVersion)
-            if (!visitorData.isNullOrBlank()) {
-                reqBuilder.header("X-Goog-Visitor-Id", visitorData)
+
+            if (cfg != null) {
+                YouTubeSessionConfig.injectWebHeaders(reqBuilder, cfg)
+                if (!visitorData.isNullOrBlank() && cfg.visitorData.isNullOrBlank()) {
+                    reqBuilder.header("X-Goog-Visitor-Id", visitorData)
+                }
+            } else {
+                reqBuilder
+                    .header("X-YouTube-Client-Name", clientNameId)
+                    .header("X-YouTube-Client-Version", clientVersion)
+                if (!visitorData.isNullOrBlank()) {
+                    reqBuilder.header("X-Goog-Visitor-Id", visitorData)
+                }
             }
+
             if (authHeaders != null) {
-                reqBuilder.header("Cookie", authHeaders.cookieHeader)
+                // When live WebView CookieManager has the session, sharedOkHttpClient's
+                // CookieJar automatically sends cookies and persists Set-Cookie updates.
+                // Only attach the explicit Cookie header when falling back to cookies.txt.
+                if (useAnonymousClient || !WebViewCookieSync.hasLoggedInYouTubeSession()) {
+                    reqBuilder.header("Cookie", authHeaders.cookieHeader)
+                }
                 reqBuilder.header("Authorization", authHeaders.authorizationHeader)
                 reqBuilder.header("X-Origin", "https://www.youtube.com")
                 reqBuilder.header("X-Goog-AuthUser", "0")
             }
+
             val req = reqBuilder
                 .post(body.toString().toRequestBody(JSON_MEDIA))
                 .build()
-            client.newCall(req).execute().use { resp ->
+            val httpClient = if (useAnonymousClient) anonClient else client
+            httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 val txt = resp.body?.string() ?: return null
                 val json = JSONObject(txt)
                 val vd = json.optJSONObject("responseContext")?.optString("visitorData")
                 if (!vd.isNullOrBlank()) {
                     cachedVisitorData = vd
+                    YouTubeSessionConfig.updateVisitorData(vd)
                 }
                 json
             }

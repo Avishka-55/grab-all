@@ -1,23 +1,28 @@
 package com.graball.engine
 
 import android.content.Context
+import android.net.Uri
 import android.webkit.CookieManager
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import java.security.MessageDigest
 
 /**
  * On-device YouTube session cookie manager bridging Android WebView's
- * [CookieManager] with `yt-dlp` (`youtube-cookies.txt`) and GrabAll's native
- * `YouTubeInnerTube` API (`Cookie` + `Authorization: SAPISIDHASH`).
+ * [CookieManager] with OkHttp ([okHttpCookieJar]), GrabAll's native
+ * `YouTubeInnerTube` API (`Cookie` + `Authorization: SAPISIDHASH`), and
+ * `yt-dlp` (`youtube-cookies.txt`).
  *
- * Strictly matches yt-dlp's `_has_auth_cookies` requirement: a YouTube session
- * is only considered authenticated when BOTH `LOGIN_INFO` AND at least one
- * SAPISID cookie (`SAPISID`, `__Secure-1PAPISID`, or `__Secure-3PAPISID`) are
- * present on `.youtube.com`.
+ * The single source of truth is Android's persistent WebView [CookieManager]
+ * (`flush()` writes changes to disk), so signing in, switching accounts, or
+ * logging out in any WebView immediately applies to native API calls.
  */
 object WebViewCookieSync {
 
     private const val NETSCAPE_HEADER = "# Netscape HTTP Cookie File"
     private const val YOUTUBE_ORIGIN = "https://www.youtube.com"
+    private const val MIN_LOGIN_INFO_LEN = 10
 
     /** SID cookies used by YouTube & yt-dlp for SAPISIDHASH authentication. */
     private val SID_COOKIE_NAMES = setOf(
@@ -26,10 +31,33 @@ object WebViewCookieSync {
         "__Secure-3PAPISID"
     )
 
-    private val YOUTUBE_CHECK_URLS = listOf(
+    private val YOUTUBE_HOSTS = listOf(
+        "https://youtube.com",
         "https://www.youtube.com",
-        "https://m.youtube.com",
-        "https://youtube.com"
+        "https://m.youtube.com"
+    )
+
+    /** Targeted YouTube session cookie keys cleared on sign-out without wiping unrelated sites. */
+    private val YOUTUBE_SESSION_COOKIE_KEYS = listOf(
+        "YTC",
+        "GPS",
+        "VISITOR_INFO1_LIVE",
+        "PREF",
+        "LOGIN_INFO",
+        "SAPISID",
+        "APISID",
+        "SID",
+        "HSID",
+        "SSID",
+        "SIDCC",
+        "__Secure-1PAPISID",
+        "__Secure-3PAPISID",
+        "__Secure-1PSID",
+        "__Secure-3PSID",
+        "__Secure-1PSIDCC",
+        "__Secure-3PSIDCC",
+        "__Secure-1PSIDTS",
+        "__Secure-3PSIDTS"
     )
 
     private val EXPORT_SOURCES = listOf(
@@ -49,6 +77,55 @@ object WebViewCookieSync {
     private var lastExportedHash: Int = 0
 
     /**
+     * OkHttp [CookieJar] backed directly by Android's [CookieManager] so
+     * WebView login and OkHttp InnerTube requests share one live cookie store.
+     */
+    val okHttpCookieJar: CookieJar = object : CookieJar {
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+            val manager = safeCookieManager() ?: return
+            val urlStr = url.toString()
+            var wroteAny = false
+            for (cookie in cookies) {
+                try {
+                    manager.setCookie(urlStr, cookie.toString())
+                    wroteAny = true
+                } catch (_: Exception) {
+                }
+            }
+            if (wroteAny) {
+                flushCookies()
+            }
+        }
+
+        override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            val manager = safeCookieManager() ?: return emptyList()
+            val raw = try {
+                manager.getCookie(url.toString())
+            } catch (_: Exception) {
+                null
+            } ?: return emptyList()
+            if (raw.isBlank()) return emptyList()
+
+            val out = mutableListOf<Cookie>()
+            for ((name, value) in parseCookiePairs(raw)) {
+                try {
+                    val builder = Cookie.Builder()
+                        .name(name)
+                        .value(value)
+                        .domain(url.host)
+                        .path("/")
+                    if (url.isHttps) {
+                        builder.secure()
+                    }
+                    out.add(builder.build())
+                } catch (_: Exception) {
+                }
+            }
+            return out
+        }
+    }
+
+    /**
      * Strip WebView-identifying tokens (`; wv` and `Version/4.0`) from the
      * system WebView User-Agent so Google's sign-in page sees the device's
      * real Chrome Mobile version instead of rejecting it as an embedded WebView.
@@ -61,33 +138,64 @@ object WebViewCookieSync {
             .trim()
     }
 
-    /**
-     * Returns true ONLY when [CookieManager] holds a complete YouTube login
-     * (`LOGIN_INFO` AND at least one SAPISID cookie on YouTube), matching
-     * yt-dlp's `_has_auth_cookies` requirement so we never capture a half-baked
-     * mid-redirect cookie jar.
-     */
-    fun hasLoggedInYouTubeSession(): Boolean {
-        val manager = safeCookieManager() ?: return false
-        val names = HashSet<String>()
-        for (url in YOUTUBE_CHECK_URLS) {
-            val raw = manager.getCookie(url) ?: continue
+    fun isYouTubeUrl(url: String?): Boolean {
+        val host = url?.let {
+            try {
+                Uri.parse(it).host
+            } catch (_: Exception) {
+                null
+            }
+        }?.lowercase() ?: return false
+        return host == "youtube.com" || host.endsWith(".youtube.com") || host == "youtu.be"
+    }
+
+    fun flushCookies() {
+        val manager = safeCookieManager() ?: return
+        try {
+            manager.flush()
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Looks up a specific cookie value across YouTube domains in [CookieManager]. */
+    fun findYouTubeCookie(cookieName: String): String? {
+        val manager = safeCookieManager() ?: return null
+        for (url in YOUTUBE_HOSTS) {
+            val raw = try {
+                manager.getCookie(url)
+            } catch (_: Exception) {
+                null
+            } ?: continue
             for ((name, value) in parseCookiePairs(raw)) {
-                if (value.isNotEmpty()) {
-                    names.add(name)
+                if (name == cookieName && value.isNotEmpty()) {
+                    return value
                 }
             }
         }
-        return "LOGIN_INFO" in names && names.any { it in SID_COOKIE_NAMES }
+        return null
+    }
+
+    /** Returns the current `LOGIN_INFO` cookie value if present, or null. */
+    fun getLoginInfoToken(): String? = findYouTubeCookie("LOGIN_INFO")
+
+    /**
+     * Returns true ONLY when [CookieManager] holds a complete YouTube login:
+     * a non-trivial `LOGIN_INFO` token (length > 10) AND at least one SAPISID
+     * cookie on YouTube, preventing false positives on partial redirect cookies.
+     */
+    fun hasLoggedInYouTubeSession(): Boolean {
+        val cookies = readLiveYouTubeCookies()
+        val loginInfo = cookies["LOGIN_INFO"] ?: return false
+        if (loginInfo.length <= MIN_LOGIN_INFO_LEN) return false
+        return SID_COOKIE_NAMES.any { !cookies[it].isNullOrEmpty() }
     }
 
     /**
-     * If [CookieManager] holds a complete logged-in YouTube session, writes the
-     * YouTube and Google cookies to [RuntimePaths.cookiesFile] in Netscape format.
+     * If [CookieManager] holds a complete logged-in YouTube session, flushes
+     * cookies to disk and writes them to [RuntimePaths.cookiesFile] in Netscape
+     * format for the `yt-dlp` fallback engine.
      *
-     * Returns true if the cookies file was written or updated; false if no
-     * complete logged-in session is present or (when [forceWrite] is false) the
-     * exported content is unchanged.
+     * Returns true if the cookies file was written or updated.
      */
     fun exportYouTubeCookiesIfLoggedIn(
         context: Context,
@@ -96,16 +204,16 @@ object WebViewCookieSync {
         val manager = safeCookieManager() ?: return false
         if (!hasLoggedInYouTubeSession()) return false
 
-        try {
-            manager.flush()
-        } catch (_: Exception) {
-            // Ignore flush errors on older WebView implementations.
-        }
+        flushCookies()
 
         val expiry = System.currentTimeMillis() / 1000L + 365L * 24L * 3600L
         val deduped = LinkedHashMap<Pair<String, String>, String>()
         for ((url, domain) in EXPORT_SOURCES) {
-            val raw = manager.getCookie(url) ?: continue
+            val raw = try {
+                manager.getCookie(url)
+            } catch (_: Exception) {
+                null
+            } ?: continue
             for ((name, value) in parseCookiePairs(raw)) {
                 deduped[domain to name] = "$domain\tTRUE\t/\tTRUE\t$expiry\t$name\t$value"
             }
@@ -142,56 +250,51 @@ object WebViewCookieSync {
 
     /**
      * Builds YouTube InnerTube `Cookie` + `Authorization: SAPISIDHASH ...`
-     * headers from the saved on-device session (preferring `youtube-cookies.txt`
-     * and falling back to live WebView cookies). Returns null when not signed in.
+     * headers from the live WebView [CookieManager] first (falling back to
+     * `youtube-cookies.txt` only if WebView cookies are unavailable).
      */
     fun buildYouTubeAuthHeaders(context: Context): YouTubeAuthHeaders? {
         val cookies = LinkedHashMap<String, String>()
-        val file = RuntimePaths.cookiesFile(context)
-        if (file.isFile) {
-            try {
-                for (rawLine in file.readText().lineSequence()) {
-                    var line = rawLine.trim()
-                    if (line.isEmpty()) continue
-                    if (line.startsWith("#HttpOnly_")) {
-                        line = line.removePrefix("#HttpOnly_")
-                    } else if (line.startsWith("#")) {
-                        continue
-                    }
-                    val fields = line.split('\t')
-                    if (fields.size < 7) continue
-                    val domain = fields[0].lowercase()
-                    if (!domain.contains("youtube.com")) continue
-                    val name = fields[5].trim()
-                    val value = fields[6].trim()
-                    if (name.isNotEmpty() && value.isNotEmpty()) {
-                        cookies[name] = value
-                    }
-                }
-            } catch (_: Exception) {
-            }
-        }
+        cookies.putAll(readLiveYouTubeCookies())
 
-        if ("LOGIN_INFO" !in cookies || SID_COOKIE_NAMES.none { it in cookies }) {
-            val manager = safeCookieManager()
-            if (manager != null) {
-                for (url in YOUTUBE_CHECK_URLS) {
-                    val raw = manager.getCookie(url) ?: continue
-                    for ((name, value) in parseCookiePairs(raw)) {
-                        if (value.isNotEmpty()) {
-                            cookies[name] = value
+        val hasLiveLogin = (cookies["LOGIN_INFO"]?.length ?: 0) > MIN_LOGIN_INFO_LEN &&
+            SID_COOKIE_NAMES.any { !cookies[it].isNullOrEmpty() }
+
+        if (!hasLiveLogin) {
+            val file = RuntimePaths.cookiesFile(context)
+            if (file.isFile) {
+                try {
+                    for (rawLine in file.readText().lineSequence()) {
+                        var line = rawLine.trim()
+                        if (line.isEmpty()) continue
+                        if (line.startsWith("#HttpOnly_")) {
+                            line = line.removePrefix("#HttpOnly_")
+                        } else if (line.startsWith("#")) {
+                            continue
+                        }
+                        val fields = line.split('\t')
+                        if (fields.size < 7) continue
+                        val domain = fields[0].lowercase()
+                        if (!domain.contains("youtube.com")) continue
+                        val name = fields[5].trim()
+                        val value = fields[6].trim()
+                        if (name.isNotEmpty() && value.isNotEmpty()) {
+                            cookies.putIfAbsent(name, value)
                         }
                     }
+                } catch (_: Exception) {
                 }
             }
         }
 
-        if ("LOGIN_INFO" !in cookies) return null
+        val loginInfo = cookies["LOGIN_INFO"] ?: return null
+        if (loginInfo.length <= MIN_LOGIN_INFO_LEN) return null
+
         val sapisid = cookies["SAPISID"]
         val sapisid1p = cookies["__Secure-1PAPISID"]
         val sapisid3p = cookies["__Secure-3PAPISID"]
-        // Match yt-dlp's _get_sid_cookies: YouTube falls back to __Secure-3PAPISID
-        // for SAPISIDHASH when the plain SAPISID cookie is absent (common on m.youtube.com).
+        // Match YouTube / yt-dlp behavior: fall back to __Secure-3PAPISID when
+        // plain SAPISID is absent (common on m.youtube.com).
         val effectiveSapisid = sapisid ?: sapisid3p
         if (effectiveSapisid == null && sapisid1p == null && sapisid3p == null) return null
 
@@ -216,22 +319,55 @@ object WebViewCookieSync {
     }
 
     /**
-     * Signs out cleanly on-device: deletes `youtube-cookies.txt` and clears
-     * WebView cookies so both native YouTube/yt-dlp and YouTube Web are logged out.
+     * Deletes the exported `youtube-cookies.txt` snapshot and invalidates
+     * cached session state without touching unrelated site cookies.
      */
-    fun clearYouTubeSession(context: Context) {
+    fun clearExportedCookiesOnly(context: Context) {
         lastExportedHash = 0
         com.graball.youtube.YouTubeInnerTube.resetAnonBotBlockHint()
+        com.graball.youtube.YouTubeSessionConfig.invalidate()
         try {
             RuntimePaths.cookiesFile(context).delete()
         } catch (_: Exception) {
         }
+    }
+
+    /**
+     * Signs out cleanly on-device: deletes `youtube-cookies.txt`, invalidates
+     * cached client settings, and surgically expires YouTube session cookies in
+     * [CookieManager] (leaving non-YouTube site logins intact).
+     */
+    fun clearYouTubeSession(context: Context) {
+        clearExportedCookiesOnly(context)
         val manager = safeCookieManager() ?: return
         try {
-            manager.removeAllCookies(null)
+            for (host in YOUTUBE_HOSTS) {
+                for (key in YOUTUBE_SESSION_COOKIE_KEYS) {
+                    manager.setCookie(host, "$key=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/")
+                    manager.setCookie(host, "$key=; Domain=.youtube.com; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/")
+                }
+            }
             manager.flush()
         } catch (_: Exception) {
         }
+    }
+
+    private fun readLiveYouTubeCookies(): LinkedHashMap<String, String> {
+        val out = LinkedHashMap<String, String>()
+        val manager = safeCookieManager() ?: return out
+        for (url in YOUTUBE_HOSTS) {
+            val raw = try {
+                manager.getCookie(url)
+            } catch (_: Exception) {
+                null
+            } ?: continue
+            for ((name, value) in parseCookiePairs(raw)) {
+                if (value.isNotEmpty()) {
+                    out[name] = value
+                }
+            }
+        }
+        return out
     }
 
     private fun sha1Hex(input: String): String {
