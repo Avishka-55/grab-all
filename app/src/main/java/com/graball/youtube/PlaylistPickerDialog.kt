@@ -172,7 +172,7 @@ object PlaylistPickerDialog {
         val btnSelectAll = makeChip("Select All")
         val btnClearAll = makeChip("Clear")
         val audioCheck = CheckBox(context).apply {
-            text = "MP3"
+            text = DownloadPrefs.audioFormatLabel(context)
             textSize = 12f
             setTextColor(Color.WHITE)
             isChecked = prefs.audioOnly

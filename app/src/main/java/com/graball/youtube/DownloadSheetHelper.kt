@@ -64,7 +64,7 @@ object DownloadSheetHelper {
         container.addView(qualitySpinner)
 
         val audioCheck = CheckBox(context).apply {
-            text = "Audio only (MP3)"
+            text = "Audio only (${DownloadPrefs.audioFormatLabel(context)})"
             isChecked = prefs.audioOnly
             setPadding(0, dp(8), 0, dp(4))
         }

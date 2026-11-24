@@ -55,7 +55,7 @@ class FastYouTubeDownloader(
     private val playlistMode: String,
     private val concurrency: Int,
     private val selectedVideoIds: Set<String>? = null,
-    private val fastM4a: Boolean = false
+    private val fastM4a: Boolean = true
 ) {
     interface Callback {
         fun onTitleResolved(title: String) {}
@@ -307,9 +307,10 @@ class FastYouTubeDownloader(
         val inFlightProgress = ConcurrentHashMap<Int, Float>()
         val latestStatusDetail = AtomicReference<String?>("Resolving streams…")
 
-        // Bounded backpressure so downloaders stay ahead of ffmpeg without filling disk,
+        // Bounded backpressure so downloaders stay well ahead of ffmpeg without
+        // filling disk (24 raw audio tracks ~= 70 MB temp, deleted right after publish),
         // and cap yt-dlp fallback subprocesses to 2 so mobile CPUs never thrash.
-        val convertBackpressure = Semaphore(workerCount * 2)
+        val convertBackpressure = Semaphore(if (audioOnly) 24 else workerCount * 2)
         val ytDlpFallbackGate = Semaphore(2)
 
         fun acquirePermit(sem: Semaphore): Boolean {
@@ -365,8 +366,13 @@ class FastYouTubeDownloader(
                     else ->
                         "$done of $total"
                 }
-                val fallbackDetail = if (speedStr == null) latestStatusDetail.get() else null
-                callback.onProgress(pct, speedStr, etaStr, itemLabel, fallbackDetail)
+                val fallbackDetail = when {
+                    activeDl == 0 && activeConv > 0 ->
+                        if (fastM4a) "Saving M4A ($activeConv)…" else "Converting MP3 ($activeConv)…"
+                    speedStr == null -> latestStatusDetail.get()
+                    else -> null
+                }
+                callback.onProgress(pct, if (activeDl == 0 && activeConv > 0) null else speedStr, etaStr, itemLabel, fallbackDetail)
             }
         }
 

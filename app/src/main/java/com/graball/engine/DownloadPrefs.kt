@@ -84,19 +84,22 @@ object DownloadPrefs {
         }
     }
 
-    /** Audio-only download format: "mp3" (default) or "m4a" (fast zero re-encode). */
+    /** Audio-only download format: "m4a" (default, fast zero re-encode) or "mp3". */
     fun getAudioFormat(context: Context): String {
         val raw = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-            .getString(KEY_AUDIO_FORMAT, AUDIO_FORMAT_MP3)
-        return if (raw == AUDIO_FORMAT_M4A) AUDIO_FORMAT_M4A else AUDIO_FORMAT_MP3
+            .getString(KEY_AUDIO_FORMAT, AUDIO_FORMAT_M4A)
+        return if (raw == AUDIO_FORMAT_MP3) AUDIO_FORMAT_MP3 else AUDIO_FORMAT_M4A
     }
 
     fun setAudioFormat(context: Context, format: String) {
-        val clean = if (format == AUDIO_FORMAT_M4A) AUDIO_FORMAT_M4A else AUDIO_FORMAT_MP3
+        val clean = if (format == AUDIO_FORMAT_MP3) AUDIO_FORMAT_MP3 else AUDIO_FORMAT_M4A
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
             .putString(KEY_AUDIO_FORMAT, clean)
             .apply()
     }
 
     fun isFastM4a(context: Context): Boolean = getAudioFormat(context) == AUDIO_FORMAT_M4A
+
+    fun audioFormatLabel(context: Context): String =
+        if (isFastM4a(context)) "M4A" else "MP3"
 }
