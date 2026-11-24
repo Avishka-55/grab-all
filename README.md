@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="screenshots/banner.svg" alt="GrabAll — Fast Android Media Downloader, Ad-Free YouTube & Music Player" width="100%" />
+<img src="./screenshots/hero-banner.svg" alt="GrabAll — Fast Android Media Downloader, Ad-Free YouTube and Music Player" width="100%" />
 
 <br/><br/>
 
