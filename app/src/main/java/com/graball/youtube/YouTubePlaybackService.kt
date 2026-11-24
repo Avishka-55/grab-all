@@ -57,6 +57,7 @@ data class YouTubePlaybackState(
     val loadingStatus: String? = null,
     val isPlaying: Boolean = false,
     val isBuffering: Boolean = false,
+    val isReadyForSeek: Boolean = false,
     val isAudioOnly: Boolean = false,
     val captionsEnabled: Boolean = false,
     val selectedHeight: Int? = null,
@@ -84,6 +85,7 @@ class YouTubePlaybackService : MediaSessionService() {
     private enum class StreamMode { HLS, ADAPTIVE_MERGE, MUXED }
 
     private var player: ExoPlayer? = null
+    private var uiPlayer: Player? = null
     private var mediaSession: MediaSession? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     // Cached pool so tapping a new video never blocks behind a slow fallback
@@ -112,6 +114,9 @@ class YouTubePlaybackService : MediaSessionService() {
     private var isForegroundActive = false
     private var loadGeneration = 0
     private var currentTrackStartedPlaying = false
+    private var streamReachedReady = false
+    private var pendingSeekPositionMs: Long? = null
+    private var autoRecoveryAttempts = 0
 
     private val sponsorTicker = object : Runnable {
         override fun run() {
@@ -180,7 +185,21 @@ class YouTubePlaybackService : MediaSessionService() {
                     }
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_ENDED) {
+                        if (playbackState == Player.STATE_READY) {
+                            streamReachedReady = true
+                            lastError = null
+                            val deferredSeek = pendingSeekPositionMs
+                            if (deferredSeek != null) {
+                                pendingSeekPositionMs = null
+                                val dur = player?.duration?.takeIf { it > 0L && it != C.TIME_UNSET }
+                                val target = if (dur != null) {
+                                    deferredSeek.coerceIn(0L, (dur - 500L).coerceAtLeast(0L))
+                                } else {
+                                    deferredSeek.coerceAtLeast(0L)
+                                }
+                                player?.seekTo(target)
+                            }
+                        } else if (playbackState == Player.STATE_ENDED) {
                             saveCurrentProgress(resetToZero = true)
                             playNext()
                         }
@@ -191,14 +210,32 @@ class YouTubePlaybackService : MediaSessionService() {
                         Log.e(TAG, "ExoPlayer error ($currentStreamMode): ${error.message}", error)
                         // Automatically cascade through alternative stream modes
                         // (HLS -> Adaptive Merge -> Muxed) before surfacing an error.
-                        // Only resume from currentPosition if THIS track already started playing!
+                        // Preserve any deferred seek or active playback position safely.
                         val info = currentStreamInfo
-                        val pos = if (currentTrackStartedPlaying) {
-                            player?.currentPosition?.coerceAtLeast(0L) ?: 0L
-                        } else {
-                            0L
-                        }
+                        val pos = pendingSeekPositionMs
+                            ?: if (currentTrackStartedPlaying || streamReachedReady) {
+                                player?.currentPosition?.coerceAtLeast(0L) ?: 0L
+                            } else {
+                                0L
+                            }
                         if (info != null && tryNextStreamMode(info, pos, playImmediately = true)) {
+                            return
+                        }
+                        // If a transient HTTP error (e.g. 403/416/503 from an early seek or
+                        // expired/rate-limited GoogleVideo range) hits with no fallback mode
+                        // left, silently re-resolve a fresh stream once at the target position.
+                        if (error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS &&
+                            autoRecoveryAttempts < 1 &&
+                            queueIndex in queue.indices
+                        ) {
+                            autoRecoveryAttempts++
+                            Log.w(TAG, "Auto-recovering from BAD_HTTP_STATUS at ${pos}ms")
+                            loadAtIndex(
+                                queueIndex,
+                                startFromBeginning = (pos == 0L),
+                                overrideStartPositionMs = pos.takeIf { it > 0L },
+                                resetRecoveryCounter = false
+                            )
                             return
                         }
                         lastError = "Playback failed (${error.errorCodeName}). Tap Retry or Download."
@@ -257,7 +294,24 @@ class YouTubePlaybackService : MediaSessionService() {
             override fun seekToPreviousMediaItem() {
                 playPrevious()
             }
+
+            override fun seekTo(positionMs: Long) {
+                safeSeekTo(positionMs)
+            }
+
+            override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
+                safeSeekTo(positionMs)
+            }
+
+            override fun seekForward() {
+                seekBy(10_000L)
+            }
+
+            override fun seekBack() {
+                seekBy(-10_000L)
+            }
         }
+        uiPlayer = sessionPlayer
         mediaSession = MediaSession.Builder(this, sessionPlayer)
             .setSessionActivity(sessionActivity)
             .build()
@@ -307,6 +361,7 @@ class YouTubePlaybackService : MediaSessionService() {
         stopForegroundCompat(removeNotification = true)
         mediaSession?.release()
         mediaSession = null
+        uiPlayer = null
         player?.release()
         player = null
         ioExecutor.shutdownNow()
@@ -320,7 +375,42 @@ class YouTubePlaybackService : MediaSessionService() {
 
     // ---- Public Player Controls ----
 
-    fun getPlayer(): ExoPlayer? = player
+    /** Returns the seek-safe Player wrapper for binding to `PlayerView`. */
+    fun getPlayer(): Player? = uiPlayer ?: player
+
+    fun isReadyForSeek(): Boolean {
+        val p = player ?: return false
+        if (isLoading || currentStreamInfo == null) return false
+        return streamReachedReady || p.playbackState == Player.STATE_READY
+    }
+
+    /**
+     * Guards ExoPlayer from premature seeks while a stream is still resolving
+     * or completing initial prepare/buffering:
+     * - If the stream is already ready, seeks immediately (clamped safely inside duration).
+     * - If the stream is preparing/buffering with a known duration, defers the
+     *   seek in [pendingSeekPositionMs] and executes it the instant `STATE_READY` fires.
+     * - If still resolving (`isLoading`) or duration isn't known yet, ignores safely.
+     */
+    private fun safeSeekTo(positionMs: Long) {
+        val p = player ?: return
+        if (isLoading || currentStreamInfo == null) return
+        val rawDur = p.duration
+        val validDur = rawDur.takeIf { it > 0L && it != C.TIME_UNSET }
+        val clamped = if (validDur != null) {
+            positionMs.coerceIn(0L, (validDur - 500L).coerceAtLeast(0L))
+        } else {
+            positionMs.coerceAtLeast(0L)
+        }
+        if (isReadyForSeek()) {
+            pendingSeekPositionMs = null
+            p.seekTo(clamped)
+        } else if (validDur != null) {
+            // Stream is still doing initial prepare/buffering; wait until STATE_READY
+            // so we don't abort header/manifest loads and trigger BAD_HTTP_STATUS.
+            pendingSeekPositionMs = clamped
+        }
+    }
 
     fun playItem(item: YtItem, audioOnly: Boolean = false) {
         if (item.isPlaylist) return
@@ -447,9 +537,7 @@ class YouTubePlaybackService : MediaSessionService() {
     }
 
     fun seekTo(positionMs: Long) {
-        val p = player ?: return
-        val dur = p.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
-        p.seekTo(positionMs.coerceIn(0L, dur))
+        safeSeekTo(positionMs)
     }
 
     fun positionMs(): Long =
@@ -461,8 +549,9 @@ class YouTubePlaybackService : MediaSessionService() {
 
     fun seekBy(deltaMs: Long) {
         val p = player ?: return
-        val dur = p.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
-        val target = (p.currentPosition + deltaMs).coerceIn(0L, dur)
+        if (!isReadyForSeek()) return
+        val dur = p.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: return
+        val target = (p.currentPosition + deltaMs).coerceIn(0L, (dur - 500L).coerceAtLeast(0L))
         p.seekTo(target)
     }
 
@@ -557,12 +646,22 @@ class YouTubePlaybackService : MediaSessionService() {
 
     // ---- Stream Loading Internals ----
 
-    private fun loadAtIndex(index: Int, startFromBeginning: Boolean = false) {
+    private fun loadAtIndex(
+        index: Int,
+        startFromBeginning: Boolean = false,
+        overrideStartPositionMs: Long? = null,
+        resetRecoveryCounter: Boolean = true
+    ) {
         val item = queue.getOrNull(index) ?: return
         playedVideoIds.add(item.id)
         com.graball.PlayerService.stopAndClear(applicationContext)
         val gen = ++loadGeneration
         currentTrackStartedPlaying = false
+        streamReachedReady = false
+        pendingSeekPositionMs = null
+        if (resetRecoveryCounter) {
+            autoRecoveryAttempts = 0
+        }
         // Set loading state BEFORE player?.stop() so ExoPlayer's synchronous
         // onIsPlayingChanged(false) callback keeps the foreground notification pinned.
         isLoading = true
@@ -617,12 +716,14 @@ class YouTubePlaybackService : MediaSessionService() {
                     } else {
                         YouTubeStore.getSavedPosition(applicationContext, item.id)
                     }
-                    val resumePos = if (!startFromBeginning && info.durationSec > 30 &&
-                        savedPos in 5_000L until (info.durationSec * 1000L - 10_000L)
-                    ) {
-                        savedPos
-                    } else {
-                        0L
+                    val resumePos = when {
+                        overrideStartPositionMs != null -> {
+                            val maxMs = (info.durationSec * 1000L - 2_000L).coerceAtLeast(0L)
+                            if (maxMs > 0L) overrideStartPositionMs.coerceIn(0L, maxMs) else overrideStartPositionMs.coerceAtLeast(0L)
+                        }
+                        !startFromBeginning && info.durationSec > 30 &&
+                            savedPos in 5_000L until (info.durationSec * 1000L - 10_000L) -> savedPos
+                        else -> 0L
                     }
                     YouTubeStore.recordHistory(applicationContext, enriched, resumePos)
                     prepareStream(info, resumePosMs = resumePos, playImmediately = true)
@@ -871,6 +972,7 @@ class YouTubePlaybackService : MediaSessionService() {
             loadingStatus = loadingStatus,
             isPlaying = p?.isPlaying == true,
             isBuffering = bufferingToPlay,
+            isReadyForSeek = isReadyForSeek(),
             isAudioOnly = isAudioOnly,
             captionsEnabled = captionsEnabled,
             selectedHeight = selectedHeight,

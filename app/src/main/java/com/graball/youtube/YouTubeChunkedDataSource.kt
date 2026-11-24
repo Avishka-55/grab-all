@@ -6,6 +6,7 @@ import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.TransferListener
 import kotlin.math.min
 
@@ -19,6 +20,12 @@ import kotlin.math.min
  * into bounded 2 MB chunks via GoogleVideo's native `&range=start-end` query
  * parameter bypasses the per-connection throttle so buffers fill at full wire
  * speed (~5-50 MB/s) while keeping seeking and ExoPlayer's disk cache seamless.
+ *
+ * Hardened against seek-time edge cases:
+ * - HTTP 416 (Range Not Satisfiable) on a seek at/past EOF is treated cleanly
+ *   as end-of-input instead of throwing `ERROR_CODE_IO_BAD_HTTP_STATUS`.
+ * - If GoogleVideo rejects a synthetic `&range=` chunk on `open()` (HTTP 400
+ *   or 403), automatically falls back to standard unchunked `upstream.open()`.
  */
 @OptIn(UnstableApi::class)
 class YouTubeChunkedDataSource(
@@ -52,9 +59,7 @@ class YouTubeChunkedDataSource(
 
         val uri = dataSpec.uri
         if (!shouldChunk(uri, dataSpec)) {
-            val len = upstream.open(dataSpec)
-            upstreamOpen = true
-            return len
+            return openUnchunked(dataSpec)
         }
 
         val urlStr = uri.toString()
@@ -80,7 +85,21 @@ class YouTubeChunkedDataSource(
         currentPos = start
         endExclusive = effectiveEnd
 
-        openNextChunk()
+        try {
+            openNextChunk()
+        } catch (e: HttpDataSource.InvalidResponseCodeException) {
+            closeUpstreamQuietly()
+            if (e.responseCode == 416) {
+                // Seek landed at or beyond actual EOF -> treat cleanly as empty range.
+                return 0L
+            }
+            if (e.responseCode == 400 || e.responseCode == 403) {
+                // Edge server rejected synthetic &range= query -> fall back to plain upstream open.
+                chunkedMode = false
+                return openUnchunked(dataSpec)
+            }
+            throw e
+        }
 
         return if (effectiveEnd != C.LENGTH_UNSET.toLong()) {
             (effectiveEnd - start).coerceAtLeast(0L)
@@ -92,6 +111,7 @@ class YouTubeChunkedDataSource(
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
         if (!chunkedMode) {
+            if (!upstreamOpen) return C.RESULT_END_OF_INPUT
             return upstream.read(buffer, offset, length)
         }
         if (!upstreamOpen) return C.RESULT_END_OF_INPUT
@@ -116,7 +136,15 @@ class YouTubeChunkedDataSource(
         }
 
         // Open the next 2 MB unthrottled chunk and continue reading seamlessly.
-        openNextChunk()
+        try {
+            openNextChunk()
+        } catch (e: HttpDataSource.InvalidResponseCodeException) {
+            closeUpstreamQuietly()
+            if (e.responseCode == 416) {
+                return C.RESULT_END_OF_INPUT
+            }
+            throw e
+        }
         if (!upstreamOpen) return C.RESULT_END_OF_INPUT
         val next = upstream.read(buffer, offset, length)
         if (next > 0) {
@@ -134,6 +162,21 @@ class YouTubeChunkedDataSource(
         closeUpstreamQuietly()
         originalSpec = null
         chunkedMode = false
+    }
+
+    private fun openUnchunked(dataSpec: DataSpec): Long {
+        return try {
+            val len = upstream.open(dataSpec)
+            upstreamOpen = true
+            len
+        } catch (e: HttpDataSource.InvalidResponseCodeException) {
+            closeUpstreamQuietly()
+            if (e.responseCode == 416) {
+                0L
+            } else {
+                throw e
+            }
+        }
     }
 
     private fun openNextChunk() {
@@ -181,7 +224,9 @@ class YouTubeChunkedDataSource(
         if (url.contains("range=") ||
             url.contains(".m3u8") ||
             url.contains("source=yt_live_broadcast") ||
-            url.contains("live=1")
+            url.contains("source=yt_premiere_broadcast") ||
+            url.contains("live=1") ||
+            url.contains("noclen=1")
         ) {
             return false
         }

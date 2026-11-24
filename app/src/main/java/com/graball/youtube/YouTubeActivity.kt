@@ -73,7 +73,9 @@ class YouTubeActivity : AppCompatActivity() {
     private var currentFilter = YouTubeInnerTube.SearchFilter.ALL
     private var currentQuery: String? = null
     private var openPlaylist: PlaylistDetails? = null
-    private var lastExploreItems: List<YtItem> = emptyList()
+    private var lastExploreItems: MutableList<YtItem> = mutableListOf()
+    private var exploreContinuation: String? = null
+    private var isLoadingMoreExplore = false
     private var requestGen = 0
     private var lastAccountFingerprint: String? = null
 
@@ -259,8 +261,26 @@ class YouTubeActivity : AppCompatActivity() {
             },
             isQueueMode = { currentTab == Tab.QUEUE }
         )
-        recycler.layoutManager = LinearLayoutManager(this)
+        val layoutManager = LinearLayoutManager(this)
+        recycler.layoutManager = layoutManager
         recycler.adapter = adapter
+        recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                if (dy <= 0) return
+                if (currentTab != Tab.EXPLORE || openPlaylist != null || !currentQuery.isNullOrBlank()) return
+                if (currentFilter == YouTubeInnerTube.SearchFilter.PLAYLISTS ||
+                    currentFilter == YouTubeInnerTube.SearchFilter.MUSIC
+                ) {
+                    return
+                }
+                if (isLoadingMoreExplore || exploreContinuation.isNullOrBlank()) return
+                val total = layoutManager.itemCount
+                val lastVisible = layoutManager.findLastVisibleItemPosition()
+                if (total > 0 && lastVisible >= total - 6) {
+                    loadMoreExploreRecommendations()
+                }
+            }
+        })
 
         refreshRecentChips()
         updateForYouTabLabel()
@@ -607,6 +627,8 @@ class YouTubeActivity : AppCompatActivity() {
     private fun runSearch(query: String) {
         val gen = ++requestGen
         openPlaylist = null
+        exploreContinuation = null
+        isLoadingMoreExplore = false
         playlistBanner.visibility = View.GONE
         setLoading(true)
         val filter = currentFilter
@@ -615,7 +637,7 @@ class YouTubeActivity : AppCompatActivity() {
             runOnUiThread {
                 if (gen != requestGen || isFinishing) return@runOnUiThread
                 setLoading(false)
-                lastExploreItems = results
+                lastExploreItems = results.toMutableList()
                 showItems(results, "No results for \"$query\"")
             }
         }
@@ -624,13 +646,15 @@ class YouTubeActivity : AppCompatActivity() {
     private fun loadExploreForCurrentFilter() {
         if (currentFilter == YouTubeInnerTube.SearchFilter.PLAYLISTS) {
             val gen = ++requestGen
+            exploreContinuation = null
+            isLoadingMoreExplore = false
             setLoading(true)
             io.execute {
                 val results = YouTubeInnerTube.explorePlaylists()
                 runOnUiThread {
                     if (gen != requestGen || isFinishing) return@runOnUiThread
                     setLoading(false)
-                    lastExploreItems = results
+                    lastExploreItems = results.toMutableList()
                     if (currentTab == Tab.EXPLORE && openPlaylist == null) {
                         showItems(results, "Search above to find any YouTube playlist")
                     }
@@ -643,16 +667,49 @@ class YouTubeActivity : AppCompatActivity() {
 
     private fun loadExplore(musicMode: Boolean) {
         val gen = ++requestGen
+        exploreContinuation = null
+        isLoadingMoreExplore = false
         setLoading(true)
         updateForYouTabLabel()
         io.execute {
-            val results = YouTubeInnerTube.exploreForYou(applicationContext, musicMode)
+            val page = YouTubeInnerTube.exploreForYouPaged(applicationContext, musicMode)
             runOnUiThread {
                 if (gen != requestGen || isFinishing) return@runOnUiThread
                 setLoading(false)
-                lastExploreItems = results
+                lastExploreItems = page.items.toMutableList()
+                exploreContinuation = page.continuationToken
                 if (currentTab == Tab.EXPLORE && openPlaylist == null) {
-                    showItems(results, "Search above to find any YouTube video or playlist")
+                    showItems(lastExploreItems, "Search above to find any YouTube video or playlist")
+                }
+            }
+        }
+    }
+
+    private fun loadMoreExploreRecommendations() {
+        val token = exploreContinuation ?: return
+        if (isLoadingMoreExplore) return
+        val gen = requestGen
+        isLoadingMoreExplore = true
+        io.execute {
+            val page = YouTubeInnerTube.fetchSignedInHomePage(applicationContext, continuationToken = token)
+            runOnUiThread {
+                if (gen != requestGen || isFinishing) {
+                    isLoadingMoreExplore = false
+                    return@runOnUiThread
+                }
+                isLoadingMoreExplore = false
+                val existingIds = lastExploreItems.map { it.id }.toHashSet()
+                val fresh = page.items.filter { !it.isPlaylist && existingIds.add(it.id) }
+                exploreContinuation = if (page.continuationToken != token && fresh.isNotEmpty()) {
+                    page.continuationToken
+                } else {
+                    null
+                }
+                if (fresh.isNotEmpty()) {
+                    lastExploreItems.addAll(fresh)
+                    if (currentTab == Tab.EXPLORE && openPlaylist == null && currentQuery.isNullOrBlank()) {
+                        adapter.appendItems(fresh)
+                    }
                 }
             }
         }

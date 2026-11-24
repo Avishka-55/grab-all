@@ -200,16 +200,17 @@ class YouTubePlayerActivity : AppCompatActivity() {
         actionBgAudio.setOnClickListener {
             val svc = YouTubePlaybackService.instance ?: return@setOnClickListener
             val next = !YouTubePlaybackService.currentState.isAudioOnly
+            explicitBgAudioRequested = next
             svc.setAudioOnlyMode(next)
-            if (next) {
-                explicitBgAudioRequested = true
-                Toast.makeText(
-                    this,
-                    "Background Audio ON — keeps playing even with screen off",
-                    Toast.LENGTH_SHORT
-                ).show()
-                moveTaskToBack(false)
-            }
+            Toast.makeText(
+                this,
+                if (next) {
+                    "Audio only ON — keeps playing in background & screen off"
+                } else {
+                    "Audio only OFF — video resumed"
+                },
+                Toast.LENGTH_SHORT
+            ).show()
         }
 
         actionQuality.setOnClickListener { showQualityPicker() }
@@ -382,6 +383,13 @@ class YouTubePlayerActivity : AppCompatActivity() {
         playerLoadingBox.visibility = if (state.isLoading) View.VISIBLE else View.GONE
         if (state.isLoading) {
             playerLoadingText.text = state.loadingStatus ?: "Loading…"
+        }
+        // Keep the ExoPlayer time bar disabled while the stream is resolving or
+        // before initial prepare completes so dragging early never triggers a
+        // premature HTTP range request.
+        playerView.findViewById<View?>(androidx.media3.ui.R.id.exo_progress)?.let { timeBar ->
+            timeBar.isEnabled = state.isReadyForSeek
+            timeBar.alpha = if (state.isReadyForSeek) 1.0f else 0.45f
         }
         updateAudioOnlyBannerVisibility(state)
 
@@ -798,9 +806,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onDoubleTap(e: MotionEvent): Boolean {
                     if (inPipMode) return false
+                    val svc = YouTubePlaybackService.instance ?: return false
+                    if (!svc.isReadyForSeek()) return false
                     val isRight = e.x > playerContainer.width / 2f
                     val delta = if (isRight) 10_000L else -10_000L
-                    YouTubePlaybackService.instance?.seekBy(delta)
+                    svc.seekBy(delta)
                     showHud(if (isRight) "10s »" else "« 10s")
                     return true
                 }

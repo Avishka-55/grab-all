@@ -120,6 +120,11 @@ object YouTubeInnerTube {
         val likes: String
     )
 
+    data class FeedPage(
+        val items: List<YtItem>,
+        val continuationToken: String? = null
+    )
+
     private val client: OkHttpClient
         get() = YouTubeSessionConfig.sharedOkHttpClient
 
@@ -225,42 +230,157 @@ object YouTubeInnerTube {
     }
 
     /**
-     * Fetches the user's real personalized YouTube Home feed (`FEwhat_to_watch`)
-     * when signed in via GrabAll's on-device WebView session, using live scraped
-     * `ytcfg` headers + `SAPISIDHASH` auth + the shared CookieManager jar.
+     * Fetches one page of the user's real personalized YouTube Home feed
+     * (`FEwhat_to_watch`) when signed in, supporting InnerTube continuation
+     * tokens so the For You feed can keep loading more recommendations as the
+     * user scrolls.
+     *
+     * On initial load (`continuationToken == null`), if YouTube's first page
+     * returns fewer than 24 items and provides a continuation token, eagerly
+     * fetches one extra page so the feed immediately opens full and rich.
      */
-    fun fetchSignedInHomeFeed(context: Context): List<YtItem> {
-        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context) ?: return emptyList()
+    fun fetchSignedInHomePage(
+        context: Context,
+        continuationToken: String? = null
+    ): FeedPage {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+            ?: return FeedPage(emptyList(), null)
         val cfg = YouTubeSessionConfig.ensureWebConfig()
-        val body = JSONObject().apply {
-            put("context", webContext(cfg))
-            put("browseId", "FEwhat_to_watch")
+
+        fun requestPage(token: String?): JSONObject? {
+            val body = JSONObject().apply {
+                put("context", webContext(cfg))
+                if (token != null) {
+                    put("continuation", token)
+                } else {
+                    put("browseId", "FEwhat_to_watch")
+                }
+            }
+            return postInnerTube(
+                url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+                body = body,
+                authHeaders = authHeaders,
+                webConfig = cfg
+            )
         }
-        val root = postInnerTube(
-            url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
-            body = body,
-            authHeaders = authHeaders,
-            webConfig = cfg
-        ) ?: return emptyList()
-        val items = mutableListOf<YtItem>()
-        collectItems(root, items, seen = mutableSetOf())
-        return items.filter { !it.isPlaylist }.take(40)
+
+        val collected = mutableListOf<YtItem>()
+        val seen = mutableSetOf<String>()
+        var root = requestPage(continuationToken)
+        if (root == null && continuationToken == null) {
+            // Fallback to ytInitialData embedded in https://www.youtube.com
+            root = fetchHomeInitialDataFromWebPage(cfg)
+        }
+        if (root == null) return FeedPage(emptyList(), null)
+
+        collectItems(root, collected, seen)
+        var nextToken = findFeedContinuationToken(root)
+
+        // Initial load: if the first browse response had only a small batch of
+        // videos (common on desktop home grids with Shorts/shelves), pull up to
+        // 2 more continuation pages immediately so the feed starts rich (~30-50+ items).
+        if (continuationToken == null) {
+            var extraPages = 0
+            while (collected.count { !it.isPlaylist } < 28 &&
+                !nextToken.isNullOrBlank() &&
+                extraPages < 2
+            ) {
+                extraPages++
+                val pageRoot = requestPage(nextToken) ?: break
+                val before = collected.size
+                collectItems(pageRoot, collected, seen)
+                val next = findFeedContinuationToken(pageRoot)
+                nextToken = if (next != nextToken) next else null
+                if (collected.size == before) break
+            }
+        }
+
+        val videos = collected.filter { !it.isPlaylist }
+        return FeedPage(items = videos, continuationToken = nextToken)
     }
 
+    /** Fallback: scrapes `ytInitialData` JSON directly from logged-in `https://www.youtube.com`. */
+    private fun fetchHomeInitialDataFromWebPage(
+        cfg: YouTubeSessionConfig.WebClientConfig
+    ): JSONObject? {
+        return try {
+            val req = Request.Builder()
+                .url("https://www.youtube.com/?hl=${cfg.hl}&persist_hl=1")
+                .header("User-Agent", WEB_UA)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val html = resp.body?.string() ?: return null
+                val marker = "var ytInitialData = "
+                val idx = html.indexOf(marker)
+                val start = if (idx >= 0) {
+                    html.indexOf('{', idx + marker.length)
+                } else {
+                    val alt = html.indexOf("ytInitialData")
+                    if (alt >= 0) html.indexOf('{', alt) else -1
+                }
+                if (start < 0) return null
+                val rawJson = extractBalancedJson(html, start) ?: return null
+                JSONObject(rawJson)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun extractBalancedJson(src: String, startIndex: Int): String? {
+        if (startIndex < 0 || startIndex >= src.length || src[startIndex] != '{') return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        val limit = minOf(src.length, startIndex + 2_500_000)
+        for (i in startIndex until limit) {
+            val c = src[i]
+            if (inString) {
+                if (escaped) escaped = false
+                else if (c == '\\') escaped = true
+                else if (c == '"') inString = false
+            } else {
+                when (c) {
+                    '"' -> inString = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return src.substring(startIndex, i + 1)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    fun fetchSignedInHomeFeed(context: Context): List<YtItem> =
+        fetchSignedInHomePage(context, continuationToken = null).items
+
     /**
-     * Personalized "For You" feed:
+     * Paginated "For You" feed:
      * - When signed in to YouTube (and not in Music filter), loads the user's
-     *   real authenticated YouTube Home feed (`FEwhat_to_watch`) first.
+     *   real authenticated YouTube Home feed (`FEwhat_to_watch`) with a live
+     *   continuation token so scrolling loads endless recommendations.
      * - Otherwise (or as fallback), builds a private on-device feed from local
      *   Watch History, Bookmarks, and Recent Searches, topped up with Trending.
      */
-    fun exploreForYou(context: Context, musicMode: Boolean = false): List<YtItem> {
+    fun exploreForYouPaged(context: Context, musicMode: Boolean = false): FeedPage {
         if (!musicMode && WebViewCookieSync.buildYouTubeAuthHeaders(context) != null) {
-            val signedInHome = fetchSignedInHomeFeed(context)
-            if (signedInHome.size >= 8) {
-                return signedInHome
+            val page = fetchSignedInHomePage(context, continuationToken = null)
+            if (page.items.size >= 6) {
+                return page
             }
         }
+        return FeedPage(items = exploreLocalForYou(context, musicMode), continuationToken = null)
+    }
+
+    fun exploreForYou(context: Context, musicMode: Boolean = false): List<YtItem> =
+        exploreForYouPaged(context, musicMode).items
+
+    private fun exploreLocalForYou(context: Context, musicMode: Boolean = false): List<YtItem> {
         val history = YouTubeStore.getHistory(context)
         val bookmarks = YouTubeStore.getBookmarks(context)
         val searches = YouTubeStore.getRecentSearches(context)
@@ -415,6 +535,57 @@ object YouTubeInnerTube {
             channel = channel,
             items = capped
         )
+    }
+
+    /**
+     * Finds the main feed pagination continuation token while skipping header
+     * filter chips (`feedFilterChipBarRenderer` / `chipCloudRenderer`) so
+     * scrolling always loads the next home page instead of switching categories.
+     */
+    private fun findFeedContinuationToken(node: Any?): String? {
+        val skipKeys = setOf(
+            "feedFilterChipBarRenderer",
+            "chipCloudRenderer",
+            "chipCloudChipRenderer",
+            "header"
+        )
+        fun walk(cur: Any?): String? {
+            when (cur) {
+                is JSONObject -> {
+                    if (cur.has("continuationItemRenderer")) {
+                        val renderer = cur.optJSONObject("continuationItemRenderer")
+                        val token = renderer?.optJSONObject("continuationEndpoint")
+                            ?.optJSONObject("continuationCommand")
+                            ?.optString("token")
+                            ?.takeIf { it.isNotBlank() }
+                        if (token != null) return token
+                    }
+                    if (cur.has("nextContinuationData")) {
+                        val token = cur.optJSONObject("nextContinuationData")
+                            ?.optString("continuation")
+                            ?.takeIf { it.isNotBlank() }
+                        if (token != null) return token
+                    }
+                    val keys = cur.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        if (key in AD_KEYS || key in skipKeys) continue
+                        val found = walk(cur.opt(key))
+                        if (found != null) return found
+                    }
+                }
+                is JSONArray -> {
+                    // Check from the end first because the feed pagination
+                    // continuationItemRenderer sits at the tail of contents/continuationItems.
+                    for (i in cur.length() - 1 downTo 0) {
+                        val found = walk(cur.opt(i))
+                        if (found != null) return found
+                    }
+                }
+            }
+            return null
+        }
+        return walk(node)
     }
 
     private fun findContinuationToken(node: Any?): String? {
@@ -1677,7 +1848,7 @@ object YouTubeInnerTube {
                     if (key in AD_KEYS) continue
                     val value = node.opt(key)
                     when (key) {
-                        "videoRenderer", "compactVideoRenderer", "gridVideoRenderer" -> {
+                        "videoRenderer", "compactVideoRenderer", "gridVideoRenderer", "videoWithContextRenderer" -> {
                             parseVideoRenderer(value as? JSONObject)?.let { item ->
                                 if (seen.add(item.id)) out.add(item)
                             }
@@ -1738,6 +1909,7 @@ object YouTubeInnerTube {
         val id = obj.optString("videoId")
         if (id.length != 11) return null
         val title = extractText(obj.optJSONObject("title"))
+            .ifBlank { extractText(obj.optJSONObject("headline")) }
         if (title.isBlank()) return null
         val channel = extractText(obj.optJSONObject("ownerText"))
             .ifBlank { extractText(obj.optJSONObject("shortBylineText")) }
@@ -1763,6 +1935,7 @@ object YouTubeInnerTube {
         val id = obj.optString("playlistId")
         if (id.isBlank()) return null
         val title = extractText(obj.optJSONObject("title"))
+            .ifBlank { extractText(obj.optJSONObject("headline")) }
         if (title.isBlank()) return null
         val channel = extractText(obj.optJSONObject("shortBylineText"))
             .ifBlank { extractText(obj.optJSONObject("longBylineText")) }
@@ -1800,6 +1973,12 @@ object YouTubeInnerTube {
             ?.optJSONObject("contentMetadataViewModel")
             ?.optJSONArray("metadataRows")
         val channel = metaRows?.optJSONObject(0)
+            ?.optJSONArray("metadataParts")
+            ?.optJSONObject(0)
+            ?.optJSONObject("text")
+            ?.optString("content")
+            .orEmpty()
+        val views = metaRows?.optJSONObject(1)
             ?.optJSONArray("metadataParts")
             ?.optJSONObject(0)
             ?.optJSONObject("text")
@@ -1843,6 +2022,7 @@ object YouTubeInnerTube {
             title = title,
             channel = channel,
             duration = if (!isPlaylist) badgeText else "",
+            views = if (!isPlaylist) views else "",
             thumbnailUrl = thumb,
             isPlaylist = isPlaylist,
             videoCount = if (isPlaylist) badgeText.ifBlank { "Playlist" } else ""

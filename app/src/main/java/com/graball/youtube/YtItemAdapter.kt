@@ -23,13 +23,21 @@ class YtItemAdapter(
     private val isQueueMode: () -> Boolean = { false }
 ) : RecyclerView.Adapter<YtItemAdapter.Holder>() {
 
-    private var items: List<YtItem> = emptyList()
+    private val items: MutableList<YtItem> = mutableListOf()
     private var activeVideoId: String? = null
 
     fun submitList(newItems: List<YtItem>, activeId: String? = activeVideoId) {
-        items = newItems
+        items.clear()
+        items.addAll(newItems)
         activeVideoId = activeId
         notifyDataSetChanged()
+    }
+
+    fun appendItems(moreItems: List<YtItem>) {
+        if (moreItems.isEmpty()) return
+        val start = items.size
+        items.addAll(moreItems)
+        notifyItemRangeInserted(start, moreItems.size)
     }
 
     fun setActiveVideoId(id: String?) {
