@@ -23,6 +23,7 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
@@ -85,7 +86,7 @@ data class YouTubePlaybackState(
 @OptIn(UnstableApi::class)
 class YouTubePlaybackService : MediaSessionService() {
 
-    private enum class StreamMode { HLS, ADAPTIVE_MERGE, MUXED }
+    private enum class StreamMode { ADAPTIVE_MERGE, HLS_VARIANT, HLS_MASTER, MUXED }
 
     private var player: ExoPlayer? = null
     private var uiPlayer: Player? = null
@@ -244,6 +245,9 @@ class YouTubePlaybackService : MediaSessionService() {
                     }
 
                     override fun onTracksChanged(tracks: Tracks) {
+                        if (currentStreamMode == StreamMode.HLS_MASTER && selectedHeight != null) {
+                            applyTrackSelection()
+                        }
                         refreshActiveVideoHeight(tracks)
                         broadcastState()
                     }
@@ -675,13 +679,17 @@ class YouTubePlaybackService : MediaSessionService() {
         YouTubeStore.setDefaultHeight(this, height ?: 0)
         val info = currentStreamInfo ?: return
         val p = player ?: return
-        if (currentStreamMode == StreamMode.HLS) {
-            // Instant seamless quality switch on HLS without re-preparing!
+        val pos = p.currentPosition.coerceAtLeast(0L)
+        if (currentStreamMode == StreamMode.HLS_MASTER) {
+            // Apply an explicit TrackSelectionOverride AND seek-flush the
+            // buffered low-res segments immediately so quality snaps right away.
             applyTrackSelection()
+            if (isReadyForSeek()) {
+                p.seekTo(pos)
+            }
             broadcastState()
             return
         }
-        val pos = p.currentPosition
         val wasPlaying = p.playWhenReady
         attemptedModes.clear()
         prepareStream(info, resumePosMs = pos, playImmediately = wasPlaying)
@@ -909,6 +917,7 @@ class YouTubePlaybackService : MediaSessionService() {
         val cache = mediaCache ?: return
         val urls = buildList {
             info.hlsUrl?.let { add(it) }
+            info.hlsVariants.forEach { add(it.url) }
             info.videoStreams.forEach { add(it.url) }
             info.audioStreams.forEach { add(it.url) }
             info.muxedStreams.forEach { add(it.url) }
@@ -985,32 +994,15 @@ class YouTubePlaybackService : MediaSessionService() {
             return MergingMediaSource(*all)
         }
 
-        // 1) HLS first when available
-        if (StreamMode.HLS !in attemptedModes && !info.hlsUrl.isNullOrBlank()) {
-            attemptedModes.add(StreamMode.HLS)
-            currentStreamMode = StreamMode.HLS
-            preparedVideoHeight = null
-            activeVideoHeight = null
-            val item = MediaItem.Builder()
-                .setUri(info.hlsUrl)
-                .setMediaMetadata(meta)
-                .build()
-            val src = attachSubtitles(HlsMediaSource.Factory(dsFactory).createMediaSource(item))
-            applyTrackSelection()
-            p.setMediaSource(src, resumePosMs)
-            p.setPlaybackSpeed(playbackSpeed)
-            p.playWhenReady = playImmediately
-            p.prepare()
-            return true
-        }
-
-        // 2) Adaptive separate video + audio
+        // 1) Direct Adaptive Merge FIRST (exact chosen 144p-2160p video + best M4A audio):
+        // Deterministic quality switching (~0.3s), zero ABR downgrade, true 1440p/4K VP9,
+        // and zero video bytes downloaded in Audio-Only mode.
         val videoStream = info.pickVideoStream(selectedHeight)
         val audioStream = info.bestAudio()
         if (StreamMode.ADAPTIVE_MERGE !in attemptedModes && videoStream != null && audioStream != null) {
             attemptedModes.add(StreamMode.ADAPTIVE_MERGE)
             currentStreamMode = StreamMode.ADAPTIVE_MERGE
-            preparedVideoHeight = videoStream.height.takeIf { it > 0 }
+            preparedVideoHeight = videoStream.height.takeIf { it > 0 }?.let { normalizeQualityHeight(it) }
             activeVideoHeight = preparedVideoHeight
             val vItem = MediaItem.Builder()
                 .setUri(videoStream.url)
@@ -1031,12 +1023,53 @@ class YouTubePlaybackService : MediaSessionService() {
             return true
         }
 
-        // 3) Muxed single-file MP4 fallback
+        // 2) Exact Per-Resolution HLS Variant SECOND (e.g. web_safari 144p-1080p muxed HLS on VPN):
+        // Hands ExoPlayer ONLY the chosen resolution's .m3u8 playlist so it starts in HD
+        // (720p Auto) and switches immediately on tap without getting stuck on 360p ABR!
+        val hlsVariant = info.pickHlsVariant(selectedHeight)
+        if (StreamMode.HLS_VARIANT !in attemptedModes && hlsVariant != null) {
+            attemptedModes.add(StreamMode.HLS_VARIANT)
+            currentStreamMode = StreamMode.HLS_VARIANT
+            preparedVideoHeight = hlsVariant.height.takeIf { it > 0 }?.let { normalizeQualityHeight(it) }
+            activeVideoHeight = preparedVideoHeight
+            val item = MediaItem.Builder()
+                .setUri(hlsVariant.url)
+                .setMediaMetadata(meta)
+                .build()
+            val src = attachSubtitles(HlsMediaSource.Factory(dsFactory).createMediaSource(item))
+            applyTrackSelection()
+            p.setMediaSource(src, resumePosMs)
+            p.setPlaybackSpeed(playbackSpeed)
+            p.playWhenReady = playImmediately
+            p.prepare()
+            return true
+        }
+
+        // 3) HLS Master Manifest THIRD (live streams or separate-audio HLS manifests)
+        if (StreamMode.HLS_MASTER !in attemptedModes && !info.hlsUrl.isNullOrBlank()) {
+            attemptedModes.add(StreamMode.HLS_MASTER)
+            currentStreamMode = StreamMode.HLS_MASTER
+            preparedVideoHeight = null
+            activeVideoHeight = null
+            val item = MediaItem.Builder()
+                .setUri(info.hlsUrl)
+                .setMediaMetadata(meta)
+                .build()
+            val src = attachSubtitles(HlsMediaSource.Factory(dsFactory).createMediaSource(item))
+            applyTrackSelection()
+            p.setMediaSource(src, resumePosMs)
+            p.setPlaybackSpeed(playbackSpeed)
+            p.playWhenReady = playImmediately
+            p.prepare()
+            return true
+        }
+
+        // 4) Muxed single-file MP4 last-resort fallback
         val muxed = info.pickMuxedStream(selectedHeight)
         if (StreamMode.MUXED !in attemptedModes && muxed != null) {
             attemptedModes.add(StreamMode.MUXED)
             currentStreamMode = StreamMode.MUXED
-            preparedVideoHeight = muxed.height.takeIf { it > 0 }
+            preparedVideoHeight = muxed.height.takeIf { it > 0 }?.let { normalizeQualityHeight(it) }
             activeVideoHeight = preparedVideoHeight
             val item = MediaItem.Builder()
                 .setUri(muxed.url)
@@ -1086,20 +1119,59 @@ class YouTubePlaybackService : MediaSessionService() {
         val p = player ?: return
         val chosen = selectedHeight
         val builder = p.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, isAudioOnly)
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !captionsEnabled)
-            .setPreferredVideoMimeType("video/avc")
-        if (chosen != null) {
-            // Explicit resolution picked (e.g. 1080p, 720p, 480p, 360p):
-            // force highest bitrate within <= chosen height so HLS actually switches!
-            builder
-                .setMaxVideoSize(Int.MAX_VALUE, chosen)
-                .setMinVideoSize(0, (chosen * 0.7f).toInt())
-                .setForceHighestSupportedBitrate(true)
+            .setPreferredVideoMimeType(null)
+
+        if (currentStreamMode == StreamMode.HLS_MASTER) {
+            if (chosen != null) {
+                var bestGroup: Tracks.Group? = null
+                var bestTrackIdx = -1
+                var bestScore = Long.MIN_VALUE
+                for (group in p.currentTracks.groups) {
+                    if (group.type != C.TRACK_TYPE_VIDEO) continue
+                    for (i in 0 until group.length) {
+                        val fmt = group.getTrackFormat(i)
+                        val h = normalizeQualityHeight(fmt.height)
+                        if (h <= 0) continue
+                        val score = when {
+                            h == chosen -> 1_000_000_000L + fmt.bitrate.coerceAtLeast(0)
+                            h < chosen -> (h * 100_000L) + fmt.bitrate.coerceAtLeast(0)
+                            else -> -kotlin.math.abs(h - chosen) * 100_000L
+                        }
+                        if (score > bestScore) {
+                            bestScore = score
+                            bestGroup = group
+                            bestTrackIdx = i
+                        }
+                    }
+                }
+                if (bestGroup != null && bestTrackIdx >= 0) {
+                    builder
+                        .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+                        .setMinVideoSize(0, 0)
+                        .setForceHighestSupportedBitrate(false)
+                        .setOverrideForType(
+                            TrackSelectionOverride(bestGroup.mediaTrackGroup, listOf(bestTrackIdx))
+                        )
+                } else {
+                    builder
+                        .setMaxVideoSize(Int.MAX_VALUE, chosen + 16)
+                        .setMinVideoSize(0, 0)
+                        .setForceHighestSupportedBitrate(true)
+                }
+            } else {
+                builder
+                    .setMaxVideoSize(Int.MAX_VALUE, 1080)
+                    .setMinVideoSize(0, 0)
+                    .setForceHighestSupportedBitrate(false)
+            }
         } else {
-            // Auto mode: smooth adaptive switching up to 720p/1080p
+            // Single-resolution modes (ADAPTIVE_MERGE, HLS_VARIANT, MUXED):
+            // remove size caps so 1440p / 2160p streams are never rejected by ExoPlayer.
             builder
-                .setMaxVideoSize(Int.MAX_VALUE, 1080)
+                .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
                 .setMinVideoSize(0, 0)
                 .setForceHighestSupportedBitrate(false)
         }

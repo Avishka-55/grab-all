@@ -51,16 +51,22 @@ data class VideoStreamInfo(
     val description: String,
     val thumbnailUrl: String,
     val hlsUrl: String?,
+    val hlsVariants: List<StreamFormat> = emptyList(),
     val videoStreams: List<StreamFormat>,
     val audioStreams: List<StreamFormat>,
     val muxedStreams: List<StreamFormat>,
     val userAgent: String,
     val captionTracks: List<CaptionTrack> = emptyList()
 ) {
-    /** Distinct playable video heights sorted descending (e.g. 1080, 720, 480, 360). */
+    /** Distinct playable video heights sorted descending (e.g. 2160, 1440, 1080, 720, 480, 360). */
     fun availableHeights(): List<Int> {
-        val heights = (videoStreams.map { it.height } + muxedStreams.map { it.height })
+        val heights = (
+            videoStreams.map { it.height } +
+                hlsVariants.map { it.height } +
+                muxedStreams.map { it.height }
+            )
             .filter { it > 0 }
+            .map { normalizeHeight(it) }
             .distinct()
             .sortedDescending()
         return heights
@@ -75,44 +81,79 @@ data class VideoStreamInfo(
     }
 
     /**
-     * Pick a video-only stream closest to [targetHeight] (or <= targetHeight),
-     * strictly preferring H.264 (avc1) first — NOT generic "mp4" which also
-     * matches AV1 (av01) that older 32-bit devices cannot decode in hardware.
+     * Pick a video-only stream matching [targetHeight] (or highest <= targetHeight).
+     * Resolves height FIRST, then prefers H.264 (avc1) -> VP9 -> other within that
+     * height so 144p-1080p use universal H.264 while 1440p & 2160p cleanly pick VP9
+     * instead of getting silently downgraded to 1080p.
      */
     fun pickVideoStream(targetHeight: Int?, forDownload: Boolean = false): StreamFormat? {
-        if (videoStreams.isEmpty()) return null
-        val preferred = videoStreams.filter {
-            it.mimeType.contains("avc1", ignoreCase = true)
-        }.ifEmpty {
-            videoStreams.filter { it.mimeType.contains("vp9", ignoreCase = true) }
-        }.ifEmpty {
-            videoStreams
-        }
-        return if (targetHeight == null) {
-            if (forDownload) {
-                // Best download: pick true highest available resolution (1080p/1440p/4K)
-                preferred.maxByOrNull { it.height * 10_000L + it.bitrate }
-            } else {
-                // Player Auto: pick 720p max for fast startup and smooth playback on all devices
-                preferred.filter { it.height in 1..720 }
-                    .maxByOrNull { it.height * 10_000L + it.bitrate }
-                    ?: preferred.minByOrNull { it.height }
-            }
-        } else {
-            preferred.filter { it.height in 1..targetHeight }
-                .maxByOrNull { it.height * 10_000L + it.bitrate }
-                ?: preferred.minByOrNull { kotlin.math.abs(it.height - targetHeight) }
-        }
+        return pickFromCandidates(
+            streams = videoStreams,
+            targetHeight = targetHeight,
+            autoMaxHeight = if (forDownload) Int.MAX_VALUE else 720
+        )
+    }
+
+    /**
+     * Pick an exact per-resolution HLS variant playlist (e.g. `web_safari` muxed
+     * 144p-1080p `.m3u8`). Auto mode defaults to crisp 720p (never 360p).
+     */
+    fun pickHlsVariant(targetHeight: Int?): StreamFormat? {
+        return pickFromCandidates(
+            streams = hlsVariants,
+            targetHeight = targetHeight,
+            autoMaxHeight = 720
+        )
     }
 
     /** Fallback muxed stream (video + audio in one file) when adaptive merge isn't available. */
     fun pickMuxedStream(targetHeight: Int?): StreamFormat? {
         if (muxedStreams.isEmpty()) return null
         return if (targetHeight == null) {
-            muxedStreams.maxByOrNull { it.height }
+            muxedStreams.maxByOrNull { normalizeHeight(it.height) }
         } else {
-            muxedStreams.filter { it.height in 1..targetHeight }.maxByOrNull { it.height }
-                ?: muxedStreams.minByOrNull { kotlin.math.abs(it.height - targetHeight) }
+            muxedStreams.filter { normalizeHeight(it.height) in 1..targetHeight }
+                .maxByOrNull { normalizeHeight(it.height) }
+                ?: muxedStreams.minByOrNull { kotlin.math.abs(normalizeHeight(it.height) - targetHeight) }
+        }
+    }
+
+    private fun pickFromCandidates(
+        streams: List<StreamFormat>,
+        targetHeight: Int?,
+        autoMaxHeight: Int
+    ): StreamFormat? {
+        if (streams.isEmpty()) return null
+        val byHeight = streams
+            .filter { it.height > 0 }
+            .groupBy { normalizeHeight(it.height) }
+        if (byHeight.isEmpty()) return streams.maxByOrNull { it.bitrate }
+
+        val chosenHeight = if (targetHeight == null) {
+            byHeight.keys.filter { it <= autoMaxHeight }.maxOrNull()
+                ?: byHeight.keys.minOrNull()!!
+        } else {
+            byHeight.keys.filter { it <= targetHeight }.maxOrNull()
+                ?: byHeight.keys.minByOrNull { kotlin.math.abs(it - targetHeight) }!!
+        }
+        val group = byHeight[chosenHeight].orEmpty()
+        return group.filter { it.mimeType.contains("avc1", ignoreCase = true) }
+            .maxByOrNull { it.bitrate }
+            ?: group.filter {
+                it.mimeType.contains("vp9", ignoreCase = true) ||
+                    it.mimeType.contains("vp09", ignoreCase = true)
+            }.maxByOrNull { it.bitrate }
+            ?: group.maxByOrNull { it.bitrate }
+    }
+
+    companion object {
+        private val STANDARD_HEIGHTS = intArrayOf(144, 240, 360, 480, 720, 1080, 1440, 2160)
+
+        fun normalizeHeight(rawHeight: Int): Int {
+            for (std in STANDARD_HEIGHTS) {
+                if (kotlin.math.abs(rawHeight - std) <= 12) return std
+            }
+            return rawHeight
         }
     }
 }

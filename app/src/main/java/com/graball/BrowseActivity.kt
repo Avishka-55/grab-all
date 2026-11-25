@@ -170,6 +170,9 @@ class BrowseActivity : AppCompatActivity() {
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 loading.visibility = android.view.View.VISIBLE
+                if (isYouTubeUrl(url)) {
+                    injectYouTubeAdBlocker(view)
+                }
                 syncYouTubeSessionIfNeeded(url)
             }
 
@@ -374,13 +377,46 @@ class BrowseActivity : AppCompatActivity() {
     }
 
     /**
-     * Layer 2 YouTube Ad-Blocker: injects CSS to hide sponsored feed/banner
-     * slots and a lightweight observer that immediately skips/fast-forwards any
-     * in-stream video ads on m.youtube.com.
+     * Layer 2 YouTube Ad-Blocker + Background Audio:
+     * - Hooks `JSON.parse` / `Response.prototype.json` / `ytInitialPlayerResponse`
+     *   to strip `adPlacements`, `playerAds`, and `adSlots` BEFORE YouTube's
+     *   HTML5 player sees them (zero pre-roll/mid-roll flash).
+     * - Hides sponsored feed/banner cards via CSS + fallback skip observer.
+     * - Spoofs `document.visibilityState = 'visible'` so audio keeps playing
+     *   smoothly when switching apps or locking the screen.
      */
     private fun injectYouTubeAdBlocker(view: WebView) {
         val js = """
             (function() {
+              function stripAdKeys(obj) {
+                if (!obj || typeof obj !== 'object') return obj;
+                if ('adPlacements' in obj) obj.adPlacements = [];
+                if ('playerAds' in obj) obj.playerAds = [];
+                if ('adSlots' in obj) obj.adSlots = [];
+                if ('adBreakHeartbeatParams' in obj) delete obj.adBreakHeartbeatParams;
+                return obj;
+              }
+              if (!window.__graballJsonHooked) {
+                window.__graballJsonHooked = true;
+                try {
+                  if (window.ytInitialPlayerResponse) stripAdKeys(window.ytInitialPlayerResponse);
+                  var origParse = JSON.parse;
+                  JSON.parse = function() {
+                    var res = origParse.apply(this, arguments);
+                    return stripAdKeys(res);
+                  };
+                  if (window.Response && Response.prototype && Response.prototype.json) {
+                    var origJson = Response.prototype.json;
+                    Response.prototype.json = function() {
+                      return origJson.apply(this, arguments).then(stripAdKeys);
+                    };
+                  }
+                  Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                  Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+                  window.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                  document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                } catch (e) {}
+              }
               if (!document.getElementById('graball-adblock-css')) {
                 var style = document.createElement('style');
                 style.id = 'graball-adblock-css';
@@ -390,6 +426,7 @@ class BrowseActivity : AppCompatActivity() {
                   'ytm-companion-ad-renderer',
                   'ytm-in-feed-ad-layout-renderer',
                   'ytm-statement-banner-renderer',
+                  'ytm-ad-slot-renderer',
                   'ad-slot-renderer',
                   '.ad-showing .ytp-ad-module',
                   '.ytp-ad-overlay-container',

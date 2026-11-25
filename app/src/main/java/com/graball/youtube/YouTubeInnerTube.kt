@@ -1215,7 +1215,9 @@ object YouTubeInnerTube {
             val safariRoot = requestWebSafariPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             if (safariRoot != null) {
                 val parsed = parseDecryptedPlayerRoot(videoId, safariRoot, WEB_SAFARI_UA)
-                if (parsed.info != null && !parsed.info.hlsUrl.isNullOrBlank()) {
+                if (parsed.info != null &&
+                    (parsed.info.hlsVariants.isNotEmpty() || !parsed.info.hlsUrl.isNullOrBlank())
+                ) {
                     return parsed
                 }
                 lastReason = parsed.error
@@ -1268,6 +1270,7 @@ object YouTubeInnerTube {
         val clientObj = JSONObject().apply {
             put("clientName", "TVHTML5")
             put("clientVersion", TV_SAMSUNG_CLIENT_VERSION)
+            put("userAgent", TV_SAMSUNG_UA)
             put("deviceMake", "Samsung")
             put("deviceModel", "UKS9800")
             put("osName", "Tizen")
@@ -1319,6 +1322,7 @@ object YouTubeInnerTube {
         val clientObj = JSONObject().apply {
             put("clientName", "WEB")
             put("clientVersion", cfg.clientVersion)
+            put("userAgent", WEB_SAFARI_UA)
             put("hl", cfg.hl)
             put("gl", cfg.gl)
             if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
@@ -1375,14 +1379,27 @@ object YouTubeInnerTube {
         val rawHlsUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
         // Solve `/n/<challenge>/` path segment inside web_safari HLS master manifest
         // via warm V8 solver so all 144p-1080p segments return HTTP 200 (not 403).
-        val hlsUrl = rawHlsUrl?.let { YouTubeJsSolver.solveUrlNParam(it) }
+        val solvedHlsUrl = rawHlsUrl?.let { YouTubeJsSolver.solveUrlNParam(it) }
+        var effectiveHlsUrl: String? = solvedHlsUrl
+        var hlsVariants: List<StreamFormat> = emptyList()
+        if (solvedHlsUrl != null) {
+            val (hlsOk, parsedVariants) = fetchParsedHlsVariants(solvedHlsUrl, userAgent)
+            if (!hlsOk) {
+                Log.w(TAG, "HLS master manifest failed verification ($videoId); skipping broken HLS")
+                effectiveHlsUrl = null
+            } else {
+                hlsVariants = parsedVariants
+            }
+        }
 
         val decrypted = decryptStreamingDataObject(streamingData, poToken = poToken)
         val videoStreams = decrypted?.videoStreams.orEmpty()
         val audioStreams = decrypted?.audioStreams.orEmpty()
         val muxedStreams = decrypted?.muxedStreams.orEmpty()
 
-        if (hlsUrl == null && muxedStreams.isEmpty() && (videoStreams.isEmpty() || audioStreams.isEmpty())) {
+        if (effectiveHlsUrl == null && hlsVariants.isEmpty() && muxedStreams.isEmpty() &&
+            (videoStreams.isEmpty() || audioStreams.isEmpty())
+        ) {
             return ResolveResult(null, "No playable stream URLs after V8 decryption")
         }
 
@@ -1405,7 +1422,8 @@ object YouTubeInnerTube {
                 viewCount = views,
                 description = description,
                 thumbnailUrl = thumb,
-                hlsUrl = hlsUrl,
+                hlsUrl = effectiveHlsUrl,
+                hlsVariants = hlsVariants,
                 videoStreams = videoStreams,
                 audioStreams = audioStreams,
                 muxedStreams = muxedStreams,
@@ -1413,6 +1431,96 @@ object YouTubeInnerTube {
                 captionTracks = captions
             )
         )
+    }
+
+    /**
+     * Fetches and verifies an HLS master manifest (e.g. `web_safari` 144p-1080p)
+     * and extracts individual self-contained muxed variant `.m3u8` URLs so
+     * ExoPlayer plays the exact chosen resolution without getting stuck on
+     * low-res Adaptive Bitrate (ABR).
+     *
+     * Returns `(manifestReachable, selfContainedMuxedVariants)`. When a manifest
+     * uses separate `#EXT-X-MEDIA:TYPE=AUDIO` tracks, returns `(true, emptyList())`
+     * so ExoPlayer uses the master manifest with audio intact.
+     */
+    private fun fetchParsedHlsVariants(
+        masterUrl: String,
+        userAgent: String
+    ): Pair<Boolean, List<StreamFormat>> {
+        return try {
+            val req = Request.Builder()
+                .url(masterUrl)
+                .header("User-Agent", userAgent)
+                .build()
+            anonClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    return false to emptyList()
+                }
+                val body = resp.body?.string().orEmpty()
+                if (!body.contains("#EXTM3U")) {
+                    return false to emptyList()
+                }
+                // Separate audio groups require the master manifest so audio stays synced.
+                if (body.contains("#EXT-X-MEDIA:") && body.contains("TYPE=AUDIO")) {
+                    return true to emptyList()
+                }
+
+                val resRegex = Regex("""RESOLUTION=(\d+)x(\d+)""")
+                val bwRegex = Regex("""BANDWIDTH=(\d+)""")
+                val codecsRegex = Regex("""CODECS="([^"]+)"""")
+                val itagRegex = Regex("""/itag/(\d+)""")
+                val out = mutableListOf<StreamFormat>()
+                val lines = body.lineSequence().map { it.trim() }.toList()
+                var pendingInf: String? = null
+
+                for (line in lines) {
+                    if (line.isEmpty()) continue
+                    if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                        pendingInf = line
+                        continue
+                    }
+                    if (line.startsWith("#")) continue
+                    val inf = pendingInf ?: continue
+                    pendingInf = null
+
+                    val variantUrl = if (line.startsWith("http://") || line.startsWith("https://")) {
+                        YouTubeJsSolver.solveUrlNParam(line)
+                    } else {
+                        continue
+                    }
+                    val resMatch = resRegex.find(inf) ?: continue
+                    val w = resMatch.groupValues[1].toIntOrNull() ?: 0
+                    val h = resMatch.groupValues[2].toIntOrNull() ?: 0
+                    val shortSide = minOf(w, h)
+                    if (shortSide <= 0) continue
+                    val normH = VideoStreamInfo.normalizeHeight(shortSide)
+                    val bw = bwRegex.find(inf)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    val codecs = codecsRegex.find(inf)?.groupValues?.get(1).orEmpty()
+                    val itag = itagRegex.find(variantUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    out.add(
+                        StreamFormat(
+                            itag = itag,
+                            url = variantUrl,
+                            mimeType = if (codecs.isNotBlank()) {
+                                "application/x-mpegURL; codecs=\"$codecs\""
+                            } else {
+                                "application/x-mpegURL"
+                            },
+                            qualityLabel = "${normH}p",
+                            height = normH,
+                            bitrate = bw,
+                            isAudioOnly = false,
+                            isVideoOnly = false,
+                            isMuxed = true
+                        )
+                    )
+                }
+                true to out
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchParsedHlsVariants failed: ${e.message}")
+            false to emptyList()
+        }
     }
 
     private fun decryptStreamingDataObject(
@@ -1728,6 +1836,7 @@ object YouTubeInnerTube {
             val videoStreams = mutableListOf<StreamFormat>()
             val audioStreams = mutableListOf<StreamFormat>()
             val muxedStreams = mutableListOf<StreamFormat>()
+            val hlsVariants = mutableListOf<StreamFormat>()
             var hlsUrl: String? = null
             var detectedUa = WEB_UA
 
@@ -1751,6 +1860,27 @@ object YouTubeInnerTube {
                         hlsUrl = master
                     } else if (hlsUrl == null && vcodec != "none" && acodec != "none") {
                         hlsUrl = url
+                    }
+                    // Keep individual muxed HLS variants (e.g. web_safari itag 91-96)
+                    // so ExoPlayer switches resolutions deterministically instead of ABR.
+                    if (vcodec != "none" && vcodec.isNotBlank() &&
+                        acodec != "none" && acodec.isNotBlank() &&
+                        height > 0
+                    ) {
+                        val normH = VideoStreamInfo.normalizeHeight(height)
+                        hlsVariants.add(
+                            StreamFormat(
+                                itag = f.optString("format_id").toIntOrNull() ?: 0,
+                                url = url,
+                                mimeType = "application/x-mpegURL; codecs=\"$vcodec, $acodec\"",
+                                qualityLabel = "${normH}p",
+                                height = normH,
+                                bitrate = tbr,
+                                isAudioOnly = false,
+                                isVideoOnly = false,
+                                isMuxed = true
+                            )
+                        )
                     }
                     continue
                 }
@@ -1780,7 +1910,9 @@ object YouTubeInnerTube {
                 }
             }
 
-            if (hlsUrl == null && muxedStreams.isEmpty() && (videoStreams.isEmpty() || audioStreams.isEmpty())) {
+            if (hlsUrl == null && hlsVariants.isEmpty() && muxedStreams.isEmpty() &&
+                (videoStreams.isEmpty() || audioStreams.isEmpty())
+            ) {
                 return ResolveResult(null, "No playable formats found")
             }
 
@@ -1797,6 +1929,7 @@ object YouTubeInnerTube {
                     thumbnailUrl = root.optString("thumbnail")
                         .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" },
                     hlsUrl = hlsUrl,
+                    hlsVariants = hlsVariants,
                     videoStreams = videoStreams,
                     audioStreams = audioStreams,
                     muxedStreams = muxedStreams,
