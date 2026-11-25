@@ -714,10 +714,48 @@ object YouTubeInnerTube {
                 forceRefreshConfig = forceRefresh
             )
             if (page.items.isNotEmpty()) {
-                return page
+                return page.copy(items = withMixCards(context, page.items))
             }
         }
-        return FeedPage(items = exploreLocalForYou(context, musicMode), continuationToken = null)
+        val local = exploreLocalForYou(context, musicMode)
+        return FeedPage(
+            items = if (musicMode) local else withMixCards(context, local),
+            continuationToken = null
+        )
+    }
+
+    /**
+     * YouTube's current home grid rarely includes playlists/mixes. To keep the
+     * feed varied like other YouTube clients, weave in up to 3 "Mix" playlist
+     * cards (YouTube's own `RD<videoId>` auto-mix radio) seeded from recently
+     * watched / bookmarked videos. Real playlists already in the feed are kept.
+     */
+    private fun withMixCards(context: Context, items: List<YtItem>): List<YtItem> {
+        if (items.count { it.isPlaylist } >= 2) return items
+        val seeds = (YouTubeStore.getHistory(context).map { it.item } + YouTubeStore.getBookmarks(context))
+            .filter { !it.isPlaylist && it.id.length == 11 }
+            .distinctBy { it.id }
+            .take(10)
+            .shuffled()
+            .take(3)
+        if (seeds.isEmpty()) return items
+        val mixes = seeds.map { s ->
+            YtItem(
+                id = "RD${s.id}",
+                title = "Mix – ${s.title}",
+                channel = s.channel.ifBlank { "YouTube Mix" },
+                thumbnailUrl = s.thumbnailUrl.ifBlank { "https://i.ytimg.com/vi/${s.id}/hqdefault.jpg" },
+                isPlaylist = true,
+                videoCount = "Mix"
+            )
+        }
+        val out = items.toMutableList()
+        val slots = intArrayOf(3, 9, 16)
+        mixes.forEachIndexed { i, mix ->
+            val at = slots[i].coerceAtMost(out.size)
+            out.add(at, mix)
+        }
+        return out
     }
 
     fun exploreForYou(context: Context, musicMode: Boolean = false): List<YtItem> =
