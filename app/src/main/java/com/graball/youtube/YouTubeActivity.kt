@@ -40,7 +40,15 @@ class YouTubeActivity : AppCompatActivity() {
 
     private enum class Tab { EXPLORE, BOOKMARKS, HISTORY, QUEUE }
     private enum class SignedInFeedMode { NONE, SUBSCRIPTIONS, WATCH_LATER }
-    private enum class PagingMode { NONE, HOME, MUSIC, SUBSCRIPTIONS, WATCH_LATER, SEARCH }
+    private enum class PagingMode { NONE, HOME, MUSIC, SUBSCRIPTIONS, WATCH_LATER, SEARCH, LIKED, PLAYLISTS }
+    private enum class MeSection(val label: String) {
+        SAVED("☆ Saved"),
+        HISTORY("🕘 History"),
+        LIKED("👍 Liked"),
+        WATCH_LATER("⏰ Watch Later"),
+        PLAYLISTS("📚 Playlists"),
+        SUBS("📺 Subscriptions")
+    }
 
     private lateinit var searchInput: EditText
     private lateinit var searchClear: TextView
@@ -90,6 +98,11 @@ class YouTubeActivity : AppCompatActivity() {
     private var homeTopicChips: List<YouTubeInnerTube.FeedChip> = emptyList()
     private var selectedTopicLabel: String? = null
     private var requestGen = 0
+    private var meSection = MeSection.SAVED
+    private var meItems: MutableList<YtItem> = mutableListOf()
+    private var meContinuation: String? = null
+    private var mePagingMode = PagingMode.NONE
+    private var isLoadingMoreMe = false
     private var lastAccountFingerprint: String? = null
 
     private val playbackListener: (YouTubePlaybackState) -> Unit = { state ->
@@ -307,7 +320,7 @@ class YouTubeActivity : AppCompatActivity() {
                     if (nowBookmarked) "Saved to bookmarks" else "Removed from bookmarks",
                     Toast.LENGTH_SHORT
                 ).show()
-                if (currentTab == Tab.BOOKMARKS) {
+                if (currentTab == Tab.BOOKMARKS && meSection == MeSection.SAVED) {
                     renderBookmarks()
                 }
             },
@@ -319,9 +332,14 @@ class YouTubeActivity : AppCompatActivity() {
         recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                 if (dy <= 0) return
-                if (currentTab != Tab.EXPLORE || openPlaylist != null) return
-                if (pagingMode == PagingMode.NONE) return
-                if (isLoadingMoreExplore || exploreContinuation.isNullOrBlank()) return
+                if (openPlaylist != null) return
+                if (currentTab == Tab.BOOKMARKS) {
+                    if (mePagingMode == PagingMode.NONE || isLoadingMoreMe || meContinuation.isNullOrBlank()) return
+                } else {
+                    if (currentTab != Tab.EXPLORE) return
+                    if (pagingMode == PagingMode.NONE) return
+                    if (isLoadingMoreExplore || exploreContinuation.isNullOrBlank()) return
+                }
                 val total = layoutManager.itemCount
                 val lastVisible = layoutManager.findLastVisibleItemPosition()
                 if (total > 0 && lastVisible >= total - 6) {
@@ -533,7 +551,7 @@ class YouTubeActivity : AppCompatActivity() {
                     loadExplore(currentFilter == YouTubeInnerTube.SearchFilter.MUSIC)
                 }
             }
-            Tab.BOOKMARKS -> renderBookmarks()
+            Tab.BOOKMARKS -> renderMe()
             Tab.HISTORY -> renderHistory()
             Tab.QUEUE -> renderQueue(YouTubePlaybackService.currentState)
         }
@@ -612,6 +630,10 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun refreshCurrentExploreFeed() {
+        if (currentTab == Tab.BOOKMARKS) {
+            renderMe()
+            return
+        }
         val q = currentQuery
         if (!q.isNullOrBlank()) {
             runSearch(q)
@@ -659,11 +681,101 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun updateTopicChipsVisibility() {
-        // Keep the main YouTube Home screen clean and clutter-free.
-        topicRow.visibility = View.GONE
+        // Home stays clutter-free; the row is only used for the "Me" sections.
+        topicRow.visibility = if (currentTab == Tab.BOOKMARKS && openPlaylist == null) View.VISIBLE else View.GONE
+    }
+
+    private fun renderMe() {
+        renderMeChips()
+        updateTopicChipsVisibility()
+        when (meSection) {
+            MeSection.SAVED -> {
+                mePagingMode = PagingMode.NONE
+                meContinuation = null
+                renderBookmarks()
+            }
+            MeSection.HISTORY -> {
+                mePagingMode = PagingMode.NONE
+                meContinuation = null
+                renderHistory()
+            }
+            else -> loadMeAccountSection(meSection)
+        }
+    }
+
+    private fun renderMeChips() {
+        topicContainer.removeAllViews()
+        val dp = resources.displayMetrics.density
+        MeSection.values().forEach { section ->
+            val isSelected = section == meSection
+            val chipView = TextView(this).apply {
+                text = section.label
+                textSize = 12f
+                setTextColor(
+                    ContextCompat.getColor(
+                        this@YouTubeActivity,
+                        if (isSelected) R.color.graball_text else R.color.graball_subtext
+                    )
+                )
+                setBackgroundResource(if (isSelected) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg)
+                setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { rightMargin = (6 * dp).toInt() }
+                setOnClickListener {
+                    if (section == meSection) return@setOnClickListener
+                    meSection = section
+                    renderMe()
+                }
+            }
+            topicContainer.addView(chipView)
+        }
+    }
+
+    private fun fetchMePage(section: MeSection, token: String?): YouTubeInnerTube.FeedPage = when (section) {
+        MeSection.LIKED -> YouTubeInnerTube.fetchLikedVideosPage(applicationContext, token)
+        MeSection.WATCH_LATER -> YouTubeInnerTube.fetchWatchLaterPage(applicationContext, token)
+        MeSection.PLAYLISTS -> YouTubeInnerTube.fetchMyPlaylistsPage(applicationContext, token)
+        MeSection.SUBS -> YouTubeInnerTube.fetchSubscriptionsPage(applicationContext, token)
+        else -> YouTubeInnerTube.FeedPage(emptyList(), null)
+    }
+
+    private fun loadMeAccountSection(section: MeSection) {
+        meItems = mutableListOf()
+        meContinuation = null
+        isLoadingMoreMe = false
+        if (!isSignedInToYouTube()) {
+            mePagingMode = PagingMode.NONE
+            setLoading(false)
+            showItems(emptyList(), "Sign in with 👤 (top right) to see your ${section.label.substring(2).trim()}")
+            return
+        }
+        mePagingMode = when (section) {
+            MeSection.LIKED -> PagingMode.LIKED
+            MeSection.WATCH_LATER -> PagingMode.WATCH_LATER
+            MeSection.PLAYLISTS -> PagingMode.PLAYLISTS
+            else -> PagingMode.SUBSCRIPTIONS
+        }
+        val gen = ++requestGen
+        showItems(emptyList(), "")
+        setLoading(true)
+        io.execute {
+            val page = fetchMePage(section, null)
+            runOnUiThread {
+                if (gen != requestGen || isFinishing || currentTab != Tab.BOOKMARKS || meSection != section) {
+                    return@runOnUiThread
+                }
+                setLoading(false)
+                meItems = page.items.toMutableList()
+                meContinuation = page.continuationToken
+                showItems(page.items, "Nothing here yet — ${section.label.substring(2).trim()} is empty")
+            }
+        }
     }
 
     private fun renderHomeTopicChips() {
+        if (currentTab == Tab.BOOKMARKS) return
         topicContainer.removeAllViews()
         if (homeTopicChips.isEmpty()) {
             topicRow.visibility = View.GONE
@@ -1115,6 +1227,10 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun loadMoreCurrentFeed() {
+        if (currentTab == Tab.BOOKMARKS) {
+            loadMoreMe()
+            return
+        }
         val token = exploreContinuation ?: return
         val mode = pagingMode
         if (isLoadingMoreExplore || mode == PagingMode.NONE) return
@@ -1133,7 +1249,7 @@ class YouTubeActivity : AppCompatActivity() {
                 } else {
                     YouTubeInnerTube.FeedPage(emptyList(), null)
                 }
-                PagingMode.NONE -> YouTubeInnerTube.FeedPage(emptyList(), null)
+                PagingMode.NONE, PagingMode.LIKED, PagingMode.PLAYLISTS -> YouTubeInnerTube.FeedPage(emptyList(), null)
             }
             runOnUiThread {
                 if (gen != requestGen || isFinishing) {
@@ -1153,6 +1269,34 @@ class YouTubeActivity : AppCompatActivity() {
                     if (currentTab == Tab.EXPLORE && openPlaylist == null) {
                         adapter.appendItems(fresh)
                     }
+                }
+            }
+        }
+    }
+
+    private fun loadMoreMe() {
+        val token = meContinuation ?: return
+        if (isLoadingMoreMe || mePagingMode == PagingMode.NONE) return
+        val gen = requestGen
+        val section = meSection
+        isLoadingMoreMe = true
+        io.execute {
+            val page = fetchMePage(section, token)
+            runOnUiThread {
+                isLoadingMoreMe = false
+                if (gen != requestGen || isFinishing || currentTab != Tab.BOOKMARKS || meSection != section) {
+                    return@runOnUiThread
+                }
+                val existing = meItems.map { it.id }.toHashSet()
+                val fresh = page.items.filter { existing.add(it.id) }
+                meContinuation = if (page.continuationToken != token && fresh.isNotEmpty()) {
+                    page.continuationToken
+                } else {
+                    null
+                }
+                if (fresh.isNotEmpty()) {
+                    meItems.addAll(fresh)
+                    adapter.appendItems(fresh)
                 }
             }
         }

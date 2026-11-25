@@ -121,6 +121,7 @@ class YouTubePlaybackService : MediaSessionService() {
     private var currentArtworkUrl: String? = null
     private var isForegroundActive = false
     private var loadGeneration = 0
+    private var stallRetries = 0
     private var currentTrackStartedPlaying = false
     private var streamReachedReady = false
     private var pendingSeekPositionMs: Long? = null
@@ -777,7 +778,24 @@ class YouTubePlaybackService : MediaSessionService() {
         pendingSeekPositionMs = null
         if (resetRecoveryCounter) {
             autoRecoveryAttempts = 0
+            stallRetries = 0
         }
+        // Watchdog: if resolving hangs (slow/blocked network tier), silently retry
+        // once instead of leaving the user on an endless spinner.
+        mainHandler.postDelayed({
+            if (gen != loadGeneration || !isLoading) return@postDelayed
+            if (stallRetries < 1 && index in queue.indices) {
+                stallRetries++
+                Log.w(TAG, "Resolve stalled >20s for ${item.id}, auto-retrying")
+                loadAtIndex(index, startFromBeginning, overrideStartPositionMs, resetRecoveryCounter = false)
+            } else {
+                loadGeneration++
+                isLoading = false
+                loadingStatus = null
+                lastError = "Taking too long to load. Tap Retry."
+                broadcastState()
+            }
+        }, 20_000L)
         // Set loading state BEFORE player?.stop() so ExoPlayer's synchronous
         // onIsPlayingChanged(false) callback keeps the foreground notification pinned.
         isLoading = true
@@ -894,6 +912,20 @@ class YouTubePlaybackService : MediaSessionService() {
         isLoading = false
         loadingStatus = null
         broadcastState()
+
+        // Buffering watchdog: if the stream never reaches READY (dead/throttled
+        // URL), try the next stream mode, then one fresh re-resolve.
+        mainHandler.postDelayed({
+            if (gen != loadGeneration || streamReachedReady || lastError != null || isLoading) return@postDelayed
+            val cur = currentStreamInfo ?: return@postDelayed
+            Log.w(TAG, "Stream not ready after 15s for ${item.id} ($currentStreamMode), recovering")
+            evictStreamFromCache(cur)
+            if (tryNextStreamMode(cur, resumePos, playImmediately = true)) return@postDelayed
+            if (stallRetries < 1 && index in queue.indices) {
+                stallRetries++
+                loadAtIndex(index, startFromBeginning, resumePos.takeIf { it > 0L }, resetRecoveryCounter = false)
+            }
+        }, 15_000L)
 
         // Fetch SponsorBlock asynchronously AFTER playback starts so it
         // never delays video startup even if sponsor.ajay.app is slow.

@@ -153,12 +153,13 @@
             android:layout_weight="1"
             android:background="@drawable/yt_chip_bg"
             android:gravity="center"
-            android:text="Saved"
+            android:text="👤 Me"
             android:textColor="@color/graball_subtext"
             android:textSize="12sp" />
 
         <TextView
             android:id="@+id/ytTabHistory"
+            android:visibility="gone"
             android:layout_width="0dp"
             android:layout_height="34dp"
             android:layout_marginEnd="6dp"

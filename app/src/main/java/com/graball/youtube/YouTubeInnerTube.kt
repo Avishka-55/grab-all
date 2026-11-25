@@ -403,6 +403,51 @@ object YouTubeInnerTube {
         return FeedPage(items = collected.filter { !it.isPlaylist }, continuationToken = next)
     }
 
+    /** Signed-in "Liked videos" list (`VLLL`) with continuation paging. */
+    fun fetchLikedVideosPage(context: Context, continuationToken: String? = null): FeedPage =
+        fetchAccountListPage(context, "VLLL", continuationToken, videosOnly = true)
+
+    /** Signed-in library playlists (`FEplaylist_aggregation`) with continuation paging. */
+    fun fetchMyPlaylistsPage(context: Context, continuationToken: String? = null): FeedPage =
+        fetchAccountListPage(context, "FEplaylist_aggregation", continuationToken, videosOnly = false)
+
+    private fun fetchAccountListPage(
+        context: Context,
+        browseId: String,
+        continuationToken: String?,
+        videosOnly: Boolean
+    ): FeedPage {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+            ?: return FeedPage(emptyList(), null)
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val body = JSONObject().apply {
+            put("context", webContext(cfg))
+            if (!continuationToken.isNullOrBlank()) {
+                put("continuation", continuationToken)
+            } else {
+                put("browseId", browseId)
+            }
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        ) ?: return FeedPage(emptyList(), null)
+
+        val collected = mutableListOf<YtItem>()
+        val seen = mutableSetOf<String>()
+        if (videosOnly) {
+            collectPlaylistVideos(root, collected, seen)
+        }
+        if (collected.isEmpty()) {
+            collectItems(root, collected, seen)
+        }
+        val next = findContinuationToken(root)?.takeIf { it != continuationToken }
+        val items = if (videosOnly) collected.filter { !it.isPlaylist } else collected.filter { it.isPlaylist }
+        return FeedPage(items = items, continuationToken = next)
+    }
+
     /**
      * Fetches real personalized YouTube Music recommendations:
      * 1. If [continuationToken] is provided, pages directly via `/youtubei/v1/browse`.
@@ -1940,7 +1985,8 @@ object YouTubeInnerTube {
             clientVersion = clientVersion,
             visitorData = visitorData,
             authHeaders = authHeaders,
-            useAnonymousClient = (authHeaders == null)
+            useAnonymousClient = (authHeaders == null),
+            callTimeoutMs = 7_000L
         ) ?: return ResolveResult(null, "Network error reaching YouTube")
 
         val playStatus = root.optJSONObject("playabilityStatus")
@@ -2257,7 +2303,8 @@ object YouTubeInnerTube {
         visitorData: String? = cachedVisitorData,
         authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null,
         webConfig: YouTubeSessionConfig.WebClientConfig? = null,
-        useAnonymousClient: Boolean = false
+        useAnonymousClient: Boolean = false,
+        callTimeoutMs: Long = 0L
     ): JSONObject? {
         return try {
             val isWebDesktop = !useAnonymousClient && clientNameId == "1"
@@ -2310,7 +2357,14 @@ object YouTubeInnerTube {
             val req = reqBuilder
                 .post(body.toString().toRequestBody(JSON_MEDIA))
                 .build()
-            val httpClient = if (useAnonymousClient || authHeaders != null) anonClient else client
+            val baseClient = if (useAnonymousClient || authHeaders != null) anonClient else client
+            // Hard overall cap so a hung connection can't stall stream resolution
+            // for 12s + 15s per tier.
+            val httpClient = if (callTimeoutMs > 0L) {
+                baseClient.newBuilder().callTimeout(callTimeoutMs, TimeUnit.MILLISECONDS).build()
+            } else {
+                baseClient
+            }
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 val txt = resp.body?.string() ?: return null
