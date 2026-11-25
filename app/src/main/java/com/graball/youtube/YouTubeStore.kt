@@ -30,6 +30,13 @@ object YouTubeStore {
     private fun bookmarksFile(context: Context): File = File(storeDir(context), "bookmarks.json")
     private fun historyFile(context: Context): File = File(storeDir(context), "history.json")
     private fun searchesFile(context: Context): File = File(storeDir(context), "searches.json")
+    private fun homeFeedCacheFile(context: Context): File = File(storeDir(context), "home_feed_cache.json")
+
+    data class CachedHomeFeed(
+        val items: List<YtItem>,
+        val chips: List<YouTubeInnerTube.FeedChip>,
+        val savedAtMs: Long
+    )
 
     // ---- Preferences ----
 
@@ -200,6 +207,77 @@ object YouTubeStore {
             list.forEach { arr.put(it) }
             searchesFile(context).writeText(arr.toString())
         } catch (_: Exception) {
+        }
+    }
+
+    // ---- Home Feed Disk Cache (instant 0ms open) ----
+
+    @Synchronized
+    fun saveHomeFeedCache(
+        context: Context,
+        accountKey: String,
+        items: List<YtItem>,
+        chips: List<YouTubeInnerTube.FeedChip>
+    ) {
+        if (items.isEmpty()) return
+        try {
+            val root = JSONObject().apply {
+                put("account", accountKey)
+                put("ts", System.currentTimeMillis())
+                val itemsArr = JSONArray()
+                items.take(60).forEach { itemsArr.put(itemToJson(it)) }
+                put("items", itemsArr)
+                val chipsArr = JSONArray()
+                chips.take(16).forEach { chip ->
+                    chipsArr.put(
+                        JSONObject().apply {
+                            put("label", chip.label)
+                            if (!chip.continuationToken.isNullOrBlank()) {
+                                put("token", chip.continuationToken)
+                            }
+                            put("selected", chip.selected)
+                        }
+                    )
+                }
+                put("chips", chipsArr)
+            }
+            homeFeedCacheFile(context).writeText(root.toString())
+        } catch (_: Exception) {
+        }
+    }
+
+    @Synchronized
+    fun loadHomeFeedCache(context: Context, accountKey: String): CachedHomeFeed? {
+        val file = homeFeedCacheFile(context)
+        if (!file.isFile) return null
+        return try {
+            val root = JSONObject(file.readText())
+            if (root.optString("account") != accountKey) return null
+            val itemsArr = root.optJSONArray("items") ?: return null
+            val items = (0 until itemsArr.length()).mapNotNull { i -> itemFromJson(itemsArr.optJSONObject(i)) }
+            if (items.isEmpty()) return null
+            val chipsArr = root.optJSONArray("chips")
+            val chips = if (chipsArr != null) {
+                (0 until chipsArr.length()).mapNotNull { i ->
+                    val c = chipsArr.optJSONObject(i) ?: return@mapNotNull null
+                    val label = c.optString("label").trim()
+                    if (label.isBlank()) return@mapNotNull null
+                    YouTubeInnerTube.FeedChip(
+                        label = label,
+                        continuationToken = c.optString("token").takeIf { it.isNotBlank() },
+                        selected = c.optBoolean("selected", false)
+                    )
+                }
+            } else {
+                emptyList()
+            }
+            CachedHomeFeed(
+                items = items,
+                chips = chips,
+                savedAtMs = root.optLong("ts", 0L)
+            )
+        } catch (_: Exception) {
+            null
         }
     }
 

@@ -55,9 +55,7 @@ data class VideoStreamInfo(
     val audioStreams: List<StreamFormat>,
     val muxedStreams: List<StreamFormat>,
     val userAgent: String,
-    val captionTracks: List<CaptionTrack> = emptyList(),
-    /** Raw `streamingData` JSON captured from WebView for async V8 HD upgrade when cold. */
-    val pendingStreamingDataJson: String? = null
+    val captionTracks: List<CaptionTrack> = emptyList()
 ) {
     /** Distinct playable video heights sorted descending (e.g. 1080, 720, 480, 360). */
     fun availableHeights(): List<Int> {

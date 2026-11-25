@@ -25,6 +25,14 @@ class YtItemAdapter(
 
     private val items: MutableList<YtItem> = mutableListOf()
     private var activeVideoId: String? = null
+    private var largeCardMode: Boolean = false
+
+    fun setLargeCardMode(enabled: Boolean) {
+        if (largeCardMode != enabled) {
+            largeCardMode = enabled
+            notifyDataSetChanged()
+        }
+    }
 
     fun submitList(newItems: List<YtItem>, activeId: String? = activeVideoId) {
         items.clear()
@@ -49,9 +57,17 @@ class YtItemAdapter(
 
     override fun getItemCount(): Int = items.size
 
+    override fun getItemViewType(position: Int): Int =
+        if (largeCardMode && !items[position].isPlaylist) VIEW_TYPE_LARGE else VIEW_TYPE_COMPACT
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
+        val layoutRes = if (viewType == VIEW_TYPE_LARGE) {
+            R.layout.item_yt_card_large
+        } else {
+            R.layout.item_yt_card
+        }
         val view = LayoutInflater.from(parent.context)
-            .inflate(R.layout.item_yt_card, parent, false)
+            .inflate(layoutRes, parent, false)
         return Holder(view)
     }
 
@@ -83,7 +99,8 @@ class YtItemAdapter(
             holder.badge.visibility = View.GONE
         }
 
-        ThumbnailLoader.load(item.thumbnailUrl, holder.thumb)
+        val targetThumbWidth = if (largeCardMode && !item.isPlaylist) 720 else 360
+        ThumbnailLoader.load(item.thumbnailUrl, holder.thumb, targetWidthPx = targetThumbWidth)
 
         val bookmarked = YouTubeStore.isBookmarked(context, item.id)
         holder.bookmark.text = if (bookmarked) "★" else "☆"
@@ -122,5 +139,10 @@ class YtItemAdapter(
         val downloadBtn: TextView = view.findViewById(R.id.itemDownload)
         val queueBtn: TextView = view.findViewById(R.id.itemQueue)
         val bookmark: TextView = view.findViewById(R.id.itemBookmark)
+    }
+
+    companion object {
+        private const val VIEW_TYPE_COMPACT = 0
+        private const val VIEW_TYPE_LARGE = 1
     }
 }

@@ -123,6 +123,15 @@ class YouTubePlaybackService : MediaSessionService() {
     private var pendingSeekPositionMs: Long? = null
     private var autoRecoveryAttempts = 0
 
+    // Background pre-resolved stream for the next video in the queue (15m TTL)
+    // so Next (⏭) and Autoplay start nearly instantly even over VPN.
+    @Volatile
+    private var preloadedStreamInfo: VideoStreamInfo? = null
+    @Volatile
+    private var preloadedAtMs: Long = 0L
+    @Volatile
+    private var preloadingVideoId: String? = null
+
     private val sponsorTicker = object : Runnable {
         override fun run() {
             val p = player ?: return
@@ -143,8 +152,53 @@ class YouTubePlaybackService : MediaSessionService() {
                     }
                 }
             }
+            maybePreloadNextTrack(p)
             mainHandler.postDelayed(this, 750L)
         }
+    }
+
+    /**
+     * Silently pre-resolves the next video in the queue once the current track
+     * has played past 8s (or has <= 20s remaining) so Next (⏭) and Autoplay
+     * transitions start immediately without waiting on stream resolution.
+     */
+    private fun maybePreloadNextTrack(p: ExoPlayer) {
+        val nextItem = queue.getOrNull(queueIndex + 1) ?: return
+        if (nextItem.isPlaylist) return
+        val pos = p.currentPosition
+        val dur = p.duration
+        val shouldPreload = pos >= 8_000L || (dur > 0L && dur != C.TIME_UNSET && (dur - pos) <= 20_000L)
+        if (!shouldPreload) return
+        val existing = preloadedStreamInfo
+        val now = System.currentTimeMillis()
+        if (existing?.videoId == nextItem.id && (now - preloadedAtMs) < PRELOAD_TTL_MS) return
+        if (preloadingVideoId == nextItem.id) return
+        preloadingVideoId = nextItem.id
+        ioExecutor.execute {
+            try {
+                val info = YouTubeInnerTube.resolveStreams(applicationContext, nextItem.id).info
+                if (info != null) {
+                    preloadedStreamInfo = info
+                    preloadedAtMs = System.currentTimeMillis()
+                }
+            } catch (_: Throwable) {
+            } finally {
+                if (preloadingVideoId == nextItem.id) {
+                    preloadingVideoId = null
+                }
+            }
+        }
+    }
+
+    private fun consumePreloadedStreamInfo(videoId: String): VideoStreamInfo? {
+        val info = preloadedStreamInfo ?: return null
+        val fresh = (System.currentTimeMillis() - preloadedAtMs) < PRELOAD_TTL_MS
+        if (info.videoId == videoId && fresh) {
+            preloadedStreamInfo = null
+            preloadedAtMs = 0L
+            return info
+        }
+        return null
     }
 
     override fun onCreate() {
@@ -609,7 +663,7 @@ class YouTubePlaybackService : MediaSessionService() {
                 if (group.type != C.TRACK_TYPE_VIDEO) continue
                 for (i in 0 until group.length) {
                     val h = group.getTrackFormat(i).height
-                    if (h in 144..2160) heights.add(h)
+                    if (h in 144..2160) heights.add(normalizeQualityHeight(h))
                 }
             }
         }
@@ -657,6 +711,9 @@ class YouTubePlaybackService : MediaSessionService() {
         queueIndex = -1
         fetchingAutoNext = false
         currentStreamInfo = null
+        preloadedStreamInfo = null
+        preloadedAtMs = 0L
+        preloadingVideoId = null
         activeVideoHeight = null
         preparedVideoHeight = null
         currentArtwork = null
@@ -705,6 +762,21 @@ class YouTubePlaybackService : MediaSessionService() {
         player?.seekTo(0L)
         broadcastState()
 
+        // Fast-path: if the next video was already pre-resolved in the background,
+        // start preparing ExoPlayer immediately with zero network resolution wait!
+        val cachedInfo = if (resetRecoveryCounter) consumePreloadedStreamInfo(item.id) else null
+        if (cachedInfo != null) {
+            applyResolvedStreamOnMain(
+                gen = gen,
+                index = index,
+                item = item,
+                info = cachedInfo,
+                startFromBeginning = startFromBeginning,
+                overrideStartPositionMs = overrideStartPositionMs
+            )
+            return
+        }
+
         ioExecutor.execute {
             try {
                 val result = YouTubeInnerTube.resolveStreams(
@@ -729,95 +801,14 @@ class YouTubePlaybackService : MediaSessionService() {
                         broadcastState()
                         return@post
                     }
-                    currentStreamInfo = info
-                    val enriched = item.copy(
-                        title = info.title,
-                        channel = info.channel.ifBlank { item.channel },
-                        thumbnailUrl = info.thumbnailUrl.ifBlank { item.thumbnailUrl }
+                    applyResolvedStreamOnMain(
+                        gen = gen,
+                        index = index,
+                        item = item,
+                        info = info,
+                        startFromBeginning = startFromBeginning,
+                        overrideStartPositionMs = overrideStartPositionMs
                     )
-                    if (index in queue.indices) {
-                        queue[index] = enriched
-                    }
-                    val savedPos = if (startFromBeginning) {
-                        0L
-                    } else {
-                        YouTubeStore.getSavedPosition(applicationContext, item.id)
-                    }
-                    val resumePos = when {
-                        overrideStartPositionMs != null -> {
-                            val maxMs = (info.durationSec * 1000L - 2_000L).coerceAtLeast(0L)
-                            if (maxMs > 0L) overrideStartPositionMs.coerceIn(0L, maxMs) else overrideStartPositionMs.coerceAtLeast(0L)
-                        }
-                        !startFromBeginning && info.durationSec > 30 &&
-                            savedPos in 5_000L until (info.durationSec * 1000L - 10_000L) -> savedPos
-                        else -> 0L
-                    }
-                    YouTubeStore.recordHistory(applicationContext, enriched, resumePos)
-                    prepareStream(info, resumePosMs = resumePos, playImmediately = true)
-                    isLoading = false
-                    loadingStatus = null
-                    broadcastState()
-
-                    // Seamless background HD upgrade: if we started fast at 360p muxed
-                    // while V8 was warming up, resolve full 144p-1080p solved-`/n/`
-                    // web_safari HLS (or adaptive HD) asynchronously so the quality
-                    // picker unlocks all HD resolutions and upgrades smoothly!
-                    if (info.videoStreams.none { it.height > 360 } && info.hlsUrl.isNullOrBlank()) {
-                        ioExecutor.execute {
-                            val upgraded = YouTubeInnerTube.upgradeStreamInfoToHd(
-                                applicationContext,
-                                info
-                            )
-                            if (upgraded != null) {
-                                mainHandler.post(Runnable {
-                                    if (gen != loadGeneration || currentStreamInfo?.videoId != info.videoId) {
-                                        return@Runnable
-                                    }
-                                    currentStreamInfo = upgraded
-                                    val hasHls = !upgraded.hlsUrl.isNullOrBlank()
-                                    val wantsHd = !isAudioOnly &&
-                                        (selectedHeight == null || selectedHeight!! > 360 || hasHls)
-                                    if (wantsHd && currentStreamMode == StreamMode.MUXED) {
-                                        val p = player
-                                        val pos = p?.currentPosition?.coerceAtLeast(0L) ?: 0L
-                                        val wasPlaying = p?.playWhenReady ?: true
-                                        attemptedModes.clear()
-                                        prepareStream(upgraded, resumePosMs = pos, playImmediately = wasPlaying)
-                                    }
-                                    broadcastState()
-                                })
-                            }
-                        }
-                    }
-
-                    // Fetch SponsorBlock asynchronously AFTER playback starts so it
-                    // never delays video startup even if sponsor.ajay.app is slow.
-                    if (YouTubeStore.isSponsorBlockEnabled(applicationContext)) {
-                        ioExecutor.execute {
-                            val segs = SponsorBlockClient.fetchSegments(item.id)
-                            mainHandler.post {
-                                if (gen == loadGeneration) {
-                                    sponsorSegments = segs
-                                }
-                            }
-                        }
-                    }
-
-                    // Auto-populate Up Next queue with YouTube's related videos whenever
-                    // we reach the end of the queue, so Next (⏭) and Autoplay always work
-                    // from Music Player, Notification, PiP, and Bluetooth controls.
-                    if (queueIndex >= queue.lastIndex && !fetchingAutoNext) {
-                        fetchingAutoNext = true
-                        ioExecutor.execute {
-                            val related = YouTubeInnerTube.fetchRelated(item.id, applicationContext)
-                            mainHandler.post {
-                                fetchingAutoNext = false
-                                if (gen == loadGeneration && appendRelatedToQueue(related) > 0) {
-                                    broadcastState()
-                                }
-                            }
-                        }
-                    }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "Unexpected error loading video ${item.id}", t)
@@ -827,6 +818,74 @@ class YouTubePlaybackService : MediaSessionService() {
                     loadingStatus = null
                     lastError = "Load error: ${t.message ?: t.javaClass.simpleName}"
                     broadcastState()
+                }
+            }
+        }
+    }
+
+    private fun applyResolvedStreamOnMain(
+        gen: Int,
+        index: Int,
+        item: YtItem,
+        info: VideoStreamInfo,
+        startFromBeginning: Boolean,
+        overrideStartPositionMs: Long?
+    ) {
+        if (gen != loadGeneration) return
+        currentStreamInfo = info
+        val enriched = item.copy(
+            title = info.title,
+            channel = info.channel.ifBlank { item.channel },
+            thumbnailUrl = info.thumbnailUrl.ifBlank { item.thumbnailUrl }
+        )
+        if (index in queue.indices) {
+            queue[index] = enriched
+        }
+        val savedPos = if (startFromBeginning) {
+            0L
+        } else {
+            YouTubeStore.getSavedPosition(applicationContext, item.id)
+        }
+        val resumePos = when {
+            overrideStartPositionMs != null -> {
+                val maxMs = (info.durationSec * 1000L - 2_000L).coerceAtLeast(0L)
+                if (maxMs > 0L) overrideStartPositionMs.coerceIn(0L, maxMs) else overrideStartPositionMs.coerceAtLeast(0L)
+            }
+            !startFromBeginning && info.durationSec > 30 &&
+                savedPos in 5_000L until (info.durationSec * 1000L - 10_000L) -> savedPos
+            else -> 0L
+        }
+        YouTubeStore.recordHistory(applicationContext, enriched, resumePos)
+        prepareStream(info, resumePosMs = resumePos, playImmediately = true)
+        isLoading = false
+        loadingStatus = null
+        broadcastState()
+
+        // Fetch SponsorBlock asynchronously AFTER playback starts so it
+        // never delays video startup even if sponsor.ajay.app is slow.
+        if (YouTubeStore.isSponsorBlockEnabled(applicationContext)) {
+            ioExecutor.execute {
+                val segs = SponsorBlockClient.fetchSegments(item.id)
+                mainHandler.post {
+                    if (gen == loadGeneration) {
+                        sponsorSegments = segs
+                    }
+                }
+            }
+        }
+
+        // Auto-populate Up Next queue with YouTube's related videos whenever
+        // we reach the end of the queue, so Next (⏭) and Autoplay always work
+        // from Music Player, Notification, PiP, and Bluetooth controls.
+        if (queueIndex >= queue.lastIndex && !fetchingAutoNext) {
+            fetchingAutoNext = true
+            ioExecutor.execute {
+                val related = YouTubeInnerTube.fetchRelated(item.id, applicationContext)
+                mainHandler.post {
+                    fetchingAutoNext = false
+                    if (gen == loadGeneration && appendRelatedToQueue(related) > 0) {
+                        broadcastState()
+                    }
                 }
             }
         }
@@ -1281,6 +1340,7 @@ class YouTubePlaybackService : MediaSessionService() {
         private const val CHANNEL_ID = "graball_yt_player"
         private const val YT_NOTIFICATION_ID = 3
         private const val MAX_MEDIA_CACHE_BYTES = 40L * 1024L * 1024L
+        private const val PRELOAD_TTL_MS = 15L * 60L * 1000L
 
         const val ACTION_PLAY_PAUSE = "com.graball.youtube.ACTION_PLAY_PAUSE"
         const val ACTION_NEXT = "com.graball.youtube.ACTION_NEXT"

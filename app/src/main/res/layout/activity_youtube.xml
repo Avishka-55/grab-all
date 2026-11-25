@@ -398,6 +398,21 @@
         </LinearLayout>
     </LinearLayout>
 
+    <!-- Subtle Pull-to-Refresh / Background Refresh Status Pill -->
+    <TextView
+        android:id="@+id/ytRefreshBanner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#1E2036"
+        android:gravity="center"
+        android:paddingTop="5dp"
+        android:paddingBottom="5dp"
+        android:text="Refreshing recommendations…"
+        android:textColor="@color/graball_orange"
+        android:textSize="11.5sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
     <!-- Main List Area -->
     <FrameLayout
         android:layout_width="match_parent"
