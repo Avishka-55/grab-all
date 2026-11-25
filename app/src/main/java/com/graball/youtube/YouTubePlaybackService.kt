@@ -62,6 +62,7 @@ data class YouTubePlaybackState(
     val isBuffering: Boolean = false,
     val isReadyForSeek: Boolean = false,
     val isAudioOnly: Boolean = false,
+    val isVideoDisabled: Boolean = false,
     val captionsEnabled: Boolean = false,
     val selectedHeight: Int? = null,
     val activeVideoHeight: Int? = null,
@@ -108,6 +109,7 @@ class YouTubePlaybackService : MediaSessionService() {
     private var isLoading = false
     private var loadingStatus: String? = null
     private var isAudioOnly = false
+    private var isVideoSurfaceVisible = false
     private var captionsEnabled = false
     private var selectedHeight: Int? = null
     private var activeVideoHeight: Int? = null
@@ -636,10 +638,26 @@ class YouTubePlaybackService : MediaSessionService() {
         p.seekTo(target)
     }
 
+    private fun isEffectivelyAudioOnly(): Boolean = isAudioOnly || !isVideoSurfaceVisible
+
     fun setAudioOnlyMode(enabled: Boolean) {
         if (isAudioOnly == enabled) return
         isAudioOnly = enabled
-        applyVideoTrackEnabled(!enabled)
+        applyTrackSelection()
+        broadcastState()
+    }
+
+    /**
+     * Tracks whether a live video surface (main player screen or active PiP
+     * window) is currently visible to the user. Anytime video is NOT visible
+     * (display off, minimized to mini-player, app backgrounded, or PiP closed),
+     * ExoPlayer immediately disables C.TRACK_TYPE_VIDEO so zero video bytes
+     * download and playback runs in battery-saving audio-only mode.
+     */
+    fun setVideoSurfaceVisible(visible: Boolean) {
+        if (isVideoSurfaceVisible == visible) return
+        isVideoSurfaceVisible = visible
+        applyTrackSelection()
         broadcastState()
     }
 
@@ -1120,7 +1138,7 @@ class YouTubePlaybackService : MediaSessionService() {
         val chosen = selectedHeight
         val builder = p.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, isAudioOnly)
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, isEffectivelyAudioOnly())
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !captionsEnabled)
             .setPreferredVideoMimeType(null)
 
@@ -1216,6 +1234,7 @@ class YouTubePlaybackService : MediaSessionService() {
             isBuffering = bufferingToPlay,
             isReadyForSeek = isReadyForSeek(),
             isAudioOnly = isAudioOnly,
+            isVideoDisabled = isEffectivelyAudioOnly(),
             captionsEnabled = captionsEnabled,
             selectedHeight = selectedHeight,
             activeVideoHeight = activeVideoHeight ?: preparedVideoHeight,
@@ -1358,7 +1377,7 @@ class YouTubePlaybackService : MediaSessionService() {
         val playing = currentState.isPlaying
         val activeOrPreparing = playing || currentState.isLoading || currentState.isBuffering
         val sub = buildString {
-            if (currentState.isAudioOnly) append("🎧 Background Audio")
+            if (currentState.isVideoDisabled) append("🎧 Background Audio")
             else if (currentState.isLoading) append(currentState.loadingStatus ?: "Loading…")
             else if (currentState.isBuffering) append("Buffering…")
             else if (playing) append("Playing")

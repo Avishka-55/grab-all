@@ -247,11 +247,12 @@ object YouTubeInnerTube {
      */
     fun fetchSignedInHomePage(
         context: Context,
-        continuationToken: String? = null
+        continuationToken: String? = null,
+        forceRefreshConfig: Boolean = false
     ): FeedPage {
         val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
             ?: return FeedPage(emptyList(), null)
-        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val cfg = YouTubeSessionConfig.ensureWebConfig(forceRefresh = forceRefreshConfig)
 
         fun requestPage(token: String?): JSONObject? {
             val body = JSONObject().apply {
@@ -284,11 +285,11 @@ object YouTubeInnerTube {
         var nextToken = findFeedContinuationToken(root)
 
         // Initial load: if the first browse response had only a small batch of
-        // videos (common on desktop home grids with Shorts/shelves), pull up to
+        // items (common on desktop home grids with Shorts/shelves), pull up to
         // 2 more continuation pages immediately so the feed starts rich (~30-50+ items).
         if (continuationToken == null) {
             var extraPages = 0
-            while (collected.count { !it.isPlaylist } < 28 &&
+            while (collected.size < 28 &&
                 !nextToken.isNullOrBlank() &&
                 extraPages < 2
             ) {
@@ -302,8 +303,7 @@ object YouTubeInnerTube {
             }
         }
 
-        val videos = collected.filter { !it.isPlaylist }
-        return FeedPage(items = videos, continuationToken = nextToken, chips = chips)
+        return FeedPage(items = collected, continuationToken = nextToken, chips = chips)
     }
 
     /**
@@ -667,10 +667,18 @@ object YouTubeInnerTube {
      * - Otherwise (or as fallback), builds a private on-device feed from local
      *   Watch History, Bookmarks, and Recent Searches, topped up with Trending.
      */
-    fun exploreForYouPaged(context: Context, musicMode: Boolean = false): FeedPage {
+    fun exploreForYouPaged(
+        context: Context,
+        musicMode: Boolean = false,
+        forceRefresh: Boolean = false
+    ): FeedPage {
         if (!musicMode && WebViewCookieSync.buildYouTubeAuthHeaders(context) != null) {
-            val page = fetchSignedInHomePage(context, continuationToken = null)
-            if (page.items.size >= 6) {
+            val page = fetchSignedInHomePage(
+                context = context,
+                continuationToken = null,
+                forceRefreshConfig = forceRefresh
+            )
+            if (page.items.isNotEmpty()) {
                 return page
             }
         }
@@ -918,16 +926,20 @@ object YouTubeInnerTube {
     }
 
     /**
-     * Fetches related / Up Next videos for [videoId] via `/youtubei/v1/next`.
-     * When [context] is provided and the user is signed in, attaches live
-     * YouTube auth headers so Up Next recommendations are personalized.
+     * Fetches related / Up Next videos for [videoId] via `/youtubei/v1/next`
+     * with `playlistId = "RD$videoId"` (YouTube's native Music Auto-Mix radio):
+     * - For songs/music videos, YouTube automatically returns a 25-song curated
+     *   Music Mix so Next (⏭) and Autoplay ALWAYS play real related songs!
+     * - For non-music videos, the RD playlist is empty and we cleanly use the
+     *   regular related `secondaryResults` in the exact same single request.
      */
     fun fetchRelated(videoId: String, context: Context? = null): List<YtItem> {
         val authHeaders = context?.let { WebViewCookieSync.buildYouTubeAuthHeaders(it) }
-        val cfg = if (authHeaders != null) YouTubeSessionConfig.ensureWebConfig() else null
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
         val body = JSONObject().apply {
-            put("context", if (cfg != null) webContext(cfg) else webContext())
+            put("context", webContext(cfg))
             put("videoId", videoId)
+            put("playlistId", "RD$videoId")
         }
         val root = postInnerTube(
             url = "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
@@ -935,37 +947,64 @@ object YouTubeInnerTube {
             authHeaders = authHeaders,
             webConfig = cfg
         ) ?: return emptyList()
-        val items = mutableListOf<YtItem>()
-        val seen = mutableSetOf(videoId)
-        collectItems(root, items, seen)
-        return items.filter { !it.isPlaylist }.take(30)
+        return extractNextUpRecommendations(root, videoId)
     }
 
     /**
-     * Fetches Up Next related videos + engagement metadata (channelId, Like
-     * status, Subscribe status, comment count, and comments continuation token)
-     * in a single `/youtubei/v1/next` call (authenticated when signed in).
+     * Fetches Up Next related videos (music-aware via `RD$videoId` Auto-Mix)
+     * + engagement metadata (channelId, Like/Subscribe status, comment count,
+     * and comments continuation token) in a single `/youtubei/v1/next` call.
      */
     fun fetchWatchData(
         context: Context,
         videoId: String
     ): Pair<List<YtItem>, VideoEngagement?> {
         val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
         val body = JSONObject().apply {
-            put("context", webContext())
+            put("context", webContext(cfg))
             put("videoId", videoId)
+            put("playlistId", "RD$videoId")
         }
         val root = postInnerTube(
             url = "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
             body = body,
-            authHeaders = authHeaders
+            authHeaders = authHeaders,
+            webConfig = cfg
         ) ?: return emptyList<YtItem>() to null
 
-        val items = mutableListOf<YtItem>()
-        val seen = mutableSetOf(videoId)
-        collectItems(root, items, seen)
+        val items = extractNextUpRecommendations(root, videoId)
         val engagement = parseVideoEngagement(root)
-        return items.filter { !it.isPlaylist }.take(30) to engagement
+        return items to engagement
+    }
+
+    /**
+     * Extracts ranked Up Next tracks from a `/next` response:
+     * 1. Curated `RD` Music Mix (`playlistPanelVideoRenderer`) first when present
+     *    (only populated by YouTube for music tracks -> guarantees music-to-music autoplay!).
+     * 2. Regular `secondaryResults` related videos appended after (deduped).
+     */
+    private fun extractNextUpRecommendations(root: JSONObject, currentVideoId: String): List<YtItem> {
+        val items = mutableListOf<YtItem>()
+        val seen = mutableSetOf(currentVideoId)
+        val twoCol = root.optJSONObject("contents")?.optJSONObject("twoColumnWatchNextResults")
+        val mixContents = twoCol
+            ?.optJSONObject("playlist")
+            ?.optJSONObject("playlist")
+            ?.optJSONArray("contents")
+        if (mixContents != null && mixContents.length() > 0) {
+            collectPlaylistVideos(mixContents, items, seen)
+        }
+        val secondary = twoCol
+            ?.optJSONObject("secondaryResults")
+            ?.optJSONObject("secondaryResults")
+            ?.optJSONArray("results")
+        if (secondary != null) {
+            collectItems(secondary, items, seen)
+        } else {
+            collectItems(root, items, seen)
+        }
+        return items.filter { !it.isPlaylist }.take(30)
     }
 
     /** Fetches top comments for a video using its `/next` continuation token. */
@@ -2040,12 +2079,10 @@ object YouTubeInnerTube {
             }
 
             if (authHeaders != null) {
-                // When live WebView CookieManager has the session, sharedOkHttpClient's
-                // CookieJar automatically sends cookies and persists Set-Cookie updates.
-                // Only attach the explicit Cookie header when falling back to cookies.txt.
-                if (useAnonymousClient || !WebViewCookieSync.hasLoggedInYouTubeSession()) {
-                    reqBuilder.header("Cookie", authHeaders.cookieHeader)
-                }
+                // Always attach the complete merged Cookie header (youtube.com +
+                // www.youtube.com + m.youtube.com) and execute via anonClient so
+                // OkHttp's CookieJar never duplicates the header or drops special-char cookies.
+                reqBuilder.header("Cookie", authHeaders.cookieHeader)
                 reqBuilder.header("Authorization", authHeaders.authorizationHeader)
                 reqBuilder.header("X-Origin", "https://www.youtube.com")
                 reqBuilder.header("X-Goog-AuthUser", "0")
@@ -2059,7 +2096,7 @@ object YouTubeInnerTube {
             val req = reqBuilder
                 .post(body.toString().toRequestBody(JSON_MEDIA))
                 .build()
-            val httpClient = if (useAnonymousClient) anonClient else client
+            val httpClient = if (useAnonymousClient || authHeaders != null) anonClient else client
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 val txt = resp.body?.string() ?: return null
@@ -2264,7 +2301,8 @@ object YouTubeInnerTube {
                                 if (seen.add(item.id)) out.add(item)
                             }
                         }
-                        "playlistRenderer", "compactPlaylistRenderer", "gridPlaylistRenderer" -> {
+                        "playlistRenderer", "compactPlaylistRenderer", "gridPlaylistRenderer",
+                        "radioRenderer", "compactRadioRenderer" -> {
                             parsePlaylistRenderer(value as? JSONObject)?.let { item ->
                                 if (seen.add("PL:" + item.id)) out.add(item)
                             }
@@ -2372,7 +2410,10 @@ object YouTubeInnerTube {
         val contentType = obj.optString("contentType")
         val id = obj.optString("contentId")
         if (id.isBlank()) return null
-        val isPlaylist = contentType.contains("PLAYLIST", ignoreCase = true)
+        val isPlaylist = contentType.contains("PLAYLIST", ignoreCase = true) ||
+            contentType.contains("STATION", ignoreCase = true) ||
+            contentType.contains("MIX", ignoreCase = true) ||
+            contentType.contains("RADIO", ignoreCase = true)
         if (!isPlaylist && id.length != 11) return null
 
         val meta = obj.optJSONObject("metadata")

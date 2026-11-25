@@ -3,6 +3,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/graball_bg"
+    android:focusableInTouchMode="true"
     android:orientation="vertical">
 
     <!-- Top Search Bar -->
@@ -193,7 +194,7 @@
             android:textStyle="bold" />
     </LinearLayout>
 
-    <!-- Search Filter Chips (All / Videos / Playlists / Music) -->
+    <!-- Search Filter Chips (shown ONLY while viewing Search results) -->
     <HorizontalScrollView
         android:id="@+id/ytFilterRow"
         android:layout_width="match_parent"
@@ -202,7 +203,8 @@
         android:paddingStart="12dp"
         android:paddingTop="8dp"
         android:paddingEnd="12dp"
-        android:paddingBottom="4dp">
+        android:paddingBottom="4dp"
+        android:visibility="gone">
 
         <LinearLayout
             android:layout_width="wrap_content"

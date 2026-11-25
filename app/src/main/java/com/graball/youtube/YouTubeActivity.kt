@@ -137,11 +137,22 @@ class YouTubeActivity : AppCompatActivity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 val text = s?.toString().orEmpty()
                 searchClear.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+                if (text.isNotEmpty()) {
+                    recentRow.visibility = View.GONE
+                } else if (searchInput.hasFocus()) {
+                    updateRecentChipsVisibility(true)
+                }
                 if (suppressSuggestions) return
                 scheduleSuggestions(text)
             }
             override fun afterTextChanged(s: Editable?) {}
         })
+        searchInput.setOnFocusChangeListener { _, hasFocus ->
+            updateRecentChipsVisibility(hasFocus)
+        }
+        searchInput.setOnClickListener {
+            updateRecentChipsVisibility(true)
+        }
         searchInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEARCH) {
                 triggerSearch()
@@ -153,10 +164,13 @@ class YouTubeActivity : AppCompatActivity() {
         searchClear.setOnClickListener {
             hideSuggestions()
             searchInput.setText("")
+            searchInput.clearFocus()
+            hideKeyboard()
+            recentRow.visibility = View.GONE
             currentQuery = null
             openPlaylist = null
             playlistBanner.visibility = View.GONE
-            refreshRecentChips()
+            updateFilterChipStyles()
             if (currentTab == Tab.EXPLORE) {
                 loadExploreForCurrentFilter()
             }
@@ -504,7 +518,7 @@ class YouTubeActivity : AppCompatActivity() {
                 )
             )
         }
-        filterRow.visibility = if (tab == Tab.EXPLORE) View.VISIBLE else View.GONE
+        updateFilterRowVisibility()
         updateTopicChipsVisibility()
         syncCardStyleForCurrentView()
         when (tab) {
@@ -539,6 +553,11 @@ class YouTubeActivity : AppCompatActivity() {
         var pullStartY = -1f
         var pullReady = false
         recycler.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN && searchInput.hasFocus()) {
+                searchInput.clearFocus()
+                hideKeyboard()
+                recentRow.visibility = View.GONE
+            }
             val canRefresh = currentTab == Tab.EXPLORE && openPlaylist == null
             if (!canRefresh) {
                 pullStartY = -1f
@@ -608,29 +627,20 @@ class YouTubeActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateFilterRowVisibility() {
+        val showSearchFilters = currentTab == Tab.EXPLORE &&
+            openPlaylist == null &&
+            !currentQuery.isNullOrBlank()
+        filterRow.visibility = if (showSearchFilters) View.VISIBLE else View.GONE
+    }
+
     private fun updateFilterChipStyles() {
-        val showSignedInFeeds = isSignedInToYouTube() && currentQuery.isNullOrBlank()
-        chipSubscriptions.visibility = if (showSignedInFeeds) View.VISIBLE else View.GONE
-        chipWatchLater.visibility = if (showSignedInFeeds) View.VISIBLE else View.GONE
-        if (!showSignedInFeeds && signedInFeedMode != SignedInFeedMode.NONE) {
-            signedInFeedMode = SignedInFeedMode.NONE
-        }
+        chipSubscriptions.visibility = View.GONE
+        chipWatchLater.visibility = View.GONE
+        signedInFeedMode = SignedInFeedMode.NONE
+        updateFilterRowVisibility()
         filterChips.forEach { (filter, chip) ->
-            val selected = signedInFeedMode == SignedInFeedMode.NONE && filter == currentFilter
-            chip.setBackgroundResource(
-                if (selected) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
-            )
-            chip.setTextColor(
-                ContextCompat.getColor(
-                    this,
-                    if (selected) R.color.graball_text else R.color.graball_subtext
-                )
-            )
-        }
-        listOf(
-            chipSubscriptions to (signedInFeedMode == SignedInFeedMode.SUBSCRIPTIONS),
-            chipWatchLater to (signedInFeedMode == SignedInFeedMode.WATCH_LATER)
-        ).forEach { (chip, selected) ->
+            val selected = filter == currentFilter
             chip.setBackgroundResource(
                 if (selected) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
             )
@@ -645,14 +655,8 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun updateTopicChipsVisibility() {
-        val show = currentTab == Tab.EXPLORE &&
-            openPlaylist == null &&
-            currentQuery.isNullOrBlank() &&
-            signedInFeedMode == SignedInFeedMode.NONE &&
-            currentFilter == YouTubeInnerTube.SearchFilter.ALL &&
-            isSignedInToYouTube() &&
-            homeTopicChips.isNotEmpty()
-        topicRow.visibility = if (show) View.VISIBLE else View.GONE
+        // Keep the main YouTube Home screen clean and clutter-free.
+        topicRow.visibility = View.GONE
     }
 
     private fun renderHomeTopicChips() {
@@ -706,6 +710,8 @@ class YouTubeActivity : AppCompatActivity() {
         val q = searchInput.text.toString().trim()
         if (q.isEmpty()) return
         hideSuggestions()
+        searchInput.clearFocus()
+        recentRow.visibility = View.GONE
         hideKeyboard()
         // If the user pasted a YouTube video or playlist link directly into
         // the search box, open it immediately instead of running a text search.
@@ -790,7 +796,16 @@ class YouTubeActivity : AppCompatActivity() {
         suggestionsBox.visibility = View.GONE
     }
 
-    private fun refreshRecentChips() {
+    private fun updateRecentChipsVisibility(focused: Boolean) {
+        val show = focused && searchInput.text.isNullOrBlank()
+        if (!show) {
+            recentRow.visibility = View.GONE
+            return
+        }
+        refreshRecentChips(showRow = true)
+    }
+
+    private fun refreshRecentChips(showRow: Boolean = false) {
         val recents = YouTubeStore.getRecentSearches(this).take(8)
         recentContainer.removeAllViews()
         if (recents.isEmpty()) {
@@ -819,7 +834,11 @@ class YouTubeActivity : AppCompatActivity() {
             }
             recentContainer.addView(chip)
         }
-        recentRow.visibility = View.VISIBLE
+        recentRow.visibility = if (showRow && searchInput.hasFocus() && searchInput.text.isNullOrBlank()) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
     }
 
     private fun extractVideoId(input: String): String? {
@@ -943,16 +962,58 @@ class YouTubeActivity : AppCompatActivity() {
         val knownMusicToken = homeTopicChips.firstOrNull {
             it.label.equals("Music", ignoreCase = true)
         }?.continuationToken
+        val previousTopIds = if (forceNetworkRefresh) {
+            lastExploreItems.take(15).map { it.id }.toSet()
+        } else {
+            emptySet()
+        }
+        val previousContinuation = if (forceNetworkRefresh) exploreContinuation else null
 
         io.execute {
-            val page = if (musicMode) {
+            var page = if (musicMode) {
                 YouTubeInnerTube.fetchPersonalizedMusicPage(
                     context = applicationContext,
                     continuationToken = null,
                     knownMusicChipToken = knownMusicToken
                 )
             } else {
-                YouTubeInnerTube.exploreForYouPaged(applicationContext, musicMode = false)
+                YouTubeInnerTube.exploreForYouPaged(
+                    context = applicationContext,
+                    musicMode = false,
+                    forceRefresh = forceNetworkRefresh
+                )
+            }
+            // When the user pulls to refresh, YouTube's desktop FEwhat_to_watch
+            // often serves the same top grid for a few minutes. If >= 50% of the
+            // top cards overlap with what's already on screen, advance to the next
+            // signed-in continuation page so pull-to-refresh ALWAYS reveals fresh
+            // recommendations from your YouTube account!
+            if (forceNetworkRefresh && !musicMode && previousTopIds.isNotEmpty()) {
+                val topBatch = page.items.take(12)
+                val overlap = topBatch.count { it.id in previousTopIds }
+                if (topBatch.isNotEmpty() && overlap * 2 >= topBatch.size) {
+                    val nextTok = previousContinuation?.takeIf { it.isNotBlank() }
+                        ?: page.continuationToken
+                    if (!nextTok.isNullOrBlank()) {
+                        val nextPage = YouTubeInnerTube.fetchSignedInHomePage(
+                            context = applicationContext,
+                            continuationToken = nextTok
+                        )
+                        val unseen = nextPage.items.filter { it.id !in previousTopIds }
+                        if (unseen.size >= 6) {
+                            page = YouTubeInnerTube.FeedPage(
+                                items = unseen,
+                                continuationToken = nextPage.continuationToken ?: page.continuationToken,
+                                chips = page.chips
+                            )
+                        }
+                    } else if (page.items.size > 12) {
+                        val unseen = page.items.filter { it.id !in previousTopIds }
+                        if (unseen.size >= 6) {
+                            page = page.copy(items = unseen + page.items.filter { it.id in previousTopIds })
+                        }
+                    }
+                }
             }
             if (!musicMode && page.items.isNotEmpty()) {
                 YouTubeStore.saveHomeFeedCache(
@@ -1124,7 +1185,7 @@ class YouTubeActivity : AppCompatActivity() {
         openPlaylist = null
         playlistBanner.visibility = View.GONE
         if (currentTab == Tab.EXPLORE) {
-            filterRow.visibility = View.VISIBLE
+            updateFilterRowVisibility()
             updateTopicChipsVisibility()
             syncCardStyleForCurrentView()
             showItems(lastExploreItems, "Search YouTube to find videos or playlists")
@@ -1209,7 +1270,7 @@ class YouTubeActivity : AppCompatActivity() {
         miniTitle.text = current.title
         miniSub.text = when {
             state.isLoading -> "Loading stream…"
-            state.isAudioOnly -> "🎧 BG Audio · ${current.channel}"
+            state.isVideoDisabled -> "🎧 BG Audio · ${current.channel}"
             state.isPlaying -> "Playing · ${current.channel}"
             else -> "Paused · ${current.channel}"
         }

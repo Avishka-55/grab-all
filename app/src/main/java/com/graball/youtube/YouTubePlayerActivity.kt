@@ -32,6 +32,7 @@ import androidx.annotation.OptIn
 import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -97,7 +98,6 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private var inPipMode = false
     private var isControllerVisible = false
     private var explicitBgAudioRequested = false
-    private var autoDisabledVideoForScreenOff = false
     private var normalPlayerHeightPx = 0
 
     private val hideHudRunnable = Runnable {
@@ -280,11 +280,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
             val switchToVideo = intent?.getBooleanExtra("restore_video", false) == true
             if (switchToVideo) {
                 intent?.removeExtra("restore_video")
-            }
-            if (autoDisabledVideoForScreenOff || switchToVideo) {
-                autoDisabledVideoForScreenOff = false
                 svc.setAudioOnlyMode(false)
             }
+            // Mark video surface visible (automatically restores video unless the
+            // user explicitly enabled Audio-Only mode).
+            svc.setVideoSurfaceVisible(true)
         }
         YouTubePlaybackService.addListener(stateListener)
     }
@@ -292,16 +292,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
     override fun onStop() {
         YouTubePlaybackService.removeListener(stateListener)
         playerView.player = null
-        // Battery saver: when app is backgrounded or screen locks (and NOT in PiP
-        // or rotating), disable video track so ExoPlayer streams audio-only!
-        if (!inPipMode && !isChangingConfigurations &&
-            YouTubeStore.isScreenOffAudioOnly(this)
-        ) {
-            val svc = YouTubePlaybackService.instance
-            if (svc != null && !YouTubePlaybackService.currentState.isAudioOnly) {
-                autoDisabledVideoForScreenOff = true
-                svc.setAudioOnlyMode(true)
-            }
+        // Anytime the player UI is no longer visible (display turned off, home
+        // pressed, navigated back to mini-player, or PiP closed) — except during
+        // screen rotation — drop the video track so playback runs audio-only!
+        if (!isChangingConfigurations) {
+            YouTubePlaybackService.instance?.setVideoSurfaceVisible(false)
         }
         super.onStop()
     }
@@ -333,10 +328,29 @@ class YouTubePlayerActivity : AppCompatActivity() {
         newConfig: Configuration
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        val wasInPip = inPipMode
         inPipMode = isInPictureInPictureMode
+        // When the user closes/dismisses the PiP window (X or swipe away),
+        // Android stops the activity BEFORE calling this callback, so lifecycle
+        // state is CREATED (not STARTED/RESUMED). Pause playback cleanly!
+        if (wasInPip && !isInPictureInPictureMode &&
+            !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        ) {
+            YouTubePlaybackService.instance?.let { svc ->
+                svc.pauseIfPlaying()
+                svc.setVideoSurfaceVisible(false)
+            }
+            return
+        }
         applyChromeVisibility()
-        if (!isInPictureInPictureMode && YouTubePlaybackService.instance != null) {
-            playerView.player = YouTubePlaybackService.instance?.getPlayer()
+        val svc = YouTubePlaybackService.instance
+        if (svc != null) {
+            if (isInPictureInPictureMode) {
+                svc.setVideoSurfaceVisible(!YouTubePlaybackService.currentState.isAudioOnly)
+            } else {
+                playerView.player = svc.getPlayer()
+                svc.setVideoSurfaceVisible(true)
+            }
         }
     }
 
@@ -378,6 +392,9 @@ class YouTubePlayerActivity : AppCompatActivity() {
         val svc = YouTubePlaybackService.instance
         if (svc != null && playerView.player == null) {
             playerView.player = svc.getPlayer()
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                svc.setVideoSurfaceVisible(true)
+            }
         }
 
         playerLoadingBox.visibility = if (state.isLoading) View.VISIBLE else View.GONE
@@ -688,6 +705,16 @@ class YouTubePlayerActivity : AppCompatActivity() {
     // ---- PiP & Fullscreen ----
 
     private fun enterPipOrMinimize() {
+        // Never re-enable video if the user explicitly chose Audio-Only mode!
+        if (YouTubePlaybackService.currentState.isAudioOnly) {
+            Toast.makeText(
+                this,
+                "Audio Only — continuing in background",
+                Toast.LENGTH_SHORT
+            ).show()
+            finish()
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             enterPipMode()
         } else {
@@ -702,12 +729,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
     private fun enterPipMode() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (YouTubePlaybackService.currentState.isAudioOnly) {
+            finish()
+            return
+        }
         try {
-            // Ensure video track is active when entering PiP
-            val svc = YouTubePlaybackService.instance
-            if (svc != null && YouTubePlaybackService.currentState.isAudioOnly) {
-                svc.setAudioOnlyMode(false)
-            }
             enterPictureInPictureMode(
                 buildPipParams(YouTubePlaybackService.currentState.isPlaying)
             )
