@@ -117,6 +117,13 @@ object YouTubeJsSolver {
     private val solveLatches = ConcurrentHashMap<String, CountDownLatch>()
     private val solveResults = ConcurrentHashMap<String, String>()
 
+    // Fast in-memory cache of solved `n` tokens so HLS variant/segment URLs
+    // resolve in O(1) without ever double-solving an already-solved token.
+    private val rawToSolvedN = ConcurrentHashMap<String, String>()
+    private val solvedNSet = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    private val HLS_PATH_N_REGEX = Regex("""(/n/)([^/?#]+)""")
+    private val QUERY_N_REGEX = Regex("""([?&]n=)([^&]+)""")
+
     private val jsBridge = object {
         @JavascriptInterface
         fun beginPreprocessed() {
@@ -169,7 +176,7 @@ object YouTubeJsSolver {
             }
         }.apply {
             isDaemon = true
-            priority = Thread.MIN_PRIORITY
+            priority = (Thread.NORM_PRIORITY - 1).coerceAtLeast(Thread.MIN_PRIORITY)
             start()
         }
     }
@@ -179,7 +186,77 @@ object YouTubeJsSolver {
         synchronized(initLock) {
             readyInfo = null
             lastCheckedAtMs = 0L
+            rawToSolvedN.clear()
+            solvedNSet.clear()
         }
+    }
+
+    /**
+     * Solves a single YouTube `n` challenge using the warm V8 solver with an
+     * idempotent cache (already-solved tokens are returned untouched so calling
+     * this on both HLS master playlists and child segments never double-solves).
+     */
+    fun solveSingleN(rawN: String): String? {
+        if (rawN.isBlank()) return null
+        if (rawN in solvedNSet) return rawN
+        rawToSolvedN[rawN]?.let { return it }
+        if (!isWarmInMemory()) return null
+        val solved = solve(emptyList(), listOf(rawN))?.ns?.get(rawN)?.takeIf { it.isNotBlank() }
+            ?: return null
+        if (rawToSolvedN.size > 256) {
+            rawToSolvedN.clear()
+            solvedNSet.clear()
+        }
+        rawToSolvedN[rawN] = solved
+        solvedNSet.add(solved)
+        return solved
+    }
+
+    /**
+     * Rewrites any unsolved YouTube `n` challenge in [url] — supporting both
+     * HLS path-style `/n/<token>/` and progressive query-style `?n=<token>` / `&n=<token>`.
+     * Safe to call repeatedly on the same URL (idempotent).
+     */
+    fun solveUrlNParam(url: String): String {
+        if (!isWarmInMemory()) return url
+        var out = url
+        val pathMatch = HLS_PATH_N_REGEX.find(out)
+        if (pathMatch != null) {
+            val rawEncoded = pathMatch.groupValues[2]
+            val rawDecoded = try {
+                java.net.URLDecoder.decode(rawEncoded, "UTF-8")
+            } catch (_: Exception) {
+                rawEncoded
+            }
+            val solved = solveSingleN(rawDecoded)
+            if (!solved.isNullOrBlank() && solved != rawDecoded) {
+                val enc = try {
+                    java.net.URLEncoder.encode(solved, "UTF-8").replace("+", "%20")
+                } catch (_: Exception) {
+                    solved
+                }
+                out = out.replaceRange(pathMatch.range, pathMatch.groupValues[1] + enc)
+            }
+        }
+        val queryMatch = QUERY_N_REGEX.find(out)
+        if (queryMatch != null) {
+            val rawEncoded = queryMatch.groupValues[2]
+            val rawDecoded = try {
+                java.net.URLDecoder.decode(rawEncoded, "UTF-8")
+            } catch (_: Exception) {
+                rawEncoded
+            }
+            val solved = solveSingleN(rawDecoded)
+            if (!solved.isNullOrBlank() && solved != rawDecoded) {
+                val enc = try {
+                    java.net.URLEncoder.encode(solved, "UTF-8").replace("+", "%20")
+                } catch (_: Exception) {
+                    solved
+                }
+                out = out.replaceRange(queryMatch.range, queryMatch.groupValues[1] + enc)
+            }
+        }
+        return out
     }
 
     /**
@@ -586,7 +663,7 @@ object YouTubeJsSolver {
         }
 
         val done = try {
-            latch.await(30, TimeUnit.SECONDS)
+            latch.await(40, TimeUnit.SECONDS)
         } catch (_: InterruptedException) {
             false
         } finally {

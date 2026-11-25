@@ -12,3 +12,5 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+# Local reference code only — never commit.
+/reference-app-code/

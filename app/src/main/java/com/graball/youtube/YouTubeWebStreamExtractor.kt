@@ -425,6 +425,9 @@ object YouTubeWebStreamExtractor {
                       set: function(val) {
                         try {
                           if (typeof val === 'string' && val.indexOf('googlevideo.com/videoplayback') !== -1) {
+                            if (typeof window.__graballReportMeta === 'function') {
+                              window.__graballReportMeta();
+                            }
                             GrabAllWebExt.onVideoSrc(val);
                           }
                         } catch (e) {}
@@ -469,6 +472,7 @@ object YouTubeWebStreamExtractor {
                   }
                 } catch (e) {}
               }
+              window.__graballReportMeta = reportMeta;
 
               function tick() {
                 try {

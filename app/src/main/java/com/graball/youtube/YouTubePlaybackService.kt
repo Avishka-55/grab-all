@@ -238,6 +238,9 @@ class YouTubePlaybackService : MediaSessionService() {
                             } else {
                                 0L
                             }
+                        if (info != null && error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
+                            evictStreamFromCache(info)
+                        }
                         if (info != null && tryNextStreamMode(info, pos, playImmediately = true)) {
                             return
                         }
@@ -509,7 +512,7 @@ class YouTubePlaybackService : MediaSessionService() {
             fetchingAutoNext = true
             val gen = loadGeneration
             ioExecutor.execute {
-                val related = YouTubeInnerTube.fetchRelated(cur.id)
+                val related = YouTubeInnerTube.fetchRelated(cur.id, applicationContext)
                 mainHandler.post {
                     fetchingAutoNext = false
                     if (gen != loadGeneration) return@post
@@ -756,8 +759,9 @@ class YouTubePlaybackService : MediaSessionService() {
                     broadcastState()
 
                     // Seamless background HD upgrade: if we started fast at 360p muxed
-                    // while V8 was warming up, decrypt adaptiveFormats (480p/720p/1080p+)
-                    // asynchronously so the quality picker unlocks HD and upgrades smoothly!
+                    // while V8 was warming up, resolve full 144p-1080p solved-`/n/`
+                    // web_safari HLS (or adaptive HD) asynchronously so the quality
+                    // picker unlocks all HD resolutions and upgrades smoothly!
                     if (info.videoStreams.none { it.height > 360 } && info.hlsUrl.isNullOrBlank()) {
                         ioExecutor.execute {
                             val upgraded = YouTubeInnerTube.upgradeStreamInfoToHd(
@@ -765,13 +769,14 @@ class YouTubePlaybackService : MediaSessionService() {
                                 info
                             )
                             if (upgraded != null) {
-                                mainHandler.post {
+                                mainHandler.post(Runnable {
                                     if (gen != loadGeneration || currentStreamInfo?.videoId != info.videoId) {
-                                        return@post
+                                        return@Runnable
                                     }
                                     currentStreamInfo = upgraded
+                                    val hasHls = !upgraded.hlsUrl.isNullOrBlank()
                                     val wantsHd = !isAudioOnly &&
-                                        (selectedHeight == null || selectedHeight!! > 360)
+                                        (selectedHeight == null || selectedHeight!! > 360 || hasHls)
                                     if (wantsHd && currentStreamMode == StreamMode.MUXED) {
                                         val p = player
                                         val pos = p?.currentPosition?.coerceAtLeast(0L) ?: 0L
@@ -780,7 +785,7 @@ class YouTubePlaybackService : MediaSessionService() {
                                         prepareStream(upgraded, resumePosMs = pos, playImmediately = wasPlaying)
                                     }
                                     broadcastState()
-                                }
+                                })
                             }
                         }
                     }
@@ -804,7 +809,7 @@ class YouTubePlaybackService : MediaSessionService() {
                     if (queueIndex >= queue.lastIndex && !fetchingAutoNext) {
                         fetchingAutoNext = true
                         ioExecutor.execute {
-                            val related = YouTubeInnerTube.fetchRelated(item.id)
+                            val related = YouTubeInnerTube.fetchRelated(item.id, applicationContext)
                             mainHandler.post {
                                 fetchingAutoNext = false
                                 if (gen == loadGeneration && appendRelatedToQueue(related) > 0) {
@@ -839,6 +844,24 @@ class YouTubePlaybackService : MediaSessionService() {
             if (added >= 15) break
         }
         return added
+    }
+
+    private fun evictStreamFromCache(info: VideoStreamInfo) {
+        val cache = mediaCache ?: return
+        val urls = buildList {
+            info.hlsUrl?.let { add(it) }
+            info.videoStreams.forEach { add(it.url) }
+            info.audioStreams.forEach { add(it.url) }
+            info.muxedStreams.forEach { add(it.url) }
+        }
+        ioExecutor.execute {
+            for (u in urls) {
+                try {
+                    cache.removeResource(u)
+                } catch (_: Exception) {
+                }
+            }
+        }
     }
 
     private fun prepareStream(info: VideoStreamInfo, resumePosMs: Long, playImmediately: Boolean) {

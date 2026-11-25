@@ -253,6 +253,7 @@
                 android:id="@+id/chipMusic"
                 android:layout_width="wrap_content"
                 android:layout_height="30dp"
+                android:layout_marginEnd="8dp"
                 android:background="@drawable/yt_chip_bg"
                 android:gravity="center"
                 android:paddingStart="14dp"
@@ -260,7 +261,53 @@
                 android:text="Music"
                 android:textColor="@color/graball_subtext"
                 android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/chipSubscriptions"
+                android:layout_width="wrap_content"
+                android:layout_height="30dp"
+                android:layout_marginEnd="8dp"
+                android:background="@drawable/yt_chip_bg"
+                android:gravity="center"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="Subscriptions"
+                android:textColor="@color/graball_subtext"
+                android:textSize="12sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/chipWatchLater"
+                android:layout_width="wrap_content"
+                android:layout_height="30dp"
+                android:background="@drawable/yt_chip_bg"
+                android:gravity="center"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="Watch Later"
+                android:textColor="@color/graball_subtext"
+                android:textSize="12sp"
+                android:visibility="gone" />
         </LinearLayout>
+    </HorizontalScrollView>
+
+    <!-- Signed-in YouTube Home Topic Chips (All / Music / Gaming / Live / Mixes ...) -->
+    <HorizontalScrollView
+        android:id="@+id/ytTopicRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="12dp"
+        android:paddingTop="4dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="4dp"
+        android:scrollbars="none"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/ytTopicContainer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal" />
     </HorizontalScrollView>
 
     <!-- Playlist Header Banner (visible when browsing inside a playlist) -->

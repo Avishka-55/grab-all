@@ -38,9 +38,9 @@ object YouTubeInnerTube {
     private const val WEB_CLIENT_VERSION = YouTubeSessionConfig.FALLBACK_WEB_CLIENT_VERSION
     private const val WEB_UA = YouTubeSessionConfig.DESKTOP_WEB_UA
 
-    private const val VISIONOS_CLIENT_VERSION = "1.02"
+    private const val VISIONOS_CLIENT_VERSION = "1.03"
     private const val VISIONOS_UA =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+        "com.google.visionosyoutube/1.03 (RealityDevice17,1; U; CPU visionOS 26_6_1 like Mac OS X; en_US) gzip"
 
     private const val ANDROID_VR_CLIENT_VERSION = "1.61.48"
     private const val ANDROID_VR_UA =
@@ -53,6 +53,8 @@ object YouTubeInnerTube {
     private const val TV_SAMSUNG_CLIENT_VERSION = "5.20260707"
     private const val TV_SAMSUNG_UA =
         "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1"
+
+    private const val WEB_CREATOR_CLIENT_VERSION = "1.20260708.06.00"
 
     private const val WEB_SAFARI_UA =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
@@ -72,6 +74,7 @@ object YouTubeInnerTube {
     fun resetAnonBotBlockHint() {
         lastAnonBotBlockedAtMs = 0L
         lastV8FailedAtMs = 0L
+        YouTubePoTokenProvider.invalidate()
     }
 
     private fun isAnonBotBlockedRecently(): Boolean {
@@ -120,9 +123,16 @@ object YouTubeInnerTube {
         val likes: String
     )
 
+    data class FeedChip(
+        val label: String,
+        val continuationToken: String?,
+        val selected: Boolean = false
+    )
+
     data class FeedPage(
         val items: List<YtItem>,
-        val continuationToken: String? = null
+        val continuationToken: String? = null,
+        val chips: List<FeedChip> = emptyList()
     )
 
     private val client: OkHttpClient
@@ -183,7 +193,17 @@ object YouTubeInnerTube {
         }
     }
 
-    fun search(query: String, filter: SearchFilter = SearchFilter.ALL): List<YtItem> {
+    fun search(query: String, filter: SearchFilter = SearchFilter.ALL): List<YtItem> =
+        searchPaged(query, filter, continuationToken = null).items
+
+    /**
+     * Paginated InnerTube search supporting continuation tokens for infinite scroll.
+     */
+    fun searchPaged(
+        query: String,
+        filter: SearchFilter = SearchFilter.ALL,
+        continuationToken: String? = null
+    ): FeedPage {
         val effectiveQuery = if (filter == SearchFilter.MUSIC && !query.contains("music", true)) {
             "$query music"
         } else {
@@ -191,22 +211,27 @@ object YouTubeInnerTube {
         }
         val body = JSONObject().apply {
             put("context", webContext())
-            put("query", effectiveQuery)
-            if (filter.params != null) {
-                put("params", filter.params)
+            if (!continuationToken.isNullOrBlank()) {
+                put("continuation", continuationToken)
+            } else {
+                put("query", effectiveQuery)
+                if (filter.params != null) {
+                    put("params", filter.params)
+                }
             }
         }
         val root = postInnerTube("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", body)
-            ?: return emptyList()
+            ?: return FeedPage(emptyList(), null)
         val items = mutableListOf<YtItem>()
         collectItems(root, items, seen = mutableSetOf())
-        return if (filter == SearchFilter.PLAYLISTS) {
-            items.filter { it.isPlaylist }
-        } else if (filter == SearchFilter.VIDEOS) {
-            items.filter { !it.isPlaylist }
-        } else {
-            items
+        val filtered = when (filter) {
+            SearchFilter.PLAYLISTS -> items.filter { it.isPlaylist }
+            SearchFilter.VIDEOS -> items.filter { !it.isPlaylist }
+            else -> items
         }
+        val next = findFeedContinuationToken(root)
+            ?.takeIf { it != continuationToken }
+        return FeedPage(items = filtered, continuationToken = next)
     }
 
     fun explore(musicMode: Boolean = false): List<YtItem> {
@@ -273,6 +298,7 @@ object YouTubeInnerTube {
         }
         if (root == null) return FeedPage(emptyList(), null)
 
+        val chips = if (continuationToken == null) extractHomeFilterChips(root) else emptyList()
         collectItems(root, collected, seen)
         var nextToken = findFeedContinuationToken(root)
 
@@ -296,7 +322,131 @@ object YouTubeInnerTube {
         }
 
         val videos = collected.filter { !it.isPlaylist }
-        return FeedPage(items = videos, continuationToken = nextToken)
+        return FeedPage(items = videos, continuationToken = nextToken, chips = chips)
+    }
+
+    /**
+     * Fetches one page of the signed-in user's Subscriptions feed
+     * (`FEsubscriptions`) with continuation paging.
+     */
+    fun fetchSubscriptionsPage(
+        context: Context,
+        continuationToken: String? = null
+    ): FeedPage {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+            ?: return FeedPage(emptyList(), null)
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val body = JSONObject().apply {
+            put("context", webContext(cfg))
+            if (!continuationToken.isNullOrBlank()) {
+                put("continuation", continuationToken)
+            } else {
+                put("browseId", "FEsubscriptions")
+            }
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        ) ?: return FeedPage(emptyList(), null)
+
+        val collected = mutableListOf<YtItem>()
+        collectItems(root, collected, seen = mutableSetOf())
+        val next = findFeedContinuationToken(root)?.takeIf { it != continuationToken }
+        return FeedPage(items = collected.filter { !it.isPlaylist }, continuationToken = next)
+    }
+
+    /**
+     * Fetches one page of the signed-in user's YouTube Watch Later playlist
+     * (`VLWL`) with continuation paging.
+     */
+    fun fetchWatchLaterPage(
+        context: Context,
+        continuationToken: String? = null
+    ): FeedPage {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+            ?: return FeedPage(emptyList(), null)
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val body = JSONObject().apply {
+            put("context", webContext(cfg))
+            if (!continuationToken.isNullOrBlank()) {
+                put("continuation", continuationToken)
+            } else {
+                put("browseId", "VLWL")
+            }
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        ) ?: return FeedPage(emptyList(), null)
+
+        val collected = mutableListOf<YtItem>()
+        val seen = mutableSetOf<String>()
+        collectPlaylistVideos(root, collected, seen)
+        if (collected.isEmpty()) {
+            collectItems(root, collected, seen)
+        }
+        val next = findContinuationToken(root)?.takeIf { it != continuationToken }
+        return FeedPage(items = collected.filter { !it.isPlaylist }, continuationToken = next)
+    }
+
+    /**
+     * Extracts YouTube's personalized Home topic filter chips from
+     * `feedFilterChipBarRenderer` (e.g. All, Music, Gaming, Live, Mixes)
+     * along with each chip's continuation token.
+     */
+    private fun extractHomeFilterChips(root: JSONObject): List<FeedChip> {
+        val out = mutableListOf<FeedChip>()
+        val seenLabels = mutableSetOf<String>()
+
+        fun scan(node: Any?) {
+            when (node) {
+                is JSONObject -> {
+                    if (node.has("feedFilterChipBarRenderer")) {
+                        val bar = node.optJSONObject("feedFilterChipBarRenderer")
+                        val contents = bar?.optJSONArray("contents")
+                        if (contents != null) {
+                            for (i in 0 until contents.length()) {
+                                val chip = contents.optJSONObject(i)
+                                    ?.optJSONObject("chipCloudChipRenderer")
+                                    ?: continue
+                                val label = extractText(chip.optJSONObject("text")).trim()
+                                if (label.isBlank() || !seenLabels.add(label)) continue
+                                val selected = chip.optBoolean("isSelected", false)
+                                val token = chip.optJSONObject("navigationEndpoint")
+                                    ?.optJSONObject("continuationCommand")
+                                    ?.optString("token")
+                                    ?.takeIf { it.isNotBlank() }
+                                // Keep "All" (selected default) or any chip carrying a continuation token
+                                if (selected || token != null) {
+                                    out.add(FeedChip(label = label, continuationToken = token, selected = selected))
+                                }
+                            }
+                        }
+                        return
+                    }
+                    val keys = node.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        if (k in AD_KEYS) continue
+                        scan(node.opt(k))
+                        if (out.isNotEmpty()) return
+                    }
+                }
+                is JSONArray -> {
+                    for (i in 0 until node.length()) {
+                        scan(node.opt(i))
+                        if (out.isNotEmpty()) return
+                    }
+                }
+            }
+        }
+
+        scan(root)
+        return out.take(14)
     }
 
     /** Fallback: scrapes `ytInitialData` JSON directly from logged-in `https://www.youtube.com`. */
@@ -398,7 +548,7 @@ object YouTubeInnerTube {
 
         val tasks = mutableListOf<() -> List<YtItem>>()
         seedVideos.forEach { vid ->
-            tasks += { fetchRelated(vid.id).filter { !it.isPlaylist } }
+            tasks += { fetchRelated(vid.id, context).filter { !it.isPlaylist } }
         }
         if (seedQuery != null) {
             tasks += {
@@ -617,13 +767,24 @@ object YouTubeInnerTube {
         return null
     }
 
-    fun fetchRelated(videoId: String): List<YtItem> {
+    /**
+     * Fetches related / Up Next videos for [videoId] via `/youtubei/v1/next`.
+     * When [context] is provided and the user is signed in, attaches live
+     * YouTube auth headers so Up Next recommendations are personalized.
+     */
+    fun fetchRelated(videoId: String, context: Context? = null): List<YtItem> {
+        val authHeaders = context?.let { WebViewCookieSync.buildYouTubeAuthHeaders(it) }
+        val cfg = if (authHeaders != null) YouTubeSessionConfig.ensureWebConfig() else null
         val body = JSONObject().apply {
-            put("context", webContext())
+            put("context", if (cfg != null) webContext(cfg) else webContext())
             put("videoId", videoId)
         }
-        val root = postInnerTube("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", body)
-            ?: return emptyList()
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        ) ?: return emptyList()
         val items = mutableListOf<YtItem>()
         val seen = mutableSetOf(videoId)
         collectItems(root, items, seen)
@@ -726,80 +887,80 @@ object YouTubeInnerTube {
         var tier1Error: String? = null
 
         if (!hasCookies || !isAnonBotBlockedRecently()) {
-            val androidVr = resolveViaClient(
+            val visionOs = resolveViaClient(
                 videoId = videoId,
-                clientName = "ANDROID_VR",
-                clientVersion = ANDROID_VR_CLIENT_VERSION,
-                clientNameId = "28",
-                userAgent = ANDROID_VR_UA,
+                clientName = "VISIONOS",
+                clientVersion = VISIONOS_CLIENT_VERSION,
+                clientNameId = "101",
+                userAgent = VISIONOS_UA,
                 visitorData = visitorData,
                 extraClientFields = mapOf(
-                    "deviceMake" to "Oculus",
-                    "deviceModel" to "Quest 3",
-                    "androidSdkVersion" to 32,
-                    "osName" to "Android",
-                    "osVersion" to "12L"
+                    "deviceMake" to "Apple",
+                    "deviceModel" to "RealityDevice17,1",
+                    "osName" to "visionOS",
+                    "osVersion" to "26.6.1"
                 )
             )
-            if (androidVr.info != null &&
-                (androidVr.info.audioStreams.isNotEmpty() || androidVr.info.muxedStreams.isNotEmpty())
+            if (visionOs.info != null &&
+                (visionOs.info.audioStreams.isNotEmpty() || visionOs.info.muxedStreams.isNotEmpty())
             ) {
                 lastAnonBotBlockedAtMs = 0L
-                return androidVr
+                return visionOs
             }
-            tier1Error = androidVr.error
+            tier1Error = visionOs.error
 
-            if (hasCookies && looksLikeBotBlock(androidVr.error)) {
+            if (hasCookies && looksLikeBotBlock(visionOs.error)) {
                 lastAnonBotBlockedAtMs = System.currentTimeMillis()
             } else {
-                val ios = resolveViaClient(
+                val androidVr = resolveViaClient(
                     videoId = videoId,
-                    clientName = "IOS",
-                    clientVersion = IOS_CLIENT_VERSION,
-                    clientNameId = "5",
-                    userAgent = IOS_UA,
+                    clientName = "ANDROID_VR",
+                    clientVersion = ANDROID_VR_CLIENT_VERSION,
+                    clientNameId = "28",
+                    userAgent = ANDROID_VR_UA,
                     visitorData = visitorData,
                     extraClientFields = mapOf(
-                        "deviceMake" to "Apple",
-                        "deviceModel" to "iPhone16,2",
-                        "osName" to "iPhone",
-                        "osVersion" to "18.3.2.22D82"
+                        "deviceMake" to "Oculus",
+                        "deviceModel" to "Quest 3",
+                        "androidSdkVersion" to 32,
+                        "osName" to "Android",
+                        "osVersion" to "12L"
                     )
                 )
-                if (ios.info != null &&
-                    (ios.info.audioStreams.isNotEmpty() || ios.info.muxedStreams.isNotEmpty())
+                if (androidVr.info != null &&
+                    (androidVr.info.audioStreams.isNotEmpty() || androidVr.info.muxedStreams.isNotEmpty())
                 ) {
                     lastAnonBotBlockedAtMs = 0L
-                    return ios
+                    return androidVr
                 }
-                if (hasCookies && looksLikeBotBlock(ios.error)) {
+                if (hasCookies && looksLikeBotBlock(androidVr.error)) {
                     lastAnonBotBlockedAtMs = System.currentTimeMillis()
                 } else {
-                    val visionOs = resolveViaClient(
+                    val ios = resolveViaClient(
                         videoId = videoId,
-                        clientName = "VISIONOS",
-                        clientVersion = VISIONOS_CLIENT_VERSION,
-                        clientNameId = "101",
-                        userAgent = VISIONOS_UA,
+                        clientName = "IOS",
+                        clientVersion = IOS_CLIENT_VERSION,
+                        clientNameId = "5",
+                        userAgent = IOS_UA,
                         visitorData = visitorData,
                         extraClientFields = mapOf(
                             "deviceMake" to "Apple",
-                            "deviceModel" to "RealityDevice17,1",
-                            "osName" to "visionOS",
-                            "osVersion" to "26.5.23O471"
+                            "deviceModel" to "iPhone16,2",
+                            "osName" to "iPhone",
+                            "osVersion" to "18.3.2.22D82"
                         )
                     )
-                    if (visionOs.info != null &&
-                        (visionOs.info.audioStreams.isNotEmpty() || visionOs.info.muxedStreams.isNotEmpty())
+                    if (ios.info != null &&
+                        (ios.info.audioStreams.isNotEmpty() || ios.info.muxedStreams.isNotEmpty())
                     ) {
                         lastAnonBotBlockedAtMs = 0L
-                        return visionOs
+                        return ios
                     }
-                    if (hasCookies && looksLikeBotBlock(visionOs.error)) {
+                    if (hasCookies && looksLikeBotBlock(ios.error)) {
                         lastAnonBotBlockedAtMs = System.currentTimeMillis()
                     }
                     if (tier1Error.isNullOrBlank()) {
-                        tier1Error = ios.error ?: visionOs.error
+                        tier1Error = androidVr.error ?: ios.error
                     }
                 }
             }
@@ -880,7 +1041,7 @@ object YouTubeInnerTube {
                     "deviceMake" to "Apple",
                     "deviceModel" to "RealityDevice17,1",
                     "osName" to "visionOS",
-                    "osVersion" to "26.5.23O471"
+                    "osVersion" to "26.6.1"
                 )
             )
             if (visionOs.info != null) {
@@ -936,11 +1097,11 @@ object YouTubeInnerTube {
             }
         }
 
-        // Tier 2A (VPN ultra-fast path, ~0.4s): ONLY run inline when V8 is already
-        // warm in RAM and hasn't failed on this VPN! Never make the user wait on a
-        // cold 5-15s V8 compile — instead pre-warm V8 silently in the background
-        // while Tier 2B starts playing immediately.
-        if (authHeaders != null && !isV8FailedRecently()) {
+        // Tier 2A (VPN ultra-fast HD path, ~0.4s): uses warm V8 solver for
+        // solved-`/n/` `web_safari` 144p-1080p HLS (plus WEB_CREATOR / TVHTML5
+        // adaptive HD when signed in). Never blocks on a cold V8 compile —
+        // pre-warms V8 in background while Tier 2B starts playing immediately.
+        if (!isV8FailedRecently()) {
             if (YouTubeJsSolver.isWarmInMemory()) {
                 onStatus?.invoke("Loading video…")
                 val v8 = resolveViaAuthedV8(
@@ -954,7 +1115,7 @@ object YouTubeInnerTube {
                     return v8
                 }
                 lastV8FailedAtMs = System.currentTimeMillis()
-                Log.d(TAG, "Tier 2A V8 authed InnerTube failed ($videoId: ${v8.error}), cooling down 15m and switching to WebView capture")
+                Log.d(TAG, "Tier 2A V8 InnerTube failed ($videoId: ${v8.error}), cooling down 15m and switching to WebView capture")
             } else {
                 YouTubeJsSolver.prewarmInBackground(context)
             }
@@ -991,67 +1152,119 @@ object YouTubeInnerTube {
     }
 
     /**
-     * Resolves streams directly via cookie-authenticated `TVHTML5` (Samsung
-     * Tizen) + `signatureTimestamp` and decrypts `signatureCipher` + `n`
-     * parameters in <10ms using [YouTubeJsSolver] (Android WebView V8 JIT).
+     * Resolves full HD streams using our warm in-memory V8 JS solver:
+     * - For playback ([includeHlsFallback] == true): tries authenticated
+     *   `web_safari` HLS FIRST (returns full 144p-1080p pre-muxed HLS with no
+     *   PO Token needed; `/n/` is solved via V8), then `WEB_CREATOR` (with PO
+     *   token when available), then `TV_SAMSUNG`, then desktop `WEB`.
+     * - For downloads ([includeHlsFallback] == false): tries `WEB_CREATOR`
+     *   (with PO token) -> `TV_SAMSUNG` -> desktop `WEB` for direct adaptive
+     *   HD MP4/M4A streams.
      */
     private fun resolveViaAuthedV8(
         context: Context,
         videoId: String,
         visitorData: String?,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?,
         includeHlsFallback: Boolean
     ): ResolveResult {
-        var ready = YouTubeJsSolver.ensureReady(context)
+        val ready = YouTubeJsSolver.ensureReady(context)
             ?: return ResolveResult(
                 null,
                 "V8 JS solver unavailable (${YouTubeJsSolver.lastError.ifBlank { "unknown" }})"
             )
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        var effectiveSts = cfg.signatureTimestamp ?: ready.signatureTimestamp
+        var lastReason: String? = null
 
-        var root = requestTvSamsungPlayer(videoId, visitorData, ready.signatureTimestamp, authHeaders)
-        val firstStatus = root?.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
-        val firstReason = root?.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
-        if (firstStatus != "OK" && firstReason.contains("reload", ignoreCase = true)) {
-            // Player signatureTimestamp may have just rotated — refresh once.
-            YouTubeJsSolver.invalidate()
-            ready = YouTubeJsSolver.ensureReady(context, forceRefresh = true)
-                ?: return ResolveResult(null, firstReason.ifBlank { "V8 refresh failed" })
-            root = requestTvSamsungPlayer(videoId, visitorData, ready.signatureTimestamp, authHeaders)
-        }
-
-        if (root != null) {
-            val parsed = parseDecryptedPlayerRoot(videoId, root, TV_SAMSUNG_UA)
-            if (parsed.info != null &&
-                (parsed.info.videoStreams.isNotEmpty() || parsed.info.hlsUrl != null)
-            ) {
-                return parsed
-            }
-            Log.d(TAG, "TVHTML5 V8 parse note ($videoId): ${parsed.error}")
-        }
-
-        // Fallback to authenticated desktop WEB player (returns full 144p-1080p+ adaptiveFormats)
-        val webDesktopRoot = requestWebDesktopPlayer(videoId, visitorData, ready.signatureTimestamp, authHeaders)
-        if (webDesktopRoot != null) {
-            val parsed = parseDecryptedPlayerRoot(videoId, webDesktopRoot, WEB_UA)
-            if (parsed.info != null && parsed.info.videoStreams.isNotEmpty() && parsed.info.audioStreams.isNotEmpty()) {
-                return parsed
-            }
-            Log.d(TAG, "WEB desktop V8 parse note ($videoId): ${parsed.error}")
-        }
-
-        // Optional HLS fallback via authenticated WEB (Safari UA) for playback
+        // 1) Playback priority: `web_safari` returns a full 144p-1080p HLS master
+        //    manifest with no PO token requirement (once `/n/` is solved via V8).
         if (includeHlsFallback) {
-            val webRoot = requestWebSafariPlayer(videoId, visitorData, ready.signatureTimestamp, authHeaders)
-            if (webRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(videoId, webRoot, WEB_SAFARI_UA)
-                if (parsed.info != null) return parsed
+            val safariRoot = requestWebSafariPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+            if (safariRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(videoId, safariRoot, WEB_SAFARI_UA)
+                if (parsed.info != null && !parsed.info.hlsUrl.isNullOrBlank()) {
+                    return parsed
+                }
+                lastReason = parsed.error
+                Log.d(TAG, "WEB_SAFARI HLS note ($videoId): ${parsed.error}")
             }
         }
 
-        val err = root?.optJSONObject("playabilityStatus")?.optString("reason")
-            ?.takeIf { it.isNotBlank() }
-            ?: "Authenticated InnerTube returned no playable formats"
-        return ResolveResult(null, err)
+        // 2) Signed-in `WEB_CREATOR` (with on-device PO token if available)
+        if (authHeaders != null) {
+            val potBinding = videoId
+            val pot = YouTubePoTokenProvider.mintToken(context, videoId, potBinding)
+            val creatorRoot = requestWebCreatorPlayer(
+                videoId = videoId,
+                visitorData = visitorData,
+                signatureTimestamp = effectiveSts,
+                authHeaders = authHeaders,
+                cfg = cfg,
+                poToken = pot?.token
+            )
+            if (creatorRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(videoId, creatorRoot, WEB_UA, poToken = pot?.token)
+                if (parsed.info != null &&
+                    (parsed.info.videoStreams.any { it.height > 360 } && parsed.info.audioStreams.isNotEmpty())
+                ) {
+                    return parsed
+                }
+                if (lastReason.isNullOrBlank()) lastReason = parsed.error
+                Log.d(TAG, "WEB_CREATOR V8 note ($videoId): ${parsed.error}")
+            }
+        }
+
+        // 3) `TV_SAMSUNG` (TVHTML5 5.20260707 with inline no-ad context)
+        if (authHeaders != null) {
+            var tvRoot = requestTvSamsungPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+            val firstStatus = tvRoot?.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+            val firstReason = tvRoot?.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
+            if (firstStatus != "OK" && firstReason.contains("reload", ignoreCase = true)) {
+                YouTubeJsSolver.invalidate()
+                val refreshed = YouTubeJsSolver.ensureReady(context, forceRefresh = true)
+                if (refreshed != null) {
+                    effectiveSts = refreshed.signatureTimestamp
+                    tvRoot = requestTvSamsungPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+                }
+            }
+            if (tvRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(videoId, tvRoot, TV_SAMSUNG_UA)
+                if (parsed.info != null &&
+                    (parsed.info.videoStreams.isNotEmpty() && parsed.info.audioStreams.isNotEmpty())
+                ) {
+                    return parsed
+                }
+                if (lastReason.isNullOrBlank()) lastReason = parsed.error
+                Log.d(TAG, "TVHTML5 V8 note ($videoId): ${parsed.error}")
+            }
+        }
+
+        // 4) Authenticated desktop WEB player (with PO token if available)
+        if (authHeaders != null) {
+            val pot = YouTubePoTokenProvider.mintToken(context, videoId, videoId)
+            val webDesktopRoot = requestWebDesktopPlayer(
+                videoId = videoId,
+                visitorData = visitorData,
+                signatureTimestamp = effectiveSts,
+                authHeaders = authHeaders,
+                cfg = cfg,
+                poToken = pot?.token
+            )
+            if (webDesktopRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(videoId, webDesktopRoot, WEB_UA, poToken = pot?.token)
+                if (parsed.info != null &&
+                    ((includeHlsFallback && !parsed.info.hlsUrl.isNullOrBlank()) ||
+                        (parsed.info.videoStreams.isNotEmpty() && parsed.info.audioStreams.isNotEmpty()))
+                ) {
+                    return parsed
+                }
+                if (lastReason.isNullOrBlank()) lastReason = parsed.error
+                Log.d(TAG, "WEB desktop V8 note ($videoId): ${parsed.error}")
+            }
+        }
+
+        return ResolveResult(null, lastReason?.takeIf { it.isNotBlank() } ?: "Authenticated InnerTube returned no playable formats")
     }
 
     data class DecryptedStreams(
@@ -1077,14 +1290,15 @@ object YouTubeInnerTube {
 
     /**
      * Upgrades a 360p-only [VideoStreamInfo] (e.g. fast-start Tier 2B playback
-     * while V8 was warming up) into full 144p-1080p+ adaptive HD streams in the
-     * background without delaying initial playback start.
+     * while V8 was warming up) into full 144p-1080p+ HD streams (solved-`/n/`
+     * `web_safari` HLS or adaptive HD) in the background without delaying
+     * initial playback start.
      */
     fun upgradeStreamInfoToHd(context: Context, current: VideoStreamInfo): VideoStreamInfo? {
-        val ready = YouTubeJsSolver.ensureReady(context) ?: return null
+        if (YouTubeJsSolver.ensureReady(context) == null) return null
 
         // 1) Fast local path (zero extra InnerTube request): decrypt adaptiveFormats
-        //    already captured from the logged-in m.youtube.com page!
+        //    if the captured mobile page still included ciphered adaptive URLs.
         val pendingJson = current.pendingStreamingDataJson
         if (!pendingJson.isNullOrBlank()) {
             val dec = decryptRawStreamingData(pendingJson)
@@ -1098,8 +1312,9 @@ object YouTubeInnerTube {
             }
         }
 
-        // 2) Authenticated Tier 2A (TVHTML5 -> WEB desktop) using the now-warm V8 solver.
-        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context) ?: return null
+        // 2) Resolve full 144p-1080p solved-`/n/` `web_safari` HLS (or WEB_CREATOR / TVHTML5
+        //    adaptive HD) using the now-warm V8 solver. Works both signed-in and anonymous!
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
         val visitorData = ensureVisitorData()
         val v8 = resolveViaAuthedV8(
             context = context,
@@ -1109,12 +1324,14 @@ object YouTubeInnerTube {
             includeHlsFallback = true
         )
         val hdInfo = v8.info ?: return null
-        if (hdInfo.videoStreams.any { it.height > 360 } && hdInfo.audioStreams.isNotEmpty()) {
+        val hasHlsHd = !hdInfo.hlsUrl.isNullOrBlank()
+        val hasAdaptiveHd = hdInfo.videoStreams.any { it.height > 360 } && hdInfo.audioStreams.isNotEmpty()
+        if (hasHlsHd || hasAdaptiveHd) {
             lastV8FailedAtMs = 0L
             return current.copy(
-                hlsUrl = current.hlsUrl ?: hdInfo.hlsUrl,
-                videoStreams = hdInfo.videoStreams,
-                audioStreams = hdInfo.audioStreams,
+                hlsUrl = hdInfo.hlsUrl ?: current.hlsUrl,
+                videoStreams = hdInfo.videoStreams.ifEmpty { current.videoStreams },
+                audioStreams = hdInfo.audioStreams.ifEmpty { current.audioStreams },
                 muxedStreams = current.muxedStreams.ifEmpty { hdInfo.muxedStreams },
                 userAgent = hdInfo.userAgent,
                 captionTracks = current.captionTracks.ifEmpty { hdInfo.captionTracks },
@@ -1128,9 +1345,9 @@ object YouTubeInnerTube {
         videoId: String,
         visitorData: String?,
         signatureTimestamp: Int,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders,
+        cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig()
     ): JSONObject? {
-        val cfg = YouTubeSessionConfig.ensureWebConfig()
         val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
         val clientObj = JSONObject().apply {
             put("clientName", "TVHTML5")
@@ -1149,8 +1366,62 @@ object YouTubeInnerTube {
             put("playbackContext", JSONObject().apply {
                 put("contentPlaybackContext", JSONObject().apply {
                     put("signatureTimestamp", signatureTimestamp)
+                    put("html5Preference", "HTML5_PREF_WANTS")
+                    put("isInlinePlaybackNoAd", true)
                 })
             })
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+        val baseUrl = if (!cfg.apiKey.isNullOrBlank()) {
+            "https://www.youtube.com/youtubei/v1/player?key=${cfg.apiKey}&prettyPrint=false"
+        } else {
+            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+        }
+        // Do NOT pass desktop WEB's webConfig here so we don't leak WEB's
+        // X-YouTube-Identity-Token header onto a TVHTML5 request.
+        return postInnerTube(
+            url = baseUrl,
+            body = body,
+            userAgent = TV_SAMSUNG_UA,
+            clientNameId = "7",
+            clientVersion = TV_SAMSUNG_CLIENT_VERSION,
+            visitorData = effectiveVisitor,
+            authHeaders = authHeaders,
+            webConfig = null
+        )
+    }
+
+    private fun requestWebCreatorPlayer(
+        videoId: String,
+        visitorData: String?,
+        signatureTimestamp: Int,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders,
+        cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig(),
+        poToken: String? = null
+    ): JSONObject? {
+        val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
+        val clientObj = JSONObject().apply {
+            put("clientName", "WEB_CREATOR")
+            put("clientVersion", WEB_CREATOR_CLIENT_VERSION)
+            put("hl", cfg.hl)
+            put("gl", cfg.gl)
+            if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
+        }
+        val body = JSONObject().apply {
+            put("context", JSONObject().apply { put("client", clientObj) })
+            put("videoId", videoId)
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("signatureTimestamp", signatureTimestamp)
+                    put("html5Preference", "HTML5_PREF_WANTS")
+                })
+            })
+            if (!poToken.isNullOrBlank()) {
+                put("serviceIntegrityDimensions", JSONObject().apply {
+                    put("poToken", poToken)
+                })
+            }
             put("contentCheckOk", true)
             put("racyCheckOk", true)
         }
@@ -1162,12 +1433,12 @@ object YouTubeInnerTube {
         return postInnerTube(
             url = baseUrl,
             body = body,
-            userAgent = TV_SAMSUNG_UA,
-            clientNameId = "7",
-            clientVersion = TV_SAMSUNG_CLIENT_VERSION,
+            userAgent = WEB_UA,
+            clientNameId = "62",
+            clientVersion = WEB_CREATOR_CLIENT_VERSION,
             visitorData = effectiveVisitor,
             authHeaders = authHeaders,
-            webConfig = cfg
+            webConfig = null
         )
     }
 
@@ -1175,9 +1446,10 @@ object YouTubeInnerTube {
         videoId: String,
         visitorData: String?,
         signatureTimestamp: Int,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders,
+        cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig(),
+        poToken: String? = null
     ): JSONObject? {
-        val cfg = YouTubeSessionConfig.ensureWebConfig()
         val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
         val body = JSONObject().apply {
             put("context", webContext(cfg))
@@ -1185,8 +1457,14 @@ object YouTubeInnerTube {
             put("playbackContext", JSONObject().apply {
                 put("contentPlaybackContext", JSONObject().apply {
                     put("signatureTimestamp", signatureTimestamp)
+                    put("html5Preference", "HTML5_PREF_WANTS")
                 })
             })
+            if (!poToken.isNullOrBlank()) {
+                put("serviceIntegrityDimensions", JSONObject().apply {
+                    put("poToken", poToken)
+                })
+            }
             put("contentCheckOk", true)
             put("racyCheckOk", true)
         }
@@ -1206,14 +1484,16 @@ object YouTubeInnerTube {
         videoId: String,
         visitorData: String?,
         signatureTimestamp: Int,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?,
+        cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig()
     ): JSONObject? {
+        val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
         val clientObj = JSONObject().apply {
             put("clientName", "WEB")
-            put("clientVersion", WEB_CLIENT_VERSION)
-            put("hl", "en")
-            put("gl", "US")
-            if (!visitorData.isNullOrBlank()) put("visitorData", visitorData)
+            put("clientVersion", cfg.clientVersion)
+            put("hl", cfg.hl)
+            put("gl", cfg.gl)
+            if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
         }
         val body = JSONObject().apply {
             put("context", JSONObject().apply { put("client", clientObj) })
@@ -1221,6 +1501,7 @@ object YouTubeInnerTube {
             put("playbackContext", JSONObject().apply {
                 put("contentPlaybackContext", JSONObject().apply {
                     put("signatureTimestamp", signatureTimestamp)
+                    put("html5Preference", "HTML5_PREF_WANTS")
                 })
             })
             put("contentCheckOk", true)
@@ -1231,9 +1512,11 @@ object YouTubeInnerTube {
             body = body,
             userAgent = WEB_SAFARI_UA,
             clientNameId = "1",
-            clientVersion = WEB_CLIENT_VERSION,
-            visitorData = visitorData,
-            authHeaders = authHeaders
+            clientVersion = cfg.clientVersion,
+            visitorData = effectiveVisitor,
+            authHeaders = authHeaders,
+            webConfig = cfg,
+            useAnonymousClient = (authHeaders == null)
         )
     }
 
@@ -1249,7 +1532,8 @@ object YouTubeInnerTube {
     private fun parseDecryptedPlayerRoot(
         videoId: String,
         root: JSONObject,
-        userAgent: String
+        userAgent: String,
+        poToken: String? = null
     ): ResolveResult {
         val playStatus = root.optJSONObject("playabilityStatus")
         val status = playStatus?.optString("status") ?: ""
@@ -1260,9 +1544,12 @@ object YouTubeInnerTube {
 
         val streamingData = root.optJSONObject("streamingData")
             ?: return ResolveResult(null, "No streaming data returned")
-        val hlsUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
+        val rawHlsUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
+        // Solve `/n/<challenge>/` path segment inside web_safari HLS master manifest
+        // via warm V8 solver so all 144p-1080p segments return HTTP 200 (not 403).
+        val hlsUrl = rawHlsUrl?.let { YouTubeJsSolver.solveUrlNParam(it) }
 
-        val decrypted = decryptStreamingDataObject(streamingData)
+        val decrypted = decryptStreamingDataObject(streamingData, poToken = poToken)
         val videoStreams = decrypted?.videoStreams.orEmpty()
         val audioStreams = decrypted?.audioStreams.orEmpty()
         val muxedStreams = decrypted?.muxedStreams.orEmpty()
@@ -1300,7 +1587,10 @@ object YouTubeInnerTube {
         )
     }
 
-    private fun decryptStreamingDataObject(streamingData: JSONObject): DecryptedStreams? {
+    private fun decryptStreamingDataObject(
+        streamingData: JSONObject,
+        poToken: String? = null
+    ): DecryptedStreams? {
         val pending = mutableListOf<PendingCipherFormat>()
         val nParamRegex = Regex("""[?&]n=([^&]+)""")
 
@@ -1358,6 +1648,10 @@ object YouTubeInnerTube {
                 val solvedSig = solved.sigs[p.cipherS] ?: continue
                 val sep = if ('?' in finalUrl) "&" else "?"
                 finalUrl = "$finalUrl$sep${p.cipherSp}=${urlEncode(solvedSig)}"
+            }
+            if (!poToken.isNullOrBlank() && !finalUrl.contains("pot=")) {
+                val sep = if ('?' in finalUrl) "&" else "?"
+                finalUrl = "$finalUrl${sep}pot=${urlEncode(poToken)}"
             }
 
             val obj = p.obj

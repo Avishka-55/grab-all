@@ -42,6 +42,7 @@ object YouTubeSessionConfig {
         val pageCl: String?,
         val pageBuildLabel: String?,
         val variantsChecksum: String?,
+        val signatureTimestamp: Int?,
         val fetchedAtMs: Long,
         val wasLoggedIn: Boolean,
         val loginInfoSnapshot: String?
@@ -262,6 +263,8 @@ object YouTubeSessionConfig {
         val pageCl = merged.opt("PAGE_CL")?.toString()?.takeIf { it.isNotBlank() && it != "null" }
         val pageBuildLabel = merged.optString("PAGE_BUILD_LABEL").takeIf { it.isNotBlank() }
         val variantsChecksum = merged.optString("VARIANTS_CHECKSUM").takeIf { it.isNotBlank() }
+        val signatureTimestamp = merged.optInt("STS", 0).takeIf { it > 0 }
+            ?: extractRegexField(html, """"STS"\s*:\s*(\d+)""").toIntOrNull()?.takeIf { it > 0 }
 
         if (apiKey == null && visitorData == null && clientVersion == FALLBACK_WEB_CLIENT_VERSION) {
             return null
@@ -280,6 +283,7 @@ object YouTubeSessionConfig {
             pageCl = pageCl,
             pageBuildLabel = pageBuildLabel,
             variantsChecksum = variantsChecksum,
+            signatureTimestamp = signatureTimestamp,
             fetchedAtMs = System.currentTimeMillis(),
             wasLoggedIn = loggedInNow,
             loginInfoSnapshot = loginTokenNow
@@ -339,6 +343,7 @@ object YouTubeSessionConfig {
             pageCl = null,
             pageBuildLabel = null,
             variantsChecksum = null,
+            signatureTimestamp = null,
             fetchedAtMs = System.currentTimeMillis(),
             wasLoggedIn = loggedInNow,
             loginInfoSnapshot = loginTokenNow

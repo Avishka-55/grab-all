@@ -38,6 +38,8 @@ import java.util.concurrent.Executors
 class YouTubeActivity : AppCompatActivity() {
 
     private enum class Tab { EXPLORE, BOOKMARKS, HISTORY, QUEUE }
+    private enum class SignedInFeedMode { NONE, SUBSCRIPTIONS, WATCH_LATER }
+    private enum class PagingMode { NONE, HOME, SUBSCRIPTIONS, WATCH_LATER, SEARCH }
 
     private lateinit var searchInput: EditText
     private lateinit var searchClear: TextView
@@ -46,6 +48,10 @@ class YouTubeActivity : AppCompatActivity() {
     private lateinit var recentRow: HorizontalScrollView
     private lateinit var recentContainer: LinearLayout
     private lateinit var filterRow: HorizontalScrollView
+    private lateinit var chipSubscriptions: TextView
+    private lateinit var chipWatchLater: TextView
+    private lateinit var topicRow: HorizontalScrollView
+    private lateinit var topicContainer: LinearLayout
     private lateinit var playlistBanner: LinearLayout
     private lateinit var playlistTitle: TextView
     private lateinit var playlistMeta: TextView
@@ -71,11 +77,15 @@ class YouTubeActivity : AppCompatActivity() {
     private var suppressSuggestions = false
     private var currentTab = Tab.EXPLORE
     private var currentFilter = YouTubeInnerTube.SearchFilter.ALL
+    private var signedInFeedMode = SignedInFeedMode.NONE
+    private var pagingMode = PagingMode.NONE
     private var currentQuery: String? = null
     private var openPlaylist: PlaylistDetails? = null
     private var lastExploreItems: MutableList<YtItem> = mutableListOf()
     private var exploreContinuation: String? = null
     private var isLoadingMoreExplore = false
+    private var homeTopicChips: List<YouTubeInnerTube.FeedChip> = emptyList()
+    private var selectedTopicLabel: String? = null
     private var requestGen = 0
     private var lastAccountFingerprint: String? = null
 
@@ -98,6 +108,10 @@ class YouTubeActivity : AppCompatActivity() {
         recentRow = findViewById(R.id.ytRecentRow)
         recentContainer = findViewById(R.id.ytRecentContainer)
         filterRow = findViewById(R.id.ytFilterRow)
+        chipSubscriptions = findViewById(R.id.chipSubscriptions)
+        chipWatchLater = findViewById(R.id.chipWatchLater)
+        topicRow = findViewById(R.id.ytTopicRow)
+        topicContainer = findViewById(R.id.ytTopicContainer)
         playlistBanner = findViewById(R.id.ytPlaylistBanner)
         playlistTitle = findViewById(R.id.ytPlaylistTitle)
         playlistMeta = findViewById(R.id.ytPlaylistMeta)
@@ -181,6 +195,8 @@ class YouTubeActivity : AppCompatActivity() {
         )
         filterChips.forEach { (filter, chip) ->
             chip.setOnClickListener {
+                signedInFeedMode = SignedInFeedMode.NONE
+                selectedTopicLabel = null
                 currentFilter = filter
                 updateFilterChipStyles()
                 val q = currentQuery
@@ -190,6 +206,20 @@ class YouTubeActivity : AppCompatActivity() {
                     loadExploreForCurrentFilter()
                 }
             }
+        }
+        chipSubscriptions.setOnClickListener {
+            signedInFeedMode = SignedInFeedMode.SUBSCRIPTIONS
+            selectedTopicLabel = null
+            currentQuery = null
+            updateFilterChipStyles()
+            loadSignedInSpecialFeed(SignedInFeedMode.SUBSCRIPTIONS)
+        }
+        chipWatchLater.setOnClickListener {
+            signedInFeedMode = SignedInFeedMode.WATCH_LATER
+            selectedTopicLabel = null
+            currentQuery = null
+            updateFilterChipStyles()
+            loadSignedInSpecialFeed(SignedInFeedMode.WATCH_LATER)
         }
 
         findViewById<TextView>(R.id.ytPlaylistPlayAll).setOnClickListener {
@@ -267,23 +297,20 @@ class YouTubeActivity : AppCompatActivity() {
         recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                 if (dy <= 0) return
-                if (currentTab != Tab.EXPLORE || openPlaylist != null || !currentQuery.isNullOrBlank()) return
-                if (currentFilter == YouTubeInnerTube.SearchFilter.PLAYLISTS ||
-                    currentFilter == YouTubeInnerTube.SearchFilter.MUSIC
-                ) {
-                    return
-                }
+                if (currentTab != Tab.EXPLORE || openPlaylist != null) return
+                if (pagingMode == PagingMode.NONE) return
                 if (isLoadingMoreExplore || exploreContinuation.isNullOrBlank()) return
                 val total = layoutManager.itemCount
                 val lastVisible = layoutManager.findLastVisibleItemPosition()
                 if (total > 0 && lastVisible >= total - 6) {
-                    loadMoreExploreRecommendations()
+                    loadMoreCurrentFeed()
                 }
             }
         })
 
         refreshRecentChips()
         updateForYouTabLabel()
+        updateFilterChipStyles()
         val startPlaylistId = intent.getStringExtra("start_playlist_id")?.trim()
         val startQuery = intent.getStringExtra("start_query")?.trim()
         val startMode = intent.getStringExtra("start_mode")
@@ -352,12 +379,18 @@ class YouTubeActivity : AppCompatActivity() {
         val fp = currentAccountFingerprint()
         if (lastAccountFingerprint != null && fp != lastAccountFingerprint) {
             lastAccountFingerprint = fp
+            signedInFeedMode = SignedInFeedMode.NONE
+            homeTopicChips = emptyList()
+            selectedTopicLabel = null
             updateForYouTabLabel()
+            updateFilterChipStyles()
+            updateTopicChipsVisibility()
             if (currentTab == Tab.EXPLORE && currentQuery.isNullOrBlank() && openPlaylist == null) {
                 loadExploreForCurrentFilter()
             }
         } else {
             lastAccountFingerprint = fp
+            updateFilterChipStyles()
         }
         YouTubePlaybackService.addListener(playbackListener)
     }
@@ -464,6 +497,7 @@ class YouTubeActivity : AppCompatActivity() {
             )
         }
         filterRow.visibility = if (tab == Tab.EXPLORE) View.VISIBLE else View.GONE
+        updateTopicChipsVisibility()
         when (tab) {
             Tab.EXPLORE -> {
                 if (lastExploreItems.isNotEmpty()) {
@@ -479,8 +513,14 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun updateFilterChipStyles() {
+        val showSignedInFeeds = isSignedInToYouTube() && currentQuery.isNullOrBlank()
+        chipSubscriptions.visibility = if (showSignedInFeeds) View.VISIBLE else View.GONE
+        chipWatchLater.visibility = if (showSignedInFeeds) View.VISIBLE else View.GONE
+        if (!showSignedInFeeds && signedInFeedMode != SignedInFeedMode.NONE) {
+            signedInFeedMode = SignedInFeedMode.NONE
+        }
         filterChips.forEach { (filter, chip) ->
-            val selected = filter == currentFilter
+            val selected = signedInFeedMode == SignedInFeedMode.NONE && filter == currentFilter
             chip.setBackgroundResource(
                 if (selected) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
             )
@@ -491,6 +531,79 @@ class YouTubeActivity : AppCompatActivity() {
                 )
             )
         }
+        listOf(
+            chipSubscriptions to (signedInFeedMode == SignedInFeedMode.SUBSCRIPTIONS),
+            chipWatchLater to (signedInFeedMode == SignedInFeedMode.WATCH_LATER)
+        ).forEach { (chip, selected) ->
+            chip.setBackgroundResource(
+                if (selected) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+            )
+            chip.setTextColor(
+                ContextCompat.getColor(
+                    this,
+                    if (selected) R.color.graball_text else R.color.graball_subtext
+                )
+            )
+        }
+        updateTopicChipsVisibility()
+    }
+
+    private fun updateTopicChipsVisibility() {
+        val show = currentTab == Tab.EXPLORE &&
+            openPlaylist == null &&
+            currentQuery.isNullOrBlank() &&
+            signedInFeedMode == SignedInFeedMode.NONE &&
+            currentFilter == YouTubeInnerTube.SearchFilter.ALL &&
+            isSignedInToYouTube() &&
+            homeTopicChips.isNotEmpty()
+        topicRow.visibility = if (show) View.VISIBLE else View.GONE
+    }
+
+    private fun renderHomeTopicChips() {
+        topicContainer.removeAllViews()
+        if (homeTopicChips.isEmpty()) {
+            topicRow.visibility = View.GONE
+            return
+        }
+        val activeLabel = selectedTopicLabel
+            ?: homeTopicChips.firstOrNull { it.selected }?.label
+            ?: homeTopicChips.firstOrNull()?.label
+        val dp = resources.displayMetrics.density
+        homeTopicChips.forEach { chipData ->
+            val isSelected = chipData.label == activeLabel
+            val chipView = TextView(this).apply {
+                text = chipData.label
+                textSize = 11.5f
+                setTextColor(
+                    ContextCompat.getColor(
+                        this@YouTubeActivity,
+                        if (isSelected) R.color.graball_text else R.color.graball_subtext
+                    )
+                )
+                setBackgroundResource(
+                    if (isSelected) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+                )
+                setPadding((11 * dp).toInt(), (5 * dp).toInt(), (11 * dp).toInt(), (5 * dp).toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { rightMargin = (6 * dp).toInt() }
+                setOnClickListener {
+                    if (chipData.label == selectedTopicLabel) return@setOnClickListener
+                    if (chipData.continuationToken.isNullOrBlank()) {
+                        selectedTopicLabel = chipData.label
+                        renderHomeTopicChips()
+                        loadExplore(musicMode = false)
+                    } else {
+                        selectedTopicLabel = chipData.label
+                        renderHomeTopicChips()
+                        loadHomeTopicChip(chipData)
+                    }
+                }
+            }
+            topicContainer.addView(chipView)
+        }
+        updateTopicChipsVisibility()
     }
 
     private fun triggerSearch() {
@@ -627,27 +740,37 @@ class YouTubeActivity : AppCompatActivity() {
     private fun runSearch(query: String) {
         val gen = ++requestGen
         openPlaylist = null
+        signedInFeedMode = SignedInFeedMode.NONE
+        pagingMode = PagingMode.SEARCH
         exploreContinuation = null
         isLoadingMoreExplore = false
         playlistBanner.visibility = View.GONE
+        updateFilterChipStyles()
         setLoading(true)
         val filter = currentFilter
         io.execute {
-            val results = YouTubeInnerTube.search(query, filter)
+            val page = YouTubeInnerTube.searchPaged(query, filter, continuationToken = null)
             runOnUiThread {
                 if (gen != requestGen || isFinishing) return@runOnUiThread
                 setLoading(false)
-                lastExploreItems = results.toMutableList()
-                showItems(results, "No results for \"$query\"")
+                lastExploreItems = page.items.toMutableList()
+                exploreContinuation = page.continuationToken
+                showItems(page.items, "No results for \"$query\"")
             }
         }
     }
 
     private fun loadExploreForCurrentFilter() {
+        if (signedInFeedMode != SignedInFeedMode.NONE) {
+            loadSignedInSpecialFeed(signedInFeedMode)
+            return
+        }
         if (currentFilter == YouTubeInnerTube.SearchFilter.PLAYLISTS) {
             val gen = ++requestGen
+            pagingMode = PagingMode.NONE
             exploreContinuation = null
             isLoadingMoreExplore = false
+            updateTopicChipsVisibility()
             setLoading(true)
             io.execute {
                 val results = YouTubeInnerTube.explorePlaylists()
@@ -667,10 +790,12 @@ class YouTubeActivity : AppCompatActivity() {
 
     private fun loadExplore(musicMode: Boolean) {
         val gen = ++requestGen
+        pagingMode = if (!musicMode && isSignedInToYouTube()) PagingMode.HOME else PagingMode.NONE
         exploreContinuation = null
         isLoadingMoreExplore = false
         setLoading(true)
         updateForYouTabLabel()
+        updateFilterChipStyles()
         io.execute {
             val page = YouTubeInnerTube.exploreForYouPaged(applicationContext, musicMode)
             runOnUiThread {
@@ -678,6 +803,16 @@ class YouTubeActivity : AppCompatActivity() {
                 setLoading(false)
                 lastExploreItems = page.items.toMutableList()
                 exploreContinuation = page.continuationToken
+                if (!musicMode && page.chips.isNotEmpty()) {
+                    homeTopicChips = page.chips
+                    if (selectedTopicLabel == null) {
+                        selectedTopicLabel = page.chips.firstOrNull { it.selected }?.label
+                            ?: page.chips.firstOrNull()?.label
+                    }
+                    renderHomeTopicChips()
+                } else {
+                    updateTopicChipsVisibility()
+                }
                 if (currentTab == Tab.EXPLORE && openPlaylist == null) {
                     showItems(lastExploreItems, "Search above to find any YouTube video or playlist")
                 }
@@ -685,13 +820,82 @@ class YouTubeActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadMoreExploreRecommendations() {
-        val token = exploreContinuation ?: return
-        if (isLoadingMoreExplore) return
-        val gen = requestGen
-        isLoadingMoreExplore = true
+    private fun loadHomeTopicChip(chip: YouTubeInnerTube.FeedChip) {
+        val token = chip.continuationToken ?: return
+        val gen = ++requestGen
+        pagingMode = PagingMode.HOME
+        exploreContinuation = null
+        isLoadingMoreExplore = false
+        setLoading(true)
         io.execute {
             val page = YouTubeInnerTube.fetchSignedInHomePage(applicationContext, continuationToken = token)
+            runOnUiThread {
+                if (gen != requestGen || isFinishing) return@runOnUiThread
+                setLoading(false)
+                lastExploreItems = page.items.toMutableList()
+                exploreContinuation = page.continuationToken
+                if (currentTab == Tab.EXPLORE && openPlaylist == null) {
+                    showItems(lastExploreItems, "No videos in ${chip.label}")
+                }
+            }
+        }
+    }
+
+    private fun loadSignedInSpecialFeed(mode: SignedInFeedMode) {
+        val gen = ++requestGen
+        openPlaylist = null
+        playlistBanner.visibility = View.GONE
+        pagingMode = when (mode) {
+            SignedInFeedMode.SUBSCRIPTIONS -> PagingMode.SUBSCRIPTIONS
+            SignedInFeedMode.WATCH_LATER -> PagingMode.WATCH_LATER
+            SignedInFeedMode.NONE -> PagingMode.NONE
+        }
+        exploreContinuation = null
+        isLoadingMoreExplore = false
+        setLoading(true)
+        io.execute {
+            val page = when (mode) {
+                SignedInFeedMode.SUBSCRIPTIONS -> YouTubeInnerTube.fetchSubscriptionsPage(applicationContext)
+                SignedInFeedMode.WATCH_LATER -> YouTubeInnerTube.fetchWatchLaterPage(applicationContext)
+                SignedInFeedMode.NONE -> YouTubeInnerTube.FeedPage(emptyList(), null)
+            }
+            runOnUiThread {
+                if (gen != requestGen || isFinishing) return@runOnUiThread
+                setLoading(false)
+                lastExploreItems = page.items.toMutableList()
+                exploreContinuation = page.continuationToken
+                val emptyMsg = when (mode) {
+                    SignedInFeedMode.SUBSCRIPTIONS -> "No subscription videos found"
+                    SignedInFeedMode.WATCH_LATER -> "Your Watch Later list is empty"
+                    SignedInFeedMode.NONE -> "No videos found"
+                }
+                if (currentTab == Tab.EXPLORE && openPlaylist == null) {
+                    showItems(lastExploreItems, emptyMsg)
+                }
+            }
+        }
+    }
+
+    private fun loadMoreCurrentFeed() {
+        val token = exploreContinuation ?: return
+        val mode = pagingMode
+        if (isLoadingMoreExplore || mode == PagingMode.NONE) return
+        val gen = requestGen
+        val activeQuery = currentQuery
+        val activeFilter = currentFilter
+        isLoadingMoreExplore = true
+        io.execute {
+            val page = when (mode) {
+                PagingMode.HOME -> YouTubeInnerTube.fetchSignedInHomePage(applicationContext, continuationToken = token)
+                PagingMode.SUBSCRIPTIONS -> YouTubeInnerTube.fetchSubscriptionsPage(applicationContext, continuationToken = token)
+                PagingMode.WATCH_LATER -> YouTubeInnerTube.fetchWatchLaterPage(applicationContext, continuationToken = token)
+                PagingMode.SEARCH -> if (!activeQuery.isNullOrBlank()) {
+                    YouTubeInnerTube.searchPaged(activeQuery, activeFilter, continuationToken = token)
+                } else {
+                    YouTubeInnerTube.FeedPage(emptyList(), null)
+                }
+                PagingMode.NONE -> YouTubeInnerTube.FeedPage(emptyList(), null)
+            }
             runOnUiThread {
                 if (gen != requestGen || isFinishing) {
                     isLoadingMoreExplore = false
@@ -699,7 +903,7 @@ class YouTubeActivity : AppCompatActivity() {
                 }
                 isLoadingMoreExplore = false
                 val existingIds = lastExploreItems.map { it.id }.toHashSet()
-                val fresh = page.items.filter { !it.isPlaylist && existingIds.add(it.id) }
+                val fresh = page.items.filter { existingIds.add(it.id) }
                 exploreContinuation = if (page.continuationToken != token && fresh.isNotEmpty()) {
                     page.continuationToken
                 } else {
@@ -707,7 +911,7 @@ class YouTubeActivity : AppCompatActivity() {
                 }
                 if (fresh.isNotEmpty()) {
                     lastExploreItems.addAll(fresh)
-                    if (currentTab == Tab.EXPLORE && openPlaylist == null && currentQuery.isNullOrBlank()) {
+                    if (currentTab == Tab.EXPLORE && openPlaylist == null) {
                         adapter.appendItems(fresh)
                     }
                 }
@@ -729,6 +933,7 @@ class YouTubeActivity : AppCompatActivity() {
                 }
                 openPlaylist = details
                 filterRow.visibility = View.GONE
+                topicRow.visibility = View.GONE
                 playlistBanner.visibility = View.VISIBLE
                 playlistTitle.text = details.title
                 playlistMeta.text = listOf(details.channel, "${details.items.size} videos")
@@ -744,6 +949,7 @@ class YouTubeActivity : AppCompatActivity() {
         playlistBanner.visibility = View.GONE
         if (currentTab == Tab.EXPLORE) {
             filterRow.visibility = View.VISIBLE
+            updateTopicChipsVisibility()
             showItems(lastExploreItems, "Search YouTube to find videos or playlists")
         } else {
             selectTab(currentTab)

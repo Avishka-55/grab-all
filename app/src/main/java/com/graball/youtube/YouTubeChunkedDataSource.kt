@@ -53,20 +53,21 @@ class YouTubeChunkedDataSource(
     }
 
     override fun open(dataSpec: DataSpec): Long {
-        originalSpec = dataSpec
+        val effectiveSpec = rewriteGoogleVideoNChallenge(dataSpec)
+        originalSpec = effectiveSpec
         chunkedMode = false
         upstreamOpen = false
 
-        val uri = dataSpec.uri
-        if (!shouldChunk(uri, dataSpec)) {
-            return openUnchunked(dataSpec)
+        val uri = effectiveSpec.uri
+        if (!shouldChunk(uri, effectiveSpec)) {
+            return openUnchunked(effectiveSpec)
         }
 
         val urlStr = uri.toString()
         val clen = extractClen(urlStr)
-        val start = dataSpec.position.coerceAtLeast(0L)
-        val requestedEnd = if (dataSpec.length != C.LENGTH_UNSET.toLong() && dataSpec.length > 0L) {
-            start + dataSpec.length
+        val start = effectiveSpec.position.coerceAtLeast(0L)
+        val requestedEnd = if (effectiveSpec.length != C.LENGTH_UNSET.toLong() && effectiveSpec.length > 0L) {
+            start + effectiveSpec.length
         } else {
             C.LENGTH_UNSET.toLong()
         }
@@ -96,7 +97,7 @@ class YouTubeChunkedDataSource(
             if (e.responseCode == 400 || e.responseCode == 403) {
                 // Edge server rejected synthetic &range= query -> fall back to plain upstream open.
                 chunkedMode = false
-                return openUnchunked(dataSpec)
+                return openUnchunked(effectiveSpec)
             }
             throw e
         }
@@ -106,6 +107,25 @@ class YouTubeChunkedDataSource(
         } else {
             C.LENGTH_UNSET.toLong()
         }
+    }
+
+    /**
+     * Dynamically solves YouTube `/n/<challenge>/` path segments inside
+     * `googlevideo.com` HLS master/variant playlists and media segments using
+     * [YouTubeJsSolver]'s O(1) idempotent cache so `web_safari` 144p-1080p HLS
+     * segments never 403.
+     */
+    private fun rewriteGoogleVideoNChallenge(dataSpec: DataSpec): DataSpec {
+        val uri = dataSpec.uri
+        val host = uri.host?.lowercase() ?: return dataSpec
+        if (!host.endsWith(".googlevideo.com")) return dataSpec
+        val rawUrl = uri.toString()
+        if (!rawUrl.contains("/n/")) return dataSpec
+        val solvedUrl = YouTubeJsSolver.solveUrlNParam(rawUrl)
+        if (solvedUrl == rawUrl) return dataSpec
+        return dataSpec.buildUpon()
+            .setUri(Uri.parse(solvedUrl))
+            .build()
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
@@ -219,10 +239,14 @@ class YouTubeChunkedDataSource(
         val host = uri.host?.lowercase() ?: return false
         if (!host.endsWith(".googlevideo.com")) return false
         val path = uri.path ?: return false
-        if (!path.contains("/videoplayback")) return false
+        // Only chunk query-style progressive/adaptive /videoplayback? URLs;
+        // never chunk HLS manifests (/api/manifest/...) or HLS path-style
+        // segments (/videoplayback/id/.../file/seg.ts).
+        if (path != "/videoplayback" || uri.query.isNullOrBlank()) return false
         val url = uri.toString()
         if (url.contains("range=") ||
             url.contains(".m3u8") ||
+            url.contains(".ts") ||
             url.contains("source=yt_live_broadcast") ||
             url.contains("source=yt_premiere_broadcast") ||
             url.contains("live=1") ||
