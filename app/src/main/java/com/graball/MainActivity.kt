@@ -36,6 +36,7 @@ import com.graball.engine.FastYouTubeDownloader
 import com.graball.engine.LinkDetector
 import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
+import com.graball.youtube.FloatingAudioController
 import com.graball.youtube.PlaylistPickerDialog
 import com.graball.youtube.YouTubeActivity
 import com.graball.youtube.YouTubePlaybackService
@@ -57,6 +58,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var grabQuickRow: LinearLayout
     private lateinit var grabWatchButton: TextView
     private lateinit var grabSecondButton: TextView
+    private lateinit var floatingAudio: FloatingAudioController
     /** Top tabs (Search is this screen); kept to re-select Search on return. */
     private lateinit var mainTabs: List<TextView>
     /** What the open Grab panel holds; video panels force single. */
@@ -405,6 +407,7 @@ class MainActivity : AppCompatActivity() {
             linkInput.setText("")
             Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
         }
+        floatingAudio = FloatingAudioController(this)
         handleShareIntent(intent)
         maybeCheckAppUpdate()
     }
@@ -514,6 +517,7 @@ class MainActivity : AppCompatActivity() {
         }
         hintHandler.removeCallbacks(hintCycler)
         hintHandler.postDelayed(hintCycler, 2800L)
+        floatingAudio.attach()
     }
 
     @Suppress("DEPRECATION")
@@ -527,6 +531,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        floatingAudio.detach()
         hintHandler.removeCallbacks(hintCycler)
         super.onPause()
     }

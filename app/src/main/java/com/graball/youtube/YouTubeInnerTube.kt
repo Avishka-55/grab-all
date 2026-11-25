@@ -94,7 +94,31 @@ object YouTubeInnerTube {
         val isLiked: Boolean,
         val likeCount: String,
         val commentCount: String,
-        val commentsToken: String?
+        val commentsToken: String?,
+        val subscriberCount: String = "",
+        val channelAvatarUrl: String = "",
+        val topCommentPreview: String = ""
+    )
+
+    data class CommentsPage(
+        val comments: List<YtComment>,
+        val continuationToken: String?
+    )
+
+    enum class ChannelTab(val params: String) {
+        VIDEOS("EgZ2aWRlb3PyBgQKAjoA"),
+        PLAYLISTS("EglwbGF5bGlzdHPyBgQKAkIA")
+    }
+
+    data class ChannelPage(
+        val channelId: String,
+        val title: String,
+        val handle: String,
+        val subscriberCount: String,
+        val avatarUrl: String,
+        val isSubscribed: Boolean,
+        val items: List<YtItem>,
+        val continuationToken: String?
     )
 
     data class YtComment(
@@ -273,10 +297,15 @@ object YouTubeInnerTube {
 
         val collected = mutableListOf<YtItem>()
         val seen = mutableSetOf<String>()
-        var root = requestPage(continuationToken)
-        if (root == null && continuationToken == null) {
-            // Fallback to ytInitialData embedded in https://www.youtube.com
-            root = fetchHomeInitialDataFromWebPage(cfg)
+        // For initial load & pull-to-refresh (continuationToken == null), fetch
+        // live ytInitialData directly from https://www.youtube.com with the user's
+        // session cookies first — matching the official YouTube homepage (fresh
+        // videos, playlists, mixes, and randomized refresh every time!), then
+        // falling back to InnerTube /browse (FEwhat_to_watch) if needed.
+        var root = if (continuationToken == null) {
+            fetchHomeInitialDataFromWebPage(cfg, authHeaders) ?: requestPage(null)
+        } else {
+            requestPage(continuationToken)
         }
         if (root == null) return FeedPage(emptyList(), null)
 
@@ -599,18 +628,24 @@ object YouTubeInnerTube {
         return out.take(14)
     }
 
-    /** Fallback: scrapes `ytInitialData` JSON directly from logged-in `https://www.youtube.com`. */
+    /** Scrapes live `ytInitialData` JSON directly from signed-in `https://www.youtube.com`. */
     private fun fetchHomeInitialDataFromWebPage(
-        cfg: YouTubeSessionConfig.WebClientConfig
+        cfg: YouTubeSessionConfig.WebClientConfig,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null
     ): JSONObject? {
         return try {
-            val req = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url("https://www.youtube.com/?hl=${cfg.hl}&persist_hl=1")
                 .header("User-Agent", WEB_UA)
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header("Accept-Language", "${cfg.hl}-${cfg.gl},${cfg.hl};q=0.9")
+                .header("Cache-Control", "no-cache")
                 .get()
-                .build()
-            client.newCall(req).execute().use { resp ->
+            if (authHeaders != null) {
+                reqBuilder.header("Cookie", authHeaders.cookieHeader)
+            }
+            val httpClient = if (authHeaders != null) anonClient else client
+            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 val html = resp.body?.string() ?: return null
                 val marker = "var ytInitialData = "
@@ -1007,23 +1042,164 @@ object YouTubeInnerTube {
         return items.filter { !it.isPlaylist }.take(30)
     }
 
-    /** Fetches top comments for a video using its `/next` continuation token. */
-    fun fetchComments(context: Context, continuationToken: String): List<YtComment> {
+    /** Fetches paginated comments for a video using its `/next` continuation token. */
+    fun fetchCommentsPaged(context: Context, continuationToken: String): CommentsPage {
         val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
         val body = JSONObject().apply {
-            put("context", webContext())
+            put("context", webContext(cfg))
             put("continuation", continuationToken)
         }
         val root = postInnerTube(
             url = "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
             body = body,
-            authHeaders = authHeaders
-        ) ?: return emptyList()
+            authHeaders = authHeaders,
+            webConfig = cfg
+        ) ?: return CommentsPage(emptyList(), null)
 
         val out = mutableListOf<YtComment>()
         val seen = mutableSetOf<String>()
         collectComments(root, out, seen)
-        return out.take(40)
+        val next = findContinuationToken(root)?.takeIf { it != continuationToken }
+        return CommentsPage(comments = out.take(40), continuationToken = next)
+    }
+
+    /** Fetches top comments for a video using its `/next` continuation token. */
+    fun fetchComments(context: Context, continuationToken: String): List<YtComment> =
+        fetchCommentsPaged(context, continuationToken).comments
+
+    /**
+     * Fetches a YouTube Channel's Videos or Playlists tab (with header metadata,
+     * live subscription state, and infinite-scroll continuation token).
+     */
+    fun fetchChannelTab(
+        context: Context,
+        channelId: String,
+        tab: ChannelTab = ChannelTab.VIDEOS,
+        continuationToken: String? = null
+    ): ChannelPage? {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+
+        fun requestChannel(useParams: Boolean): JSONObject? {
+            val body = JSONObject().apply {
+                put("context", webContext(cfg))
+                if (!continuationToken.isNullOrBlank()) {
+                    put("continuation", continuationToken)
+                } else {
+                    put("browseId", channelId)
+                    if (useParams) put("params", tab.params)
+                }
+            }
+            return postInnerTube(
+                url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+                body = body,
+                authHeaders = authHeaders,
+                webConfig = cfg
+            )
+        }
+
+        var root = requestChannel(useParams = true)
+        if (root == null && continuationToken.isNullOrBlank()) {
+            root = requestChannel(useParams = false)
+        }
+        if (root == null) return null
+
+        var title = ""
+        var handle = ""
+        var subCount = ""
+        var avatar = ""
+        var isSubscribed = false
+
+        val header = root.optJSONObject("header")
+        val c4 = header?.optJSONObject("c4TabbedHeaderRenderer")
+        if (c4 != null) {
+            title = c4.optString("title").ifBlank { title }
+            handle = extractText(c4.optJSONObject("channelHandleText")).ifBlank { handle }
+            subCount = extractText(c4.optJSONObject("subscriberCountText")).ifBlank { subCount }
+            avatar = pickThumb(c4.optJSONObject("avatar")).ifBlank { avatar }
+            val subBtn = c4.optJSONObject("subscribeButton")?.optJSONObject("subscribeButtonRenderer")
+            if (subBtn != null) {
+                isSubscribed = subBtn.optBoolean("subscribed", isSubscribed)
+            }
+        }
+        val pageHdr = header?.optJSONObject("pageHeaderRenderer")
+        if (pageHdr != null) {
+            title = pageHdr.optString("pageTitle").ifBlank { title }
+            val vm = pageHdr.optJSONObject("content")?.optJSONObject("pageHeaderViewModel")
+            if (vm != null) {
+                title = vm.optJSONObject("title")?.optJSONObject("dynamicTextViewModel")
+                    ?.optJSONObject("text")?.optString("content").orEmpty().ifBlank { title }
+                val metaRows = vm.optJSONObject("metadata")?.optJSONObject("contentMetadataViewModel")
+                    ?.optJSONArray("metadataRows")
+                if (metaRows != null) {
+                    for (r in 0 until metaRows.length()) {
+                        val parts = metaRows.optJSONObject(r)?.optJSONArray("metadataParts") ?: continue
+                        for (p in 0 until parts.length()) {
+                            val txt = parts.optJSONObject(p)?.optJSONObject("text")?.optString("content").orEmpty().trim()
+                            if (txt.startsWith("@") && handle.isBlank()) handle = txt
+                            else if (txt.contains("subscriber", ignoreCase = true) && subCount.isBlank()) subCount = txt
+                        }
+                    }
+                }
+                val avSources = vm.optJSONObject("image")
+                    ?.optJSONObject("decoratedAvatarViewModel")
+                    ?.optJSONObject("avatar")
+                    ?.optJSONObject("avatarViewModel")
+                    ?.optJSONObject("image")
+                    ?.optJSONArray("sources")
+                if (avSources != null && avSources.length() > 0 && avatar.isBlank()) {
+                    avatar = avSources.optJSONObject(avSources.length() - 1)?.optString("url").orEmpty()
+                }
+            }
+        }
+        // Check live subscriptionStateEntity mutations
+        fun scanSubState(node: Any?) {
+            when (node) {
+                is JSONObject -> {
+                    if (node.has("subscriptionStateEntity")) {
+                        val se = node.optJSONObject("subscriptionStateEntity")
+                        if (se != null && se.has("subscribed")) {
+                            isSubscribed = se.optBoolean("subscribed", isSubscribed)
+                        }
+                    }
+                    if (node.has("subscribeButtonRenderer")) {
+                        val sb = node.optJSONObject("subscribeButtonRenderer")
+                        if (sb != null && sb.optString("channelId") == channelId) {
+                            isSubscribed = sb.optBoolean("subscribed", isSubscribed)
+                        }
+                    }
+                    val keys = node.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        if (k in AD_KEYS) continue
+                        scanSubState(node.opt(k))
+                    }
+                }
+                is JSONArray -> {
+                    for (i in 0 until node.length()) scanSubState(node.opt(i))
+                }
+            }
+        }
+        scanSubState(root)
+
+        val rawItems = mutableListOf<YtItem>()
+        collectItems(root, rawItems, seen = mutableSetOf())
+        val items = when (tab) {
+            ChannelTab.VIDEOS -> rawItems.filter { !it.isPlaylist }
+            ChannelTab.PLAYLISTS -> rawItems.filter { it.isPlaylist }
+        }
+        val next = findFeedContinuationToken(root)?.takeIf { it != continuationToken }
+        return ChannelPage(
+            channelId = channelId,
+            title = title.ifBlank { "Channel" },
+            handle = handle,
+            subscriberCount = subCount,
+            avatarUrl = avatar,
+            isSubscribed = isSubscribed,
+            items = items,
+            continuationToken = next
+        )
     }
 
     /** Likes or removes like on a video using the user's on-device YouTube session. */
@@ -2117,11 +2293,15 @@ object YouTubeInnerTube {
     private fun parseVideoEngagement(root: JSONObject): VideoEngagement? {
         var channelId: String? = null
         var channelName = ""
+        var subscriberCount = ""
+        var channelAvatarUrl = ""
         var isSubscribed = false
         var isLiked = false
+        var expectedLikeEntityKey: String? = null
         var likeCount = ""
         var commentCount = ""
         var commentsToken: String? = null
+        var topCommentPreview = ""
 
         fun scan(node: Any?) {
             when (node) {
@@ -2131,6 +2311,8 @@ object YouTubeInnerTube {
                         val owner = sec?.optJSONObject("owner")?.optJSONObject("videoOwnerRenderer")
                         if (owner != null) {
                             channelName = extractText(owner.optJSONObject("title")).ifBlank { channelName }
+                            subscriberCount = extractText(owner.optJSONObject("subscriberCountText")).ifBlank { subscriberCount }
+                            channelAvatarUrl = pickThumb(owner.optJSONObject("thumbnail")).ifBlank { channelAvatarUrl }
                             val cid = owner.optJSONObject("navigationEndpoint")
                                 ?.optJSONObject("browseEndpoint")
                                 ?.optString("browseId")
@@ -2150,21 +2332,26 @@ object YouTubeInnerTube {
                             ?.optJSONObject("likeButtonViewModel")
                         val toggle = likeVm?.optJSONObject("toggleButtonViewModel")
                             ?.optJSONObject("toggleButtonViewModel")
-                        val toggled = toggle?.optBoolean("isTogglingDisabled", false) == false
                         val defBtn = toggle?.optJSONObject("defaultButtonViewModel")
                             ?.optJSONObject("buttonViewModel")
                         val title = defBtn?.optString("title").orEmpty()
                         if (title.isNotBlank() && likeCount.isBlank()) {
                             likeCount = title
                         }
-                        val statusEntity = likeVm?.optString("likeStatusEntityKey").orEmpty()
-                        if (toggled && statusEntity.isNotBlank()) {
-                            // Resolved below from frameworkUpdates if present
+                        val statusEntityKey = likeVm?.optString("likeStatusEntityKey").orEmpty()
+                        if (statusEntityKey.isNotBlank() && expectedLikeEntityKey == null) {
+                            expectedLikeEntityKey = statusEntityKey
                         }
+                        val inlineStatus = likeVm?.optJSONObject("likeStatusEntity")?.optString("likeStatus")
+                        if (inlineStatus == "LIKE") isLiked = true
                     }
                     if (node.has("likeStatusEntity")) {
-                        val status = node.optJSONObject("likeStatusEntity")?.optString("likeStatus")
-                        if (status == "LIKE") isLiked = true
+                        val entity = node.optJSONObject("likeStatusEntity")
+                        val entityKey = entity?.optString("key").orEmpty()
+                        val status = entity?.optString("likeStatus")
+                        if (expectedLikeEntityKey == null || entityKey.isBlank() || entityKey == expectedLikeEntityKey) {
+                            if (status == "LIKE") isLiked = true
+                        }
                     }
                     if (node.has("subscriptionStateEntity")) {
                         val subEntity = node.optJSONObject("subscriptionStateEntity")
@@ -2185,6 +2372,14 @@ object YouTubeInnerTube {
                         val hdr = node.optJSONObject("commentsEntryPointHeaderRenderer")
                         val c = extractText(hdr?.optJSONObject("commentCount"))
                         if (c.isNotBlank()) commentCount = c
+                        val teaser = extractText(
+                            hdr?.optJSONObject("contentRenderer")
+                                ?.optJSONObject("commentsEntryPointTeaserRenderer")
+                                ?.optJSONObject("teaserContent")
+                        )
+                        if (teaser.isNotBlank() && topCommentPreview.isBlank()) {
+                            topCommentPreview = teaser
+                        }
                     }
                     if (node.has("engagementPanelSectionListRenderer")) {
                         val panel = node.optJSONObject("engagementPanelSectionListRenderer")
@@ -2220,7 +2415,10 @@ object YouTubeInnerTube {
             isLiked = isLiked,
             likeCount = likeCount,
             commentCount = commentCount,
-            commentsToken = commentsToken
+            commentsToken = commentsToken,
+            subscriberCount = subscriberCount,
+            channelAvatarUrl = channelAvatarUrl,
+            topCommentPreview = topCommentPreview
         )
     }
 
@@ -2364,6 +2562,21 @@ object YouTubeInnerTube {
             .ifBlank { extractText(obj.optJSONObject("shortBylineText")) }
             .ifBlank { extractText(obj.optJSONObject("longBylineText")) }
         val duration = extractText(obj.optJSONObject("lengthText"))
+        var isLive = duration.equals("LIVE", ignoreCase = true)
+        if (!isLive) {
+            val badges = obj.optJSONArray("badges")
+            if (badges != null) {
+                for (i in 0 until badges.length()) {
+                    val mr = badges.optJSONObject(i)?.optJSONObject("metadataBadgeRenderer") ?: continue
+                    val style = mr.optString("style")
+                    val lbl = mr.optString("label")
+                    if (style.contains("LIVE", ignoreCase = true) || lbl.equals("LIVE", ignoreCase = true)) {
+                        isLive = true
+                        break
+                    }
+                }
+            }
+        }
         val views = extractText(obj.optJSONObject("shortViewCountText"))
             .ifBlank { extractText(obj.optJSONObject("viewCountText")) }
         val thumb = pickThumb(obj.optJSONObject("thumbnail"))
@@ -2372,10 +2585,11 @@ object YouTubeInnerTube {
             id = id,
             title = title,
             channel = channel,
-            duration = duration,
+            duration = if (isLive) "LIVE" else duration,
             views = views,
             thumbnailUrl = thumb,
-            isPlaylist = false
+            isPlaylist = false,
+            isLive = isLive
         )
     }
 
@@ -2469,6 +2683,7 @@ object YouTubeInnerTube {
             thumb = "https://i.ytimg.com/vi/$id/hqdefault.jpg"
         }
 
+        val isLive = !isPlaylist && badgeText.equals("LIVE", ignoreCase = true)
         return YtItem(
             id = id,
             title = title,
@@ -2477,7 +2692,8 @@ object YouTubeInnerTube {
             views = if (!isPlaylist) views else "",
             thumbnailUrl = thumb,
             isPlaylist = isPlaylist,
-            videoCount = if (isPlaylist) badgeText.ifBlank { "Playlist" } else ""
+            videoCount = if (isPlaylist) badgeText.ifBlank { "Playlist" } else "",
+            isLive = isLive
         )
     }
 

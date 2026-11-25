@@ -1,6 +1,7 @@
 package com.graball.youtube
 
 import android.app.AlertDialog
+import android.app.Dialog
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
@@ -10,6 +11,10 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.Outline
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.Icon
 import android.media.AudioManager
 import android.os.Build
@@ -18,14 +23,18 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Rational
 import android.view.GestureDetector
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
+import android.view.Window
+import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.annotation.OptIn
@@ -74,6 +83,13 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
     private lateinit var videoTitle: TextView
     private lateinit var videoMeta: TextView
+    private lateinit var descChevron: TextView
+    private lateinit var videoDescription: TextView
+    private lateinit var channelAvatar: ImageView
+    private lateinit var channelNameView: TextView
+    private lateinit var channelSubsView: TextView
+    private lateinit var commentsCard: LinearLayout
+    private lateinit var commentsPreview: TextView
     private lateinit var playerErrorRow: LinearLayout
     private lateinit var videoError: TextView
     private lateinit var actionLike: TextView
@@ -94,6 +110,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private var lastRelatedVideoId: String? = null
     private var currentEngagement: YouTubeInnerTube.VideoEngagement? = null
     private var lastSponsorSkipShown: String? = null
+    private var lastChannelAvatarUrl: String? = null
+    private var descriptionExpanded = false
     private var isFullscreen = false
     private var inPipMode = false
     private var isControllerVisible = false
@@ -135,8 +153,34 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         videoTitle = findViewById(R.id.playerVideoTitle)
         videoMeta = findViewById(R.id.playerVideoMeta)
+        descChevron = findViewById(R.id.playerDescChevron)
+        videoDescription = findViewById(R.id.playerDescription)
+        channelAvatar = findViewById(R.id.playerChannelAvatar)
+        channelNameView = findViewById(R.id.playerChannelName)
+        channelSubsView = findViewById(R.id.playerChannelSubs)
+        commentsCard = findViewById(R.id.playerCommentsCard)
+        commentsPreview = findViewById(R.id.playerCommentsPreview)
         playerErrorRow = findViewById(R.id.playerErrorRow)
         videoError = findViewById(R.id.playerError)
+
+        channelAvatar.outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) {
+                outline.setOval(0, 0, view.width, view.height)
+            }
+        }
+        channelAvatar.clipToOutline = true
+
+        findViewById<View>(R.id.playerTitleRow).setOnClickListener {
+            val desc = YouTubePlaybackService.currentState.streamInfo?.description.orEmpty().trim()
+            if (desc.isBlank()) return@setOnClickListener
+            descriptionExpanded = !descriptionExpanded
+            videoDescription.text = desc
+            videoDescription.visibility = if (descriptionExpanded) View.VISIBLE else View.GONE
+            descChevron.text = if (descriptionExpanded) "⌃" else "⌄"
+        }
+        findViewById<View>(R.id.playerChannelInfo).setOnClickListener {
+            openChannelPage()
+        }
         findViewById<TextView>(R.id.btnPlayerRetry).setOnClickListener {
             YouTubePlaybackService.instance?.retryCurrent()
         }
@@ -194,6 +238,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         actionLike.setOnClickListener { toggleLike() }
         actionSubscribe.setOnClickListener { toggleSubscribe() }
+        commentsCard.setOnClickListener { showCommentsDialog() }
         actionComments.setOnClickListener { showCommentsDialog() }
         actionOpenWeb.setOnClickListener { openCurrentVideoInWeb() }
 
@@ -202,15 +247,20 @@ class YouTubePlayerActivity : AppCompatActivity() {
             val next = !YouTubePlaybackService.currentState.isAudioOnly
             explicitBgAudioRequested = next
             svc.setAudioOnlyMode(next)
-            Toast.makeText(
-                this,
-                if (next) {
-                    "Audio only ON — keeps playing in background & screen off"
-                } else {
-                    "Audio only OFF — video resumed"
-                },
-                Toast.LENGTH_SHORT
-            ).show()
+            if (next) {
+                Toast.makeText(
+                    this,
+                    "🎧 Audio mode active — drag the floating bubble anywhere",
+                    Toast.LENGTH_SHORT
+                ).show()
+                finish()
+            } else {
+                Toast.makeText(
+                    this,
+                    "Audio only OFF — video resumed",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
         }
 
         actionQuality.setOnClickListener { showQualityPicker() }
@@ -413,11 +463,27 @@ class YouTubePlayerActivity : AppCompatActivity() {
         val item = state.currentItem
         val info = state.streamInfo
         videoTitle.text = info?.title ?: item?.title ?: "Nothing playing"
-        val metaParts = listOf(
-            info?.channel?.takeIf { it.isNotBlank() } ?: item?.channel.orEmpty(),
-            info?.viewCount?.takeIf { it.isNotBlank() } ?: item?.views.orEmpty()
-        ).filter { it.isNotBlank() }
-        videoMeta.text = metaParts.joinToString(" · ")
+        val channelLabel = currentEngagement?.channelName?.takeIf { it.isNotBlank() }
+            ?: info?.channel?.takeIf { it.isNotBlank() }
+            ?: item?.channel.orEmpty()
+        val viewsLabel = info?.viewCount?.takeIf { it.isNotBlank() } ?: item?.views.orEmpty()
+        videoMeta.text = listOf(viewsLabel, channelLabel)
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+        if (channelLabel.isNotBlank()) {
+            channelNameView.text = channelLabel
+        }
+        val descText = info?.description.orEmpty().trim()
+        descChevron.visibility = if (descText.isNotBlank()) View.VISIBLE else View.INVISIBLE
+        if (descriptionExpanded) {
+            if (descText.isNotBlank()) {
+                videoDescription.text = descText
+            } else {
+                descriptionExpanded = false
+                videoDescription.visibility = View.GONE
+                descChevron.text = "⌄"
+            }
+        }
 
         if (!state.error.isNullOrBlank()) {
             videoError.text = state.error
@@ -463,6 +529,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
             updateBookmarkChip(YouTubeStore.isBookmarked(this, item.id))
             if (item.id != lastRelatedVideoId) {
                 lastRelatedVideoId = item.id
+                descriptionExpanded = false
+                videoDescription.visibility = View.GONE
+                descChevron.text = "⌄"
+                lastChannelAvatarUrl = null
+                channelAvatar.setImageResource(R.drawable.yt_chip_bg)
                 loadRelated(item.id)
             }
         }
@@ -519,11 +590,44 @@ class YouTubePlayerActivity : AppCompatActivity() {
         val subscribed = eng?.isSubscribed == true
         actionSubscribe.text = if (subscribed) "✓ Subscribed" else "🔔 Subscribe"
         actionSubscribe.setBackgroundResource(
-            if (subscribed) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+            if (subscribed) R.drawable.yt_chip_bg else R.drawable.yt_chip_selected
         )
 
+        if (!eng?.channelName.isNullOrBlank()) {
+            channelNameView.text = eng?.channelName
+        }
+        val subText = eng?.subscriberCount?.takeIf { it.isNotBlank() }
+        channelSubsView.text = if (subText != null) "$subText · View channel ›" else "View channel ›"
+        val avatarUrl = eng?.channelAvatarUrl.orEmpty()
+        if (avatarUrl.isNotBlank() && avatarUrl != lastChannelAvatarUrl) {
+            lastChannelAvatarUrl = avatarUrl
+            ThumbnailLoader.load(avatarUrl, channelAvatar, targetWidthPx = 120)
+        }
+
         val commentCount = eng?.commentCount?.takeIf { it.isNotBlank() }
-        actionComments.text = if (commentCount != null) "💬 $commentCount" else "💬 Comments"
+        actionComments.text = if (commentCount != null) "💬 Comments · $commentCount" else "💬 Comments"
+        val teaser = eng?.topCommentPreview?.takeIf { it.isNotBlank() }
+        commentsPreview.text = teaser ?: "Tap to view comments"
+    }
+
+    private fun openChannelPage() {
+        val cid = currentEngagement?.channelId
+        if (cid.isNullOrBlank()) {
+            Toast.makeText(this, "Channel details are still loading…", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val name = currentEngagement?.channelName?.ifBlank {
+            YouTubePlaybackService.currentState.streamInfo?.channel.orEmpty()
+        }.orEmpty()
+        startActivity(
+            YouTubeChannelActivity.createIntent(
+                context = this,
+                channelId = cid,
+                channelName = name,
+                channelAvatar = currentEngagement?.channelAvatarUrl.orEmpty(),
+                isSubscribed = currentEngagement?.isSubscribed == true
+            )
+        )
     }
 
     private fun requireYouTubeLogin(): Boolean {
@@ -618,76 +722,223 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
     private fun showCommentsDialog() {
         if (YouTubePlaybackService.currentState.currentItem == null) return
-        val token = currentEngagement?.commentsToken
-        if (token.isNullOrBlank()) {
+        val initialToken = currentEngagement?.commentsToken
+        if (initialToken.isNullOrBlank()) {
             AlertDialog.Builder(this)
                 .setTitle("Comments")
-                .setMessage("Comments aren't loaded for this video yet. Open it in Ad-Free YouTube Web to read and post comments?")
+                .setMessage("Comments aren't available for this video yet. Open it in Ad-Free YouTube Web to read and post comments?")
                 .setPositiveButton("Open in YouTube Web") { _, _ -> openCurrentVideoInWeb() }
                 .setNegativeButton("Close", null)
                 .show()
             return
         }
 
-        val pad = (16 * resources.displayMetrics.density).toInt()
-        val container = LinearLayout(this).apply {
+        val dp = resources.displayMetrics.density
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadii = floatArrayOf(18 * dp, 18 * dp, 18 * dp, 18 * dp, 0f, 0f, 0f, 0f)
+                setColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_nav))
+            }
+            setPadding((14 * dp).toInt(), (10 * dp).toInt(), (14 * dp).toInt(), (12 * dp).toInt())
         }
+
+        // Top drag handle pill
+        sheet.addView(
+            View(this).apply {
+                layoutParams = LinearLayout.LayoutParams((36 * dp).toInt(), (4 * dp).toInt()).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    bottomMargin = (10 * dp).toInt()
+                }
+                background = GradientDrawable().apply {
+                    cornerRadius = 2 * dp
+                    setColor(0x55FFFFFF)
+                }
+            }
+        )
+
+        // Sheet header (Title + Open Web + Close)
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = (10 * dp).toInt() }
+        }
+        val titleView = TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            text = currentEngagement?.commentCount?.takeIf { it.isNotBlank() }
+                ?.let { "Comments ($it)" } ?: "Comments"
+            setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_text))
+            textSize = 15.5f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        val webBtn = TextView(this).apply {
+            text = "🌐 Post"
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_text))
+            setBackgroundResource(R.drawable.yt_chip_bg)
+            setPadding((10 * dp).toInt(), (5 * dp).toInt(), (10 * dp).toInt(), (5 * dp).toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = (8 * dp).toInt() }
+            setOnClickListener {
+                dialog.dismiss()
+                openCurrentVideoInWeb()
+            }
+        }
+        val closeBtn = TextView(this).apply {
+            text = "✕"
+            textSize = 16f
+            setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_subtext))
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams((32 * dp).toInt(), (32 * dp).toInt())
+            setOnClickListener { dialog.dismiss() }
+        }
+        headerRow.addView(titleView)
+        headerRow.addView(webBtn)
+        headerRow.addView(closeBtn)
+        sheet.addView(headerRow)
+
         val statusText = TextView(this).apply {
             text = "Loading comments…"
             setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_subtext))
             textSize = 13f
+            setPadding(0, (12 * dp).toInt(), 0, (12 * dp).toInt())
         }
-        container.addView(statusText)
-        val scroll = ScrollView(this).apply {
-            setBackgroundColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_bg))
-            addView(container)
-        }
+        sheet.addView(statusText)
 
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(
-                currentEngagement?.commentCount?.takeIf { it.isNotBlank() }
-                    ?.let { "Comments ($it)" } ?: "Comments"
-            )
-            .setView(scroll)
-            .setPositiveButton("Comment in YouTube Web") { _, _ -> openCurrentVideoInWeb() }
-            .setNegativeButton("Close", null)
-            .create()
-        dialog.show()
+        val loadedComments = mutableListOf<YouTubeInnerTube.YtComment>()
+        val commentAdapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+            override fun getItemCount(): Int = loadedComments.size
 
-        io.execute {
-            val comments = YouTubeInnerTube.fetchComments(this, token)
-            runOnUiThread {
-                if (isFinishing || !dialog.isShowing) return@runOnUiThread
-                container.removeAllViews()
-                if (comments.isEmpty()) {
-                    statusText.text = "No comments found. Tap 'Comment in YouTube Web' to view or post."
-                    container.addView(statusText)
-                    return@runOnUiThread
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+                val box = LinearLayout(this@YouTubePlayerActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = RecyclerView.LayoutParams(
+                        RecyclerView.LayoutParams.MATCH_PARENT,
+                        RecyclerView.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = (10 * dp).toInt() }
+                    setBackgroundResource(R.drawable.card_bg)
+                    setPadding((12 * dp).toInt(), (9 * dp).toInt(), (12 * dp).toInt(), (9 * dp).toInt())
                 }
-                val gap = (10 * resources.displayMetrics.density).toInt()
-                for (c in comments) {
-                    val header = TextView(this).apply {
-                        val meta = listOf(c.author, c.timeText, c.likes.takeIf { it.isNotBlank() }?.let { "👍 $it" })
-                            .filterNotNull()
-                            .filter { it.isNotBlank() }
-                            .joinToString(" · ")
-                        text = meta
-                        setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_subtext))
-                        textSize = 12f
+                val metaTv = TextView(this@YouTubePlayerActivity).apply {
+                    id = android.R.id.text1
+                    setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_subtext))
+                    textSize = 11.5f
+                }
+                val bodyTv = TextView(this@YouTubePlayerActivity).apply {
+                    id = android.R.id.text2
+                    setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_text))
+                    textSize = 13f
+                    setPadding(0, (4 * dp).toInt(), 0, 0)
+                }
+                box.addView(metaTv)
+                box.addView(bodyTv)
+                return object : RecyclerView.ViewHolder(box) {}
+            }
+
+            override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+                val c = loadedComments[position]
+                val meta = listOf(c.author, c.timeText, c.likes.takeIf { it.isNotBlank() }?.let { "👍 $it" })
+                    .filterNotNull()
+                    .filter { it.isNotBlank() }
+                    .joinToString(" · ")
+                holder.itemView.findViewById<TextView>(android.R.id.text1).text = meta
+                holder.itemView.findViewById<TextView>(android.R.id.text2).text = c.text
+            }
+        }
+
+        val listRv = RecyclerView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+            layoutManager = LinearLayoutManager(this@YouTubePlayerActivity)
+            adapter = commentAdapter
+            visibility = View.GONE
+        }
+        sheet.addView(listRv)
+
+        var nextToken: String? = null
+        var loadingMore = false
+        val loadMoreBtn = TextView(this).apply {
+            text = "Load more comments"
+            textSize = 12.5f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_text))
+            setBackgroundResource(R.drawable.yt_chip_bg)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (38 * dp).toInt()
+            ).apply { topMargin = (8 * dp).toInt() }
+            visibility = View.GONE
+        }
+        sheet.addView(loadMoreBtn)
+
+        fun fetchBatch(token: String, append: Boolean) {
+            if (loadingMore) return
+            loadingMore = true
+            if (append) {
+                loadMoreBtn.text = "Loading…"
+            }
+            io.execute {
+                val page = YouTubeInnerTube.fetchCommentsPaged(this, token)
+                runOnUiThread {
+                    loadingMore = false
+                    if (isFinishing || !dialog.isShowing) return@runOnUiThread
+                    nextToken = page.continuationToken
+                    if (!append) {
+                        loadedComments.clear()
                     }
-                    val body = TextView(this).apply {
-                        text = c.text
-                        setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_text))
-                        textSize = 13f
-                        setPadding(0, 2, 0, gap)
+                    val start = loadedComments.size
+                    loadedComments.addAll(page.comments)
+                    if (loadedComments.isEmpty()) {
+                        statusText.text = "No comments found. Tap 'Post' to open in YouTube Web."
+                        statusText.visibility = View.VISIBLE
+                        listRv.visibility = View.GONE
+                        loadMoreBtn.visibility = View.GONE
+                    } else {
+                        statusText.visibility = View.GONE
+                        listRv.visibility = View.VISIBLE
+                        if (append) {
+                            commentAdapter.notifyItemRangeInserted(start, page.comments.size)
+                        } else {
+                            commentAdapter.notifyDataSetChanged()
+                        }
+                        if (!nextToken.isNullOrBlank()) {
+                            loadMoreBtn.text = "Load more comments"
+                            loadMoreBtn.visibility = View.VISIBLE
+                        } else {
+                            loadMoreBtn.visibility = View.GONE
+                        }
                     }
-                    container.addView(header)
-                    container.addView(body)
                 }
             }
         }
+
+        loadMoreBtn.setOnClickListener {
+            val tok = nextToken ?: return@setOnClickListener
+            fetchBatch(tok, append = true)
+        }
+
+        dialog.setContentView(sheet)
+        dialog.window?.let { win ->
+            win.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            win.setGravity(Gravity.BOTTOM)
+            val sheetHeight = (resources.displayMetrics.heightPixels * 0.72f).toInt()
+            win.setLayout(WindowManager.LayoutParams.MATCH_PARENT, sheetHeight)
+        }
+        dialog.show()
+        fetchBatch(initialToken, append = false)
     }
 
     private fun openCurrentVideoInWeb() {

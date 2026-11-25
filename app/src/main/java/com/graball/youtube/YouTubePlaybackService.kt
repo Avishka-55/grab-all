@@ -630,6 +630,12 @@ class YouTubePlaybackService : MediaSessionService() {
         if (isLoading) 0L else (player?.duration?.takeIf { it > 0L } ?: 0L)
     fun audioSessionId(): Int = player?.audioSessionId ?: 0
 
+    fun progressFraction(): Float {
+        val dur = durationMs()
+        if (dur <= 0L) return 0f
+        return (positionMs().toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+    }
+
     fun seekBy(deltaMs: Long) {
         val p = player ?: return
         if (!isReadyForSeek()) return
@@ -699,10 +705,12 @@ class YouTubePlaybackService : MediaSessionService() {
         val p = player ?: return
         val pos = p.currentPosition.coerceAtLeast(0L)
         if (currentStreamMode == StreamMode.HLS_MASTER) {
-            // Apply an explicit TrackSelectionOverride AND seek-flush the
-            // buffered low-res segments immediately so quality snaps right away.
+            // Apply an explicit TrackSelectionOverride AND flush buffered low-res
+            // segments immediately (jumping safely to live edge on livestreams).
             applyTrackSelection()
-            if (isReadyForSeek()) {
+            if (p.isCurrentMediaItemLive) {
+                p.seekToDefaultPosition()
+            } else if (isReadyForSeek()) {
                 p.seekTo(pos)
             }
             broadcastState()

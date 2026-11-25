@@ -96,6 +96,9 @@
             android:launchMode="singleTop"
             android:windowSoftInputMode="adjustPan" />
         <activity
+            android:name=".youtube.YouTubeChannelActivity"
+            android:exported="false" />
+        <activity
             android:name=".youtube.YouTubePlayerActivity"
             android:exported="false"
             android:launchMode="singleTop"

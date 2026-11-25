@@ -13,7 +13,8 @@ data class YtItem(
     val views: String = "",
     val thumbnailUrl: String = "",
     val isPlaylist: Boolean = false,
-    val videoCount: String = ""
+    val videoCount: String = "",
+    val isLive: Boolean = false
 ) {
     val watchUrl: String
         get() = if (isPlaylist) {

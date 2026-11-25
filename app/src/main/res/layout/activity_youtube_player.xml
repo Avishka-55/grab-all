@@ -177,34 +177,65 @@
         android:layout_weight="1"
         android:orientation="vertical">
 
-        <!-- Video Title & Meta -->
+        <!-- Video Title, Expandable Description & Meta -->
         <LinearLayout
+            android:id="@+id/playerTitleRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:paddingStart="14dp"
-            android:paddingTop="12dp"
+            android:paddingTop="10dp"
             android:paddingEnd="14dp"
-            android:paddingBottom="6dp">
+            android:paddingBottom="4dp">
 
-            <TextView
-                android:id="@+id/playerVideoTitle"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:maxLines="2"
-                android:text="Loading…"
-                android:textColor="@color/graball_text"
-                android:textSize="16sp"
-                android:textStyle="bold" />
+                android:gravity="top"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/playerVideoTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="2"
+                    android:text="Loading…"
+                    android:textColor="@color/graball_text"
+                    android:textSize="15.5sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/playerDescChevron"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:gravity="center"
+                    android:text="⌄"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="16sp" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/playerVideoMeta"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="2dp"
                 android:textColor="@color/graball_subtext"
                 android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/playerDescription"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/card_bg"
+                android:maxLines="8"
+                android:ellipsize="end"
+                android:padding="10dp"
+                android:textColor="@color/graball_subtext"
+                android:textSize="12sp"
+                android:visibility="gone" />
 
             <LinearLayout
                 android:id="@+id/playerErrorRow"
@@ -239,14 +270,86 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- NewPipe-style Action Bar -->
+        <!-- Dedicated Channel Row (Tap Channel -> Go to Channel Page; Right -> Subscribe) -->
+        <LinearLayout
+            android:id="@+id/playerChannelRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="14dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="6dp">
+
+            <LinearLayout
+                android:id="@+id/playerChannelInfo"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:id="@+id/playerChannelAvatar"
+                    android:layout_width="34dp"
+                    android:layout_height="34dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:scaleType="centerCrop" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_marginEnd="8dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/playerChannelName"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:text="Channel"
+                        android:textColor="@color/graball_text"
+                        android:textSize="13.5sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/playerChannelSubs"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:text="View channel ›"
+                        android:textColor="@color/graball_subtext"
+                        android:textSize="11.5sp" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/actionSubscribe"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:background="@drawable/yt_chip_selected"
+                android:gravity="center"
+                android:paddingStart="13dp"
+                android:paddingEnd="13dp"
+                android:text="🔔 Subscribe"
+                android:textColor="@color/graball_text"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Action Bar -->
         <HorizontalScrollView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingStart="14dp"
-            android:paddingTop="6dp"
+            android:paddingTop="4dp"
             android:paddingEnd="14dp"
-            android:paddingBottom="8dp"
+            android:paddingBottom="6dp"
             android:scrollbars="none">
 
             <LinearLayout
@@ -277,7 +380,7 @@
                     android:gravity="center"
                     android:paddingStart="12dp"
                     android:paddingEnd="12dp"
-                    android:text="🎧 Audio only"
+                    android:text="🎧 Audio"
                     android:textColor="@color/graball_text"
                     android:textSize="12sp" />
 
@@ -291,45 +394,6 @@
                     android:paddingStart="12dp"
                     android:paddingEnd="12dp"
                     android:text="👍 Like"
-                    android:textColor="@color/graball_text"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/actionComments"
-                    android:layout_width="wrap_content"
-                    android:layout_height="34dp"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/yt_chip_bg"
-                    android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="💬 Comments"
-                    android:textColor="@color/graball_text"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/actionSubscribe"
-                    android:layout_width="wrap_content"
-                    android:layout_height="34dp"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/yt_chip_bg"
-                    android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="🔔 Subscribe"
-                    android:textColor="@color/graball_text"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/actionOpenWeb"
-                    android:layout_width="wrap_content"
-                    android:layout_height="34dp"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/yt_chip_bg"
-                    android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="🌐 Web"
                     android:textColor="@color/graball_text"
                     android:textSize="12sp" />
 
@@ -403,6 +467,7 @@
                     android:id="@+id/actionSponsorBlock"
                     android:layout_width="wrap_content"
                     android:layout_height="34dp"
+                    android:layout_marginEnd="8dp"
                     android:background="@drawable/yt_chip_bg"
                     android:gravity="center"
                     android:paddingStart="12dp"
@@ -411,8 +476,57 @@
                     android:textColor="@color/graball_active"
                     android:textSize="12sp"
                     android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/actionOpenWeb"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="🌐 Web"
+                    android:textColor="@color/graball_text"
+                    android:textSize="12sp" />
             </LinearLayout>
         </HorizontalScrollView>
+
+        <!-- Inline Comments Preview Card (Tap -> Full Comments Bottom Sheet) -->
+        <LinearLayout
+            android:id="@+id/playerCommentsCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="14dp"
+            android:layout_marginTop="2dp"
+            android:layout_marginEnd="14dp"
+            android:layout_marginBottom="6dp"
+            android:background="@drawable/card_bg"
+            android:orientation="vertical"
+            android:paddingStart="12dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="8dp">
+
+            <TextView
+                android:id="@+id/actionComments"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="💬 Comments"
+                android:textColor="@color/graball_text"
+                android:textSize="12.5sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/playerCommentsPreview"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="Tap to view comments"
+                android:textColor="@color/graball_subtext"
+                android:textSize="12sp" />
+        </LinearLayout>
 
         <!-- Up Next Header -->
         <TextView

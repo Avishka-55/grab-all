@@ -87,13 +87,18 @@ class YtItemAdapter(
             if (item.isPlaylist) "YouTube Playlist" else "YouTube"
         }
 
+        val isLiveItem = !item.isPlaylist && (item.isLive || item.duration.equals("LIVE", ignoreCase = true))
         val badgeText = when {
             item.isPlaylist -> item.videoCount.ifBlank { "Playlist" }
+            isLiveItem -> "● LIVE"
             item.duration.isNotBlank() -> item.duration
             else -> ""
         }
         if (badgeText.isNotBlank()) {
             holder.badge.text = badgeText
+            holder.badge.setBackgroundResource(
+                if (isLiveItem) R.drawable.yt_live_badge_bg else R.drawable.yt_badge_bg
+            )
             holder.badge.visibility = View.VISIBLE
         } else {
             holder.badge.visibility = View.GONE

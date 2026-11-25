@@ -71,6 +71,7 @@ class YouTubeActivity : AppCompatActivity() {
     private lateinit var tabViews: Map<Tab, TextView>
     private lateinit var filterChips: Map<YouTubeInnerTube.SearchFilter, TextView>
     private lateinit var adapter: YtItemAdapter
+    private lateinit var floatingAudio: FloatingAudioController
 
     private val io = Executors.newSingleThreadExecutor()
     private val suggestIo = Executors.newSingleThreadExecutor()
@@ -328,6 +329,7 @@ class YouTubeActivity : AppCompatActivity() {
                 }
             }
         })
+        floatingAudio = FloatingAudioController(this)
         setupPullToRefresh()
 
         refreshRecentChips()
@@ -415,6 +417,7 @@ class YouTubeActivity : AppCompatActivity() {
             updateFilterChipStyles()
         }
         YouTubePlaybackService.addListener(playbackListener)
+        floatingAudio.attach()
     }
 
     private fun isSignedInToYouTube(): Boolean {
@@ -458,6 +461,7 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        floatingAudio.detach()
         YouTubePlaybackService.removeListener(playbackListener)
         super.onPause()
     }
@@ -1262,7 +1266,9 @@ class YouTubeActivity : AppCompatActivity() {
 
     private fun updateMiniPlayer(state: YouTubePlaybackState) {
         val current = state.currentItem
-        if (current == null) {
+        // When background/audio-only mode is active, our draggable FloatingAudioController
+        // bubble handles playback controls cleanly without taking bottom bar space.
+        if (current == null || state.isAudioOnly || state.isVideoDisabled) {
             miniBar.visibility = View.GONE
             return
         }
