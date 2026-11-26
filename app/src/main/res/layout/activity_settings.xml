@@ -31,7 +31,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/ic_menu_add"
+                android:src="@drawable/ic_nav_grab"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
@@ -54,7 +54,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/ic_media_play"
+                android:src="@drawable/ic_nav_player"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
@@ -77,7 +77,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/stat_sys_download"
+                android:src="@drawable/ic_nav_downloads"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
@@ -101,7 +101,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/ic_menu_preferences"
+                android:src="@drawable/ic_nav_settings"
                 android:tint="@color/graball_orange" />
 
             <TextView

@@ -15,6 +15,7 @@ import java.util.WeakHashMap
 class GrabAllApp : Application() {
 
     private val floatingControllers = WeakHashMap<Activity, FloatingAudioController>()
+    private val downloadBadges = WeakHashMap<Activity, NavHelper.DownloadBadgeController>()
 
     override fun onCreate() {
         super.onCreate()
@@ -27,6 +28,10 @@ class GrabAllApp : Application() {
             override fun onActivityStarted(activity: Activity) {}
 
             override fun onActivityResumed(activity: Activity) {
+                val badge = downloadBadges.getOrPut(activity) {
+                    NavHelper.DownloadBadgeController(activity)
+                }
+                badge.attach()
                 if (isExcludedFromFloatingBubble(activity)) return
                 val controller = floatingControllers.getOrPut(activity) {
                     FloatingAudioController(activity)
@@ -35,6 +40,7 @@ class GrabAllApp : Application() {
             }
 
             override fun onActivityPaused(activity: Activity) {
+                downloadBadges[activity]?.detach()
                 floatingControllers[activity]?.detach()
             }
 
@@ -42,6 +48,7 @@ class GrabAllApp : Application() {
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
 
             override fun onActivityDestroyed(activity: Activity) {
+                downloadBadges.remove(activity)?.detach()
                 floatingControllers.remove(activity)?.detach()
                 if (activity !is YouTubePlayerActivity) {
                     otherActivityCount = (otherActivityCount - 1).coerceAtLeast(0)

@@ -39,7 +39,7 @@
                 <ImageView
                     android:layout_width="24dp"
                     android:layout_height="24dp"
-                    android:src="@android:drawable/ic_menu_add"
+                    android:src="@drawable/ic_nav_grab"
                     android:tint="@color/graball_tab_text" />
 
                 <TextView
@@ -62,7 +62,7 @@
                 <ImageView
                     android:layout_width="24dp"
                     android:layout_height="24dp"
-                    android:src="@android:drawable/ic_media_play"
+                    android:src="@drawable/ic_nav_player"
                     android:tint="@color/graball_orange" />
 
                 <TextView
@@ -85,7 +85,7 @@
                 <ImageView
                     android:layout_width="24dp"
                     android:layout_height="24dp"
-                    android:src="@android:drawable/stat_sys_download"
+                    android:src="@drawable/ic_nav_downloads"
                     android:tint="@color/graball_tab_text" />
 
                 <TextView
@@ -108,7 +108,7 @@
                 <ImageView
                     android:layout_width="24dp"
                     android:layout_height="24dp"
-                    android:src="@android:drawable/ic_menu_preferences"
+                    android:src="@drawable/ic_nav_settings"
                     android:tint="@color/graball_tab_text" />
 
                 <TextView
@@ -710,12 +710,25 @@
                     android:id="@+id/npBtnEq"
                     android:layout_width="wrap_content"
                     android:layout_height="34dp"
-                    android:layout_marginEnd="8dp"
+                    android:layout_marginEnd="6dp"
                     android:background="@drawable/pill_translucent_bg"
                     android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
+                    android:paddingStart="11dp"
+                    android:paddingEnd="11dp"
                     android:text="🎚 EQ"
+                    android:textColor="#E6FFFFFF"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/npBtnSleep"
+                    android:layout_width="wrap_content"
+                    android:layout_height="34dp"
+                    android:layout_marginEnd="6dp"
+                    android:background="@drawable/pill_translucent_bg"
+                    android:gravity="center"
+                    android:paddingStart="11dp"
+                    android:paddingEnd="11dp"
+                    android:text="🌙 Sleep"
                     android:textColor="#E6FFFFFF"
                     android:textSize="12sp" />
 

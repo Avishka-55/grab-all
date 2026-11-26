@@ -2,6 +2,7 @@ package com.graball.youtube
 
 import android.app.Dialog
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.Typeface
@@ -23,6 +24,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import com.graball.PlayerActivity
 import com.graball.R
 import com.graball.engine.DownloadPrefs
 import com.graball.engine.DownloadProgressBus
@@ -63,10 +65,16 @@ object DownloadSheetHelper {
     private val resolverExecutor = Executors.newCachedThreadPool()
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    fun show(context: Context, item: YtItem) {
+    fun show(
+        context: Context,
+        item: YtItem,
+        showQuickActions: Boolean = false,
+        onActionTaken: (() -> Unit)? = null
+    ) {
         val density = context.resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()
 
+        var currentItem = item
         val prefs = DownloadPrefs.load(context)
         val savedAudioFormat = DownloadPrefs.getAudioFormat(context)
         val colorBg = ContextCompat.getColor(context, R.color.graball_nav)
@@ -182,6 +190,86 @@ object DownloadSheetHelper {
         }
         headerRow.addView(closeBtn)
         sheet.addView(headerRow)
+
+        // Optional quick actions row when opened from Home screen / Shared link / Clipboard pill
+        if (showQuickActions) {
+            val quickRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(12) }
+            }
+
+            fun buildQuickBtn(label: String, accent: Boolean, onClick: () -> Unit): TextView {
+                return TextView(context).apply {
+                    text = label
+                    textSize = 12.5f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(if (accent) colorOrange else colorText)
+                    gravity = Gravity.CENTER
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(10).toFloat()
+                        setColor(if (accent) 0x20FF6B35 else colorCard)
+                        setStroke(dp(1), if (accent) 0x66FF6B35 else 0x24FFFFFF)
+                    }
+                    layoutParams = LinearLayout.LayoutParams(0, dp(38), 1f)
+                    setOnClickListener { onClick() }
+                }
+            }
+
+            if (item.isPlaylist) {
+                val watchPlBtn = buildQuickBtn("▶ Watch Playlist", accent = true) {
+                    dialog.dismiss()
+                    onActionTaken?.invoke()
+                    context.startActivity(
+                        Intent(context, YouTubeActivity::class.java)
+                            .putExtra("start_playlist_id", currentItem.id)
+                    )
+                }
+                val selectItemsBtn = buildQuickBtn("☑ Select Items", accent = false) {
+                    dialog.dismiss()
+                    onActionTaken?.invoke()
+                    PlaylistPickerDialog.showForUrl(context, currentItem.watchUrl)
+                }
+                quickRow.addView(watchPlBtn)
+                quickRow.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(dp(8), 1) })
+                quickRow.addView(selectItemsBtn)
+            } else {
+                val watchBtn = buildQuickBtn("▶ Watch Ad-Free", accent = true) {
+                    val toPlay = currentItem
+                    dialog.dismiss()
+                    onActionTaken?.invoke()
+                    YouTubePlaybackService.withService(context) { svc ->
+                        svc.playItem(toPlay, audioOnly = false)
+                    }
+                    context.startActivity(
+                        Intent(context, YouTubePlayerActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                            putExtra("restore_video", true)
+                        }
+                    )
+                }
+                val listenBtn = buildQuickBtn("🎧 Listen Audio", accent = false) {
+                    val toPlay = currentItem
+                    dialog.dismiss()
+                    onActionTaken?.invoke()
+                    YouTubePlaybackService.withService(context) { svc ->
+                        svc.playItem(toPlay, audioOnly = true)
+                    }
+                    context.startActivity(
+                        Intent(context, PlayerActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                            putExtra("open_now_playing", true)
+                        }
+                    )
+                }
+                quickRow.addView(watchBtn)
+                quickRow.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(dp(8), 1) })
+                quickRow.addView(listenBtn)
+            }
+            sheet.addView(quickRow)
+        }
 
         // Loading indicator row (hidden immediately when cached/playlist)
         val loadingRow = LinearLayout(context).apply {
@@ -402,12 +490,25 @@ object DownloadSheetHelper {
 
             // Refresh header title/duration if resolved info is richer
             if (info != null) {
-                if (info.title.isNotBlank()) titleTv.text = info.title
+                val resolvedTitle = info.title.ifBlank { currentItem.title }
+                val resolvedChannel = info.channel.ifBlank { currentItem.channel }
+                val resolvedDuration = if (info.durationSec > 0L) formatDuration(info.durationSec) else currentItem.duration
+                val resolvedThumb = info.thumbnailUrl.ifBlank { currentItem.thumbnailUrl }
+                currentItem = currentItem.copy(
+                    title = resolvedTitle,
+                    channel = resolvedChannel,
+                    duration = resolvedDuration,
+                    thumbnailUrl = resolvedThumb
+                )
+                if (resolvedTitle.isNotBlank()) titleTv.text = resolvedTitle
                 val metaParts = buildList {
-                    if (info.channel.isNotBlank()) add(info.channel)
-                    if (info.durationSec > 0L) add(formatDuration(info.durationSec))
+                    if (resolvedChannel.isNotBlank()) add(resolvedChannel)
+                    if (resolvedDuration.isNotBlank()) add(resolvedDuration)
                 }
                 if (metaParts.isNotEmpty()) metaTv.text = metaParts.joinToString(" · ")
+                if (resolvedThumb.isNotBlank() && thumbUrl.isBlank()) {
+                    ThumbnailLoader.load(resolvedThumb, thumbView, targetWidthPx = 320)
+                }
             }
 
             // Playlist range chips (playlists only)
@@ -627,13 +728,17 @@ object DownloadSheetHelper {
                 )
             )
 
-            if (item.title.isNotBlank()) {
-                DownloadProgressBus.titles[url] = item.title
+            if (currentItem.title.isNotBlank() &&
+                currentItem.title != "YouTube Video" &&
+                currentItem.title != "YouTube Playlist"
+            ) {
+                DownloadProgressBus.titles[url] = currentItem.title
             }
             DownloadService.startDownload(
                 context, url, template, chosen.audioOnly, chosen.maxHeight, playlistMode
             )
             dialog.dismiss()
+            onActionTaken?.invoke()
             Toast.makeText(context, "Downloading ${chosen.title}…", Toast.LENGTH_SHORT).show()
         }
 
@@ -661,6 +766,43 @@ object DownloadSheetHelper {
         // otherwise fast background InnerTube resolution (~250-400ms).
         if (item.isPlaylist) {
             renderOptions(info = null)
+            // Enrich header asynchronously when opened from a raw pasted/shared playlist URL
+            if (item.id.isNotBlank() && (item.title.isBlank() || item.title == "YouTube Playlist")) {
+                resolverExecutor.execute {
+                    val details = try {
+                        YouTubeInnerTube.fetchPlaylist(item.id, maxItems = 10)
+                    } catch (_: Exception) {
+                        null
+                    } ?: return@execute
+                    mainHandler.post {
+                        if (dismissed) return@post
+                        val plTitle = details.title.ifBlank { currentItem.title }
+                        val plChannel = details.channel.ifBlank { currentItem.channel }
+                        val plCount = when {
+                            details.items.size >= 10 -> "10+ videos"
+                            details.items.isNotEmpty() -> "${details.items.size} videos"
+                            else -> ""
+                        }
+                        val plThumb = details.items.firstOrNull()?.thumbnailUrl.orEmpty()
+                        currentItem = currentItem.copy(
+                            title = plTitle,
+                            channel = plChannel,
+                            videoCount = plCount,
+                            thumbnailUrl = plThumb.ifBlank { currentItem.thumbnailUrl }
+                        )
+                        if (plTitle.isNotBlank()) titleTv.text = plTitle
+                        val metaParts = buildList {
+                            add("Playlist")
+                            if (plChannel.isNotBlank()) add(plChannel)
+                            if (plCount.isNotBlank()) add(plCount)
+                        }
+                        metaTv.text = metaParts.joinToString(" · ")
+                        if (plThumb.isNotBlank()) {
+                            ThumbnailLoader.load(plThumb, thumbView, targetWidthPx = 320)
+                        }
+                    }
+                }
+            }
             return
         }
 

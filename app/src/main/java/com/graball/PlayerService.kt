@@ -984,6 +984,11 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     private fun onTrackCompleted() {
+        if (SleepTimerManager.consumeEndOfTrackIfArmed(applicationContext)) {
+            seekTo(0)
+            pause()
+            return
+        }
         val ext = externalUri
         if (ext != null && playlist.isEmpty()) {
             if (repeatMode == RepeatMode.ONE) {

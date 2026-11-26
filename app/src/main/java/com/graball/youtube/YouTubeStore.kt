@@ -20,6 +20,7 @@ object YouTubeStore {
     private const val KEY_BG_AUDIO_SCREEN_OFF = "bg_audio_screen_off"
     private const val KEY_DEFAULT_HEIGHT = "default_height" // 0 = Auto
     private const val KEY_SPEED = "playback_speed"
+    private const val KEY_CAPTION_TEXT_SIZE = "caption_text_size" // 0 = Small, 1 = Medium, 2 = Large
     private const val MAX_HISTORY = 100
     private const val MAX_BOOKMARKS = 200
     private const val MAX_SEARCHES = 15
@@ -78,6 +79,18 @@ object YouTubeStore {
     fun setPlaybackSpeed(context: Context, speed: Float) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putFloat(KEY_SPEED, speed)
+            .apply()
+    }
+
+    /** 0 = Small, 1 = Medium (default), 2 = Large. */
+    fun getCaptionTextSize(context: Context): Int =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(KEY_CAPTION_TEXT_SIZE, 1)
+            .coerceIn(0, 2)
+
+    fun setCaptionTextSize(context: Context, size: Int) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_CAPTION_TEXT_SIZE, size.coerceIn(0, 2))
             .apply()
     }
 

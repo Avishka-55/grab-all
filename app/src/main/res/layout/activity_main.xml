@@ -62,7 +62,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/ic_menu_add"
+                android:src="@drawable/ic_nav_grab"
                 android:tint="@color/graball_orange" />
 
             <TextView
@@ -85,7 +85,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/ic_media_play"
+                android:src="@drawable/ic_nav_player"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
@@ -108,7 +108,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/stat_sys_download"
+                android:src="@drawable/ic_nav_downloads"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
@@ -132,7 +132,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/ic_menu_preferences"
+                android:src="@drawable/ic_nav_settings"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
@@ -277,6 +277,76 @@
                     android:textStyle="bold" />
             </LinearLayout>
 
+            <!-- Clipboard Auto-Detect Pill: appears automatically when a
+                 supported video/playlist link is copied from another app. -->
+            <LinearLayout
+                android:id="@+id/clipboardBanner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/card_bg"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingTop="9dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="9dp"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical"
+                    android:paddingEnd="8dp">
+
+                    <TextView
+                        android:id="@+id/clipboardLabel"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:text="📋 YouTube link detected"
+                        android:textColor="@color/graball_orange"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/clipboardPreview"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:textColor="@color/graball_subtext"
+                        android:textSize="11.5sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/clipboardActionBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="30dp"
+                    android:background="@drawable/yt_chip_selected"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="Grab"
+                    android:textColor="#FFFFFF"
+                    android:textSize="11.5sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/clipboardDismissBtn"
+                    android:layout_width="30dp"
+                    android:layout_height="30dp"
+                    android:layout_marginStart="4dp"
+                    android:gravity="center"
+                    android:text="✕"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
             <LinearLayout
                 android:id="@+id/grabPanel"
                 android:layout_width="match_parent"
@@ -395,6 +465,61 @@
                     android:text="@string/download"
                     android:textColor="@color/graball_text"
                     android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Continue Watching: compact horizontal strip of recently watched
+                 YouTube videos with resume progress bars (hidden when empty). -->
+            <LinearLayout
+                android:id="@+id/continueWatchingSection"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Continue Watching"
+                        android:textColor="@color/graball_text"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/continueWatchingSeeAll"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:paddingStart="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingEnd="2dp"
+                        android:paddingBottom="4dp"
+                        android:text="See all ›"
+                        android:textColor="@color/graball_orange"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <HorizontalScrollView
+                    android:id="@+id/continueWatchingScroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:overScrollMode="never"
+                    android:scrollbars="none">
+
+                    <LinearLayout
+                        android:id="@+id/continueWatchingContainer"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal" />
+                </HorizontalScrollView>
             </LinearLayout>
 
             <!-- Quick Grab Sites: a tap opens that site in the

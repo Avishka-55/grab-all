@@ -8,19 +8,28 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Outline
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
+import android.text.TextUtils
 import android.text.TextWatcher
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.Spinner
 import android.widget.TextView
@@ -36,12 +45,18 @@ import com.graball.engine.FastYouTubeDownloader
 import com.graball.engine.LinkDetector
 import com.graball.engine.LinkKind
 import com.graball.engine.RuntimePaths
+import com.graball.youtube.DownloadSheetHelper
 import com.graball.youtube.PlaylistPickerDialog
+import com.graball.youtube.ThumbnailLoader
+import com.graball.youtube.WatchHistoryEntry
 import com.graball.youtube.YouTubeActivity
 import com.graball.youtube.YouTubePlaybackService
 import com.graball.youtube.YouTubePlayerActivity
+import com.graball.youtube.YouTubeStore
 import com.graball.youtube.YtItem
 import java.io.File
+import java.util.Locale
+import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
 
@@ -57,10 +72,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var grabQuickRow: LinearLayout
     private lateinit var grabWatchButton: TextView
     private lateinit var grabSecondButton: TextView
+    private lateinit var clipboardBanner: LinearLayout
+    private lateinit var clipboardLabel: TextView
+    private lateinit var clipboardPreview: TextView
+    private lateinit var clipboardActionBtn: TextView
+    private lateinit var clipboardDismissBtn: TextView
+    private lateinit var continueWatchingSection: LinearLayout
+    private lateinit var continueWatchingContainer: LinearLayout
+    private lateinit var continueWatchingSeeAll: TextView
     /** Top tabs (Search is this screen); kept to re-select Search on return. */
     private lateinit var mainTabs: List<TextView>
     /** What the open Grab panel holds; video panels force single. */
     private var grabbedKind: LinkKind = LinkKind.VIDEO
+    private var detectedClipboardUrl: String? = null
+    private var dismissedClipboardUrl: String? = null
+    private var lastContinueWatchingKey: String? = null
+    private val homeIo = Executors.newSingleThreadExecutor()
 
     private val hintHandler = Handler(Looper.getMainLooper())
     private val rotatingHints = listOf(
@@ -124,6 +151,47 @@ class MainActivity : AppCompatActivity() {
         grabQuickRow = findViewById(R.id.grabQuickRow)
         grabWatchButton = findViewById(R.id.grabWatchButton)
         grabSecondButton = findViewById(R.id.grabSecondButton)
+        clipboardBanner = findViewById(R.id.clipboardBanner)
+        clipboardLabel = findViewById(R.id.clipboardLabel)
+        clipboardPreview = findViewById(R.id.clipboardPreview)
+        clipboardActionBtn = findViewById(R.id.clipboardActionBtn)
+        clipboardDismissBtn = findViewById(R.id.clipboardDismissBtn)
+        continueWatchingSection = findViewById(R.id.continueWatchingSection)
+        continueWatchingContainer = findViewById(R.id.continueWatchingContainer)
+        continueWatchingSeeAll = findViewById(R.id.continueWatchingSeeAll)
+
+        // Subtle orange-accented border on the Clipboard Auto-Detect pill
+        val density = resources.displayMetrics.density
+        clipboardBanner.background = GradientDrawable().apply {
+            cornerRadius = 12f * density
+            setColor(0xFF1F1B18.toInt())
+            setStroke((1f * density).toInt().coerceAtLeast(1), 0x55FF6B35)
+        }
+
+        fun triggerDetectedClipboardLink() {
+            val url = detectedClipboardUrl ?: return
+            dismissedClipboardUrl = url
+            clipboardBanner.visibility = View.GONE
+            val kind = LinkDetector.detect(url)
+            if (kind == LinkKind.UNKNOWN) return
+            if (!openYouTubeLinkSheet(url, kind, clearInputOnAction = false)) {
+                linkInput.setText(url)
+                showGrabPanel(url, kind)
+            }
+        }
+        clipboardBanner.setOnClickListener { triggerDetectedClipboardLink() }
+        clipboardActionBtn.setOnClickListener { triggerDetectedClipboardLink() }
+        clipboardDismissBtn.setOnClickListener {
+            dismissedClipboardUrl = detectedClipboardUrl
+            clipboardBanner.visibility = View.GONE
+        }
+
+        continueWatchingSeeAll.setOnClickListener {
+            startActivity(
+                Intent(this, YouTubeActivity::class.java)
+                    .putExtra("start_mode", "history")
+            )
+        }
 
         fun dismissGrabPanel(clearText: Boolean) {
             grabPanel.visibility = View.GONE
@@ -282,7 +350,11 @@ class MainActivity : AppCompatActivity() {
             }
             val kind = LinkDetector.detect(input)
             if (kind != LinkKind.UNKNOWN) {
-                showGrabPanel(input, kind)
+                dismissedClipboardUrl = input
+                clipboardBanner.visibility = View.GONE
+                if (!openYouTubeLinkSheet(input, kind, clearInputOnAction = true)) {
+                    showGrabPanel(input, kind)
+                }
             } else {
                 // Keywords detected -> jump directly into YouTube search!
                 grabPanel.visibility = android.view.View.GONE
@@ -485,11 +557,51 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Route any YouTube video or playlist URL straight into GrabAll's modern
+     * Download Bottom Sheet (with real resolutions, file sizes, and Watch Ad-Free
+     * / Listen Audio quick actions). Returns false for non-YouTube URLs so they
+     * continue using the generic Grab panel.
+     */
+    private fun openYouTubeLinkSheet(
+        url: String,
+        kind: LinkKind,
+        clearInputOnAction: Boolean
+    ): Boolean {
+        if (!FastYouTubeDownloader.isYouTubeUrl(url)) return false
+        val plId = FastYouTubeDownloader.extractPlaylistId(url)
+        val vidId = FastYouTubeDownloader.extractVideoId(url)
+        val item = when {
+            kind == LinkKind.PLAYLIST && !plId.isNullOrBlank() -> YtItem(
+                id = plId,
+                title = "YouTube Playlist",
+                channel = "",
+                isPlaylist = true
+            )
+            !vidId.isNullOrBlank() -> YtItem(
+                id = vidId,
+                title = "YouTube Video",
+                channel = "",
+                thumbnailUrl = "https://i.ytimg.com/vi/$vidId/hqdefault.jpg"
+            )
+            else -> return false
+        }
+        grabPanel.visibility = View.GONE
+        DownloadSheetHelper.show(
+            context = this,
+            item = item,
+            showQuickActions = true
+        ) {
+            if (clearInputOnAction && !linkInput.text.isNullOrEmpty()) {
+                linkInput.setText("")
+            }
+        }
+        return true
+    }
+
+    /**
      * Shared links land here from the YouTube app, Chrome, etc.
-     * (ACTION_SEND, text/plain). Prefill the link field and open
-     * the Grab panel straight away — the user still picks options
-     * and taps Download, so a share can never start a download by
-     * surprise.
+     * (ACTION_SEND, text/plain). YouTube links open directly in the modern
+     * Download & Watch bottom sheet; other links open the Grab panel.
      */
     private fun handleShareIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_SEND) {
@@ -498,10 +610,32 @@ class MainActivity : AppCompatActivity() {
         val shared = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
         val url = Regex("https?://\\S+").find(shared)?.value
             ?.trimEnd('.', ',', ';', '!', '?', ')', ']') ?: return
-        findViewById<EditText>(R.id.linkInput).setText(url)
+        dismissedClipboardUrl = url
+        clipboardBanner.visibility = View.GONE
         val kind = LinkDetector.detect(url)
-        if (kind != LinkKind.UNKNOWN) {
+        if (kind == LinkKind.UNKNOWN) {
+            linkInput.setText(url)
+            return
+        }
+        if (FastYouTubeDownloader.isYouTubeUrl(url)) {
+            linkInput.post {
+                if (!isFinishing && !isDestroyed) {
+                    if (!openYouTubeLinkSheet(url, kind, clearInputOnAction = false)) {
+                        linkInput.setText(url)
+                        showGrabPanel(url, kind)
+                    }
+                }
+            }
+        } else {
+            linkInput.setText(url)
             showGrabPanel(url, kind)
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            checkClipboardForLink()
         }
     }
 
@@ -514,6 +648,256 @@ class MainActivity : AppCompatActivity() {
         }
         hintHandler.removeCallbacks(hintCycler)
         hintHandler.postDelayed(hintCycler, 2800L)
+        refreshContinueWatching()
+        if (hasWindowFocus()) {
+            checkClipboardForLink()
+        }
+    }
+
+    /**
+     * Inspect clipboard for a supported video/playlist URL and display a
+     * dismissible one-tap pill below the search bar (requires window focus on Android 10+).
+     */
+    private fun checkClipboardForLink() {
+        if (isFinishing || isDestroyed || !::clipboardBanner.isInitialized) return
+        if (grabPanel.visibility == View.VISIBLE) {
+            clipboardBanner.visibility = View.GONE
+            return
+        }
+        val clipText = try {
+            (getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager)
+                ?.primaryClip
+                ?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)
+                ?.coerceToText(this)
+                ?.toString()
+                .orEmpty()
+        } catch (_: Exception) {
+            ""
+        }
+        val url = Regex("https?://\\S+").find(clipText)?.value
+            ?.trimEnd('.', ',', ';', '!', '?', ')', ']')
+        if (url.isNullOrBlank()) {
+            detectedClipboardUrl = null
+            clipboardBanner.visibility = View.GONE
+            return
+        }
+        val kind = LinkDetector.detect(url)
+        val currentInput = linkInput.text?.toString()?.trim().orEmpty()
+        if (kind == LinkKind.UNKNOWN || url == dismissedClipboardUrl || url == currentInput) {
+            clipboardBanner.visibility = View.GONE
+            return
+        }
+        detectedClipboardUrl = url
+        val isYt = FastYouTubeDownloader.isYouTubeUrl(url)
+        clipboardLabel.text = when {
+            isYt && kind == LinkKind.PLAYLIST -> "📋 YouTube playlist on clipboard"
+            isYt -> "📋 YouTube link on clipboard"
+            kind == LinkKind.PLAYLIST -> "📋 Playlist link on clipboard"
+            else -> "📋 Video link on clipboard"
+        }
+        clipboardPreview.text = LinkDetector.preview(url)
+        clipboardActionBtn.text = if (isYt) "Grab / Watch" else "Grab"
+        clipboardBanner.visibility = View.VISIBLE
+    }
+
+    /** Load the 5 most recently watched YouTube videos into the horizontal Home strip. */
+    private fun refreshContinueWatching() {
+        if (!::continueWatchingSection.isInitialized) return
+        val appCtx = applicationContext
+        homeIo.execute {
+            val entries = YouTubeStore.getHistory(appCtx)
+                .filter { !it.item.isPlaylist && it.item.id.isNotBlank() }
+                .take(6)
+            val key = entries.joinToString("|") { "${it.item.id}:${it.positionMs / 5000L}" }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (entries.isEmpty()) {
+                    lastContinueWatchingKey = null
+                    continueWatchingSection.visibility = View.GONE
+                    return@runOnUiThread
+                }
+                continueWatchingSection.visibility = View.VISIBLE
+                if (key == lastContinueWatchingKey && continueWatchingContainer.childCount > 0) {
+                    return@runOnUiThread
+                }
+                lastContinueWatchingKey = key
+                renderContinueWatchingCards(entries)
+            }
+        }
+    }
+
+    private fun renderContinueWatchingCards(entries: List<WatchHistoryEntry>) {
+        val density = resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+        val colorCard = ContextCompat.getColor(this, R.color.graball_card)
+        val colorText = ContextCompat.getColor(this, R.color.graball_text)
+        val colorSub = ContextCompat.getColor(this, R.color.graball_subtext)
+        val colorOrange = ContextCompat.getColor(this, R.color.graball_orange)
+
+        continueWatchingContainer.removeAllViews()
+        entries.forEachIndexed { idx, entry ->
+            val item = entry.item
+            val cardWidth = dp(154)
+            val thumbHeight = dp(86)
+
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    cardWidth,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    if (idx < entries.lastIndex) marginEnd = dp(10)
+                }
+            }
+
+            // Rounded 16:9 thumbnail box with duration badge + orange resume bar
+            val thumbBox = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(cardWidth, thumbHeight)
+                setBackgroundColor(colorCard)
+                outlineProvider = object : ViewOutlineProvider() {
+                    override fun getOutline(view: View, outline: Outline) {
+                        outline.setRoundRect(0, 0, view.width, view.height, dp(10).toFloat())
+                    }
+                }
+                clipToOutline = true
+            }
+
+            val thumbIv = ImageView(this).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            }
+            val thumbUrl = item.thumbnailUrl.ifBlank {
+                "https://i.ytimg.com/vi/${item.id}/hqdefault.jpg"
+            }
+            ThumbnailLoader.load(thumbUrl, thumbIv, targetWidthPx = 320)
+            thumbBox.addView(thumbIv)
+
+            if (item.duration.isNotBlank()) {
+                val durBadge = TextView(this).apply {
+                    text = item.duration
+                    textSize = 10f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(Color.WHITE)
+                    setPadding(dp(5), dp(2), dp(5), dp(2))
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(4).toFloat()
+                        setColor(0xCC000000.toInt())
+                    }
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM or Gravity.END
+                    ).apply {
+                        marginEnd = dp(6)
+                        bottomMargin = dp(6)
+                    }
+                }
+                thumbBox.addView(durBadge)
+            }
+
+            // Resume progress bar along bottom edge when we have saved progress
+            val progressFraction = computeResumeFraction(entry.positionMs, item.duration)
+            if (progressFraction > 0f) {
+                val track = FrameLayout(this).apply {
+                    setBackgroundColor(0x55FFFFFF)
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(3),
+                        Gravity.BOTTOM
+                    )
+                }
+                val fill = View(this).apply {
+                    setBackgroundColor(colorOrange)
+                    layoutParams = FrameLayout.LayoutParams(
+                        (cardWidth * progressFraction).toInt().coerceAtLeast(dp(6)),
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }
+                track.addView(fill)
+                thumbBox.addView(track)
+            }
+            card.addView(thumbBox)
+
+            val titleTv = TextView(this).apply {
+                text = item.title.ifBlank { "YouTube Video" }
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(colorText)
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(dp(2), dp(6), dp(2), 0)
+            }
+            card.addView(titleTv)
+
+            val resumeLabel = formatResumePosition(entry.positionMs)
+            val subText = buildList {
+                if (item.channel.isNotBlank()) add(item.channel)
+                if (resumeLabel.isNotBlank()) add("▶ $resumeLabel")
+            }.joinToString(" · ")
+            if (subText.isNotBlank()) {
+                val subTv = TextView(this).apply {
+                    text = subText
+                    textSize = 10.5f
+                    setTextColor(colorSub)
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                    setPadding(dp(2), dp(2), dp(2), 0)
+                }
+                card.addView(subTv)
+            }
+
+            card.setOnClickListener {
+                YouTubePlaybackService.withService(this) { svc ->
+                    svc.playItem(item, audioOnly = false)
+                }
+                startActivity(
+                    Intent(this, YouTubePlayerActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        putExtra("restore_video", true)
+                    }
+                )
+            }
+            card.setOnLongClickListener {
+                DownloadSheetHelper.show(this, item, showQuickActions = true)
+                true
+            }
+
+            continueWatchingContainer.addView(card)
+        }
+    }
+
+    private fun computeResumeFraction(positionMs: Long, durationStr: String): Float {
+        if (positionMs < 3000L) return 0f
+        val durationSec = parseDurationToSeconds(durationStr)
+        if (durationSec <= 0L) return 0.25f
+        val fraction = positionMs.toFloat() / (durationSec * 1000f)
+        return fraction.coerceIn(0.05f, 0.98f)
+    }
+
+    private fun parseDurationToSeconds(text: String): Long {
+        val parts = text.trim().split(':').mapNotNull { it.toLongOrNull() }
+        return when (parts.size) {
+            2 -> parts[0] * 60L + parts[1]
+            3 -> parts[0] * 3600L + parts[1] * 60L + parts[2]
+            else -> 0L
+        }
+    }
+
+    private fun formatResumePosition(positionMs: Long): String {
+        val totalSec = positionMs / 1000L
+        if (totalSec < 5L) return ""
+        val h = totalSec / 3600L
+        val m = (totalSec % 3600L) / 60L
+        val s = totalSec % 60L
+        return if (h > 0L) {
+            String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+        } else {
+            String.format(Locale.US, "%d:%02d", m, s)
+        }
     }
 
     private val tabSwipe by lazy { NavHelper.TabSwipeHelper(this) }
@@ -543,6 +927,11 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         hintHandler.removeCallbacks(hintCycler)
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        homeIo.shutdownNow()
+        super.onDestroy()
     }
 
     /** Add a queue row for [url], or refresh it if one already exists. */

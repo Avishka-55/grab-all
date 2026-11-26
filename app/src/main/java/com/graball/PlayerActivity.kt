@@ -160,6 +160,17 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var npRepeat: ImageView
     private lateinit var npBtnAddPlaylist: TextView
     private lateinit var npBtnDownload: TextView
+    private lateinit var npBtnSleep: TextView
+
+    private val sleepTimerListener: (SleepTimerManager.State) -> Unit = { st ->
+        if (::npBtnSleep.isInitialized) {
+            npBtnSleep.text = st.compactIconLabel()
+            npBtnSleep.setTextColor(
+                if (st.isActive) ContextCompat.getColor(this, R.color.graball_orange)
+                else 0xE6FFFFFF.toInt()
+            )
+        }
+    }
 
     // Full-Screen Live Lyrics UI (Spotify / YouTube Music style)
     private lateinit var lyricsSheet: LinearLayout
@@ -459,6 +470,8 @@ class PlayerActivity : AppCompatActivity() {
         }
         findViewById<TextView>(R.id.npBtnLyrics).setOnClickListener { openLyricsSheet() }
         findViewById<TextView>(R.id.npBtnEq).setOnClickListener { openSystemEqualizer() }
+        npBtnSleep = findViewById(R.id.npBtnSleep)
+        npBtnSleep.setOnClickListener { SleepTimerManager.showPickerDialog(this) }
         npBtnAddPlaylist.setOnClickListener {
             val file = service?.currentFile() ?: return@setOnClickListener
             val track = tracksByPath[file.absolutePath] ?: AudioTrack(
@@ -730,6 +743,7 @@ class PlayerActivity : AppCompatActivity() {
             Intent(this, PlayerService::class.java), connection, Context.BIND_AUTO_CREATE
         )
         YouTubePlaybackService.addListener(ytStateListener)
+        SleepTimerManager.addListener(sleepTimerListener)
         handler.post(poller)
         if (ContextCompat.checkSelfPermission(this, audioReadPermission()) == PackageManager.PERMISSION_GRANTED) {
             loadLibrary()
@@ -740,6 +754,7 @@ class PlayerActivity : AppCompatActivity() {
         super.onPause()
         handler.removeCallbacks(poller)
         YouTubePlaybackService.removeListener(ytStateListener)
+        SleepTimerManager.removeListener(sleepTimerListener)
         if (bound) {
             unbindService(connection)
             bound = false

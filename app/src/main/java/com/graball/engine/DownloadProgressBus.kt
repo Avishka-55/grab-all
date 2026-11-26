@@ -58,13 +58,24 @@ object DownloadProgressBus {
 
     fun snapshot(): List<State> = lastStates.values.toList()
 
+    /** Count of currently active (preparing / downloading / paused) jobs. */
+    fun activeCount(): Int = lastStates.values.count {
+        it.status == Status.PREPARING ||
+            it.status == Status.DOWNLOADING ||
+            it.status == Status.PAUSED
+    }
+
     fun remove(id: String) {
-        lastStates.remove(id)
+        val removed = lastStates.remove(id)
         modes.remove(id)
         titles.remove(id)
+        if (removed != null) {
+            notifyCountListeners()
+        }
     }
 
     private val listeners = CopyOnWriteArrayList<(State) -> Unit>()
+    private val countListeners = CopyOnWriteArrayList<(Int) -> Unit>()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     fun subscribe(listener: (State) -> Unit) {
@@ -75,6 +86,22 @@ object DownloadProgressBus {
         listeners -= listener
     }
 
+    fun subscribeActiveCount(listener: (Int) -> Unit) {
+        countListeners += listener
+        listener(activeCount())
+    }
+
+    fun unsubscribeActiveCount(listener: (Int) -> Unit) {
+        countListeners -= listener
+    }
+
+    private fun notifyCountListeners() {
+        val count = activeCount()
+        mainHandler.post {
+            countListeners.forEach { it(count) }
+        }
+    }
+
     fun post(state: State) {
         val resolvedTitle = state.title?.takeIf { it.isNotBlank() } ?: titles[state.id]
         if (!resolvedTitle.isNullOrBlank()) {
@@ -82,8 +109,10 @@ object DownloadProgressBus {
         }
         val enriched = if (state.title == resolvedTitle) state else state.copy(title = resolvedTitle)
         lastStates[enriched.id] = enriched
+        val count = activeCount()
         mainHandler.post {
             listeners.forEach { it(enriched) }
+            countListeners.forEach { it(count) }
         }
     }
 }

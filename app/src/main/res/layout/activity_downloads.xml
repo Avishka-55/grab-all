@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Downloads screen (v0.6.0): the queue moved here from the main
-     screen. Same footer as everywhere: Grab, Downloads, Settings. -->
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
@@ -30,7 +28,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/ic_menu_add"
+                android:src="@drawable/ic_nav_grab"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
@@ -53,7 +51,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/ic_media_play"
+                android:src="@drawable/ic_nav_player"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
@@ -76,7 +74,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/stat_sys_download"
+                android:src="@drawable/ic_nav_downloads"
                 android:tint="@color/graball_orange" />
 
             <TextView
@@ -87,7 +85,6 @@
                 android:textColor="@color/graball_orange"
                 android:textSize="12sp" />
         </LinearLayout>
-
 
         <LinearLayout
             android:id="@+id/navSettings"
@@ -100,7 +97,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@android:drawable/ic_menu_preferences"
+                android:src="@drawable/ic_nav_settings"
                 android:tint="@color/graball_tab_text" />
 
             <TextView
@@ -126,24 +123,170 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:paddingStart="18dp"
+            android:paddingEnd="18dp"
             android:paddingTop="16dp"
-            android:paddingBottom="16dp">
+            android:paddingBottom="18dp">
 
-            <TextView
-                android:layout_width="wrap_content"
+            <!-- Header row: Title + live count + Clear Done action -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/nav_downloads"
-                android:textColor="@color/graball_text"
-                android:textSize="28sp"
-                android:textStyle="bold" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/nav_downloads"
+                        android:textColor="@color/graball_text"
+                        android:textSize="26sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/downloadsCountSub"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Saved in Downloads/GrabAll"
+                        android:textColor="@color/graball_subtext"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/btnClearCompleted"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:background="@drawable/yt_chip_bg"
+                    android:gravity="center"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="Clear Done"
+                    android:textColor="@color/graball_text"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <!-- Filter chips: All · Active · Video · Audio -->
+            <HorizontalScrollView
+                android:id="@+id/downloadsFilterScroll"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:overScrollMode="never"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/filterAll"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:layout_marginEnd="8dp"
+                        android:background="@drawable/yt_chip_selected"
+                        android:gravity="center"
+                        android:paddingStart="14dp"
+                        android:paddingEnd="14dp"
+                        android:text="All"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12.5sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/filterActive"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:layout_marginEnd="8dp"
+                        android:background="@drawable/yt_chip_bg"
+                        android:gravity="center"
+                        android:paddingStart="14dp"
+                        android:paddingEnd="14dp"
+                        android:text="Active"
+                        android:textColor="@color/graball_text"
+                        android:textSize="12.5sp" />
+
+                    <TextView
+                        android:id="@+id/filterVideo"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:layout_marginEnd="8dp"
+                        android:background="@drawable/yt_chip_bg"
+                        android:gravity="center"
+                        android:paddingStart="14dp"
+                        android:paddingEnd="14dp"
+                        android:text="🎬 Video"
+                        android:textColor="@color/graball_text"
+                        android:textSize="12.5sp" />
+
+                    <TextView
+                        android:id="@+id/filterAudio"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:background="@drawable/yt_chip_bg"
+                        android:gravity="center"
+                        android:paddingStart="14dp"
+                        android:paddingEnd="14dp"
+                        android:text="🎵 Audio"
+                        android:textColor="@color/graball_text"
+                        android:textSize="12.5sp" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <!-- Clean Empty State -->
+            <LinearLayout
+                android:id="@+id/downloadsEmptyBox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="28dp"
+                android:background="@drawable/card_bg"
+                android:gravity="center"
+                android:orientation="vertical"
+                android:padding="28dp"
+                android:visibility="gone">
+
+                <ImageView
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:alpha="0.7"
+                    android:src="@drawable/ic_nav_downloads"
+                    android:tint="@color/graball_orange" />
+
+                <TextView
+                    android:id="@+id/downloadsEmptyTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="No downloads yet"
+                    android:textColor="@color/graball_text"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/downloadsEmptySub"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:gravity="center"
+                    android:text="Paste any video link on Grab or tap Download on a YouTube video to save it here."
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="12.5sp" />
+            </LinearLayout>
 
             <LinearLayout
                 android:id="@+id/queueContainer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="14dp"
                 android:orientation="vertical" />
         </LinearLayout>
     </ScrollView>

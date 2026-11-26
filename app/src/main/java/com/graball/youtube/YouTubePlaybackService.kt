@@ -330,7 +330,12 @@ class YouTubePlaybackService : MediaSessionService() {
                             }
                         } else if (playbackState == Player.STATE_ENDED) {
                             saveCurrentProgress(resetToZero = true)
-                            playNext()
+                            if (com.graball.SleepTimerManager.consumeEndOfTrackIfArmed(applicationContext)) {
+                                player?.pause()
+                                broadcastState()
+                            } else {
+                                playNext()
+                            }
                         }
                         broadcastState()
                     }
@@ -950,6 +955,15 @@ class YouTubePlaybackService : MediaSessionService() {
         YouTubeStore.setPlaybackSpeed(this, playbackSpeed)
         player?.setPlaybackSpeed(playbackSpeed)
         broadcastState()
+    }
+
+    /**
+     * Temporarily override playback speed (e.g. Hold-to-2x gesture) without
+     * mutating or persisting the user's saved playback speed. Pass null to restore.
+     */
+    fun setTemporarySpeed(tempSpeed: Float?) {
+        val target = tempSpeed?.coerceIn(0.5f, 2.5f) ?: playbackSpeed
+        player?.setPlaybackSpeed(target)
     }
 
     fun stopPlayback() {

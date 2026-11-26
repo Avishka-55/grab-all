@@ -372,6 +372,9 @@ class YouTubeActivity : AppCompatActivity() {
             currentFilter = YouTubeInnerTube.SearchFilter.MUSIC
             updateFilterChipStyles()
             loadExplore(musicMode = true)
+        } else if (startMode == "history") {
+            meSection = MeSection.HISTORY
+            selectTab(Tab.BOOKMARKS)
         } else {
             loadExplore(musicMode = false)
         }
@@ -384,6 +387,12 @@ class YouTubeActivity : AppCompatActivity() {
         if (!plId.isNullOrBlank()) {
             if (currentTab != Tab.EXPLORE) selectTab(Tab.EXPLORE)
             openPlaylistItems(YtItem(id = plId, title = "Playlist", channel = "", isPlaylist = true))
+            return
+        }
+        val startMode = intent.getStringExtra("start_mode")
+        if (startMode == "history") {
+            meSection = MeSection.HISTORY
+            selectTab(Tab.BOOKMARKS)
             return
         }
         val q = intent.getStringExtra("start_query")?.trim()

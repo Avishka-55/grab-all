@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
@@ -18,6 +19,10 @@ import android.provider.OpenableColumns
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.view.ViewOutlineProvider
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -30,7 +35,9 @@ import com.graball.engine.DownloadProgressBus
 import com.graball.engine.DownloadService
 import com.graball.engine.FastYouTubeDownloader
 import com.graball.engine.MediaStorePublisher
+import com.graball.youtube.ThumbnailLoader
 import java.io.File
+import java.util.Locale
 
 /**
  * Compact, friendly Downloads screen:
@@ -40,7 +47,17 @@ import java.io.File
  */
 class DownloadsActivity : AppCompatActivity() {
 
+    private enum class Filter { ALL, ACTIVE, VIDEO, AUDIO }
+
     private lateinit var queueContainer: LinearLayout
+    private lateinit var countSubView: TextView
+    private lateinit var btnClearCompleted: TextView
+    private lateinit var emptyBox: LinearLayout
+    private lateinit var emptyTitle: TextView
+    private lateinit var emptySub: TextView
+    private lateinit var filterChips: Map<Filter, TextView>
+    private var currentFilter = Filter.ALL
+
     private val rowTitle = mutableMapOf<String, TextView>()
     private val rowStatus = mutableMapOf<String, TextView>()
     private val rowDetail = mutableMapOf<String, TextView>()
@@ -53,6 +70,9 @@ class DownloadsActivity : AppCompatActivity() {
     private val rowOpen = mutableMapOf<String, TextView>()
     private val rowDelete = mutableMapOf<String, TextView>()
     private val rowViews = mutableMapOf<String, LinearLayout>()
+    private val rowIsActive = mutableMapOf<String, Boolean>()
+    private val rowIsAudio = mutableMapOf<String, Boolean>()
+    private val rowFileSize = mutableMapOf<String, String>()
 
     /** Latest published file per URL (content:// URI or path relative to Downloads/GrabAll). */
     private val rowOutput = mutableMapOf<String, String>()
@@ -68,7 +88,34 @@ class DownloadsActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_downloads)
+        ThumbnailLoader.init(this)
+
         queueContainer = findViewById(R.id.queueContainer)
+        countSubView = findViewById(R.id.downloadsCountSub)
+        btnClearCompleted = findViewById(R.id.btnClearCompleted)
+        emptyBox = findViewById(R.id.downloadsEmptyBox)
+        emptyTitle = findViewById(R.id.downloadsEmptyTitle)
+        emptySub = findViewById(R.id.downloadsEmptySub)
+
+        filterChips = mapOf(
+            Filter.ALL to findViewById(R.id.filterAll),
+            Filter.ACTIVE to findViewById(R.id.filterActive),
+            Filter.VIDEO to findViewById(R.id.filterVideo),
+            Filter.AUDIO to findViewById(R.id.filterAudio)
+        )
+        filterChips.forEach { (filter, chip) ->
+            chip.setOnClickListener {
+                if (currentFilter != filter) {
+                    currentFilter = filter
+                    updateFilterChipStyles()
+                    refreshFilterAndChrome()
+                }
+            }
+        }
+        updateFilterChipStyles()
+
+        btnClearCompleted.setOnClickListener { confirmClearCompleted() }
+
         findViewById<LinearLayout>(R.id.navGrab).setOnClickListener {
             NavHelper.switchTab(this, MainActivity::class.java)
         }
@@ -84,12 +131,22 @@ class DownloadsActivity : AppCompatActivity() {
             rowMode[entry.url] = entry.mode
             val friendlyTitle = resolveFriendlyTitle(entry.url, entry.title, entry.file)
             rowDisplayTitle[entry.url] = friendlyTitle
+            val isAudio = entry.mode.contains("Audio", ignoreCase = true) ||
+                (entry.file.isNotBlank() && isAudioOutput(entry.file))
+            rowIsAudio[entry.url] = isAudio
+            rowIsActive[entry.url] = false
+            val sizeStr = if (entry.status == "Done" && entry.file.isNotBlank()) {
+                resolveOutputSizeLabel(entry.file).also { if (it.isNotBlank()) rowFileSize[entry.url] = it }
+            } else {
+                ""
+            }
             val modeSuffix = if (entry.mode.isNotBlank()) " · " + entry.mode else ""
+            val sizeSuffix = if (sizeStr.isNotBlank()) " · $sizeStr" else ""
             val statusText = (if (entry.status == "Done") {
                 getString(R.string.queue_done)
             } else {
                 getString(R.string.queue_failed)
-            }) + modeSuffix
+            }) + modeSuffix + sizeSuffix
             addRow(
                 url = entry.url,
                 displayTitle = friendlyTitle,
@@ -98,6 +155,10 @@ class DownloadsActivity : AppCompatActivity() {
                 showCancel = false,
                 addToTop = false
             )
+            rowStatus[entry.url]?.setTextColor(
+                if (entry.status == "Done") Color.parseColor("#6EE7B7")
+                else Color.parseColor("#FF7A7A")
+            )
             if (entry.status == "Failed") {
                 rowRetry[entry.url]?.visibility = View.VISIBLE
                 rowClear[entry.url]?.visibility = View.VISIBLE
@@ -105,17 +166,20 @@ class DownloadsActivity : AppCompatActivity() {
                 rowClear[entry.url]?.visibility = View.VISIBLE
                 if (entry.file.isNotBlank()) {
                     rowOutput[entry.url] = entry.file
+                    rowOpen[entry.url]?.text = if (isAudio) "▶ Play" else "▶ Open"
                     rowOpen[entry.url]?.visibility = View.VISIBLE
                     rowDelete[entry.url]?.visibility = View.VISIBLE
                 }
             }
         }
+        refreshFilterAndChrome()
     }
 
     override fun onResume() {
         super.onResume()
         DownloadProgressBus.subscribe(progressListener)
         DownloadProgressBus.snapshot().forEach { updateRow(it) }
+        refreshFilterAndChrome()
     }
 
     override fun onPause() {
@@ -237,19 +301,80 @@ class DownloadsActivity : AppCompatActivity() {
         }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(13), dp(10), dp(13), dp(10))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
             setBackgroundResource(R.drawable.card_bg)
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin = dp(8)
+                bottomMargin = dp(9)
             }
+        }
+
+        // Top row: Rounded thumbnail / type badge + Title & Status column
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val thumbBox = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(74), dp(48)).apply {
+                marginEnd = dp(11)
+            }
+            setBackgroundColor(ContextCompat.getColor(this@DownloadsActivity, R.color.graball_nav))
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, dp(8).toFloat())
+                }
+            }
+            clipToOutline = true
+        }
+        val modeHint = rowMode[url] ?: DownloadProgressBus.modes[url].orEmpty()
+        val isAudioHint = rowIsAudio[url] ?: modeHint.contains("Audio", ignoreCase = true)
+        val isPlaylistHint = FastYouTubeDownloader.extractPlaylistId(url) != null ||
+            modeHint.contains("First ", ignoreCase = true) ||
+            modeHint.contains("All videos", ignoreCase = true)
+        val placeholderIcon = TextView(this).apply {
+            text = when {
+                isAudioHint -> "🎵"
+                isPlaylistHint -> "📋"
+                else -> "🎬"
+            }
+            textSize = 20f
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        thumbBox.addView(placeholderIcon)
+
+        val ytVidId = FastYouTubeDownloader.extractVideoId(url)
+        if (!ytVidId.isNullOrBlank()) {
+            val thumbIv = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            thumbBox.addView(thumbIv)
+            ThumbnailLoader.load(
+                "https://i.ytimg.com/vi/$ytVidId/mqdefault.jpg",
+                thumbIv,
+                targetWidthPx = 240
+            )
+        }
+        headerRow.addView(thumbBox)
+
+        val textCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
         val title = TextView(this).apply {
             text = displayTitle
-            textSize = 14f
+            textSize = 13.5f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
             ellipsize = TextUtils.TruncateAt.END
@@ -258,8 +383,10 @@ class DownloadsActivity : AppCompatActivity() {
 
         val status = TextView(this).apply {
             text = statusText
-            textSize = 12f
+            textSize = 11.5f
             setTextColor(ContextCompat.getColor(this@DownloadsActivity, R.color.graball_orange))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -267,6 +394,9 @@ class DownloadsActivity : AppCompatActivity() {
                 topMargin = dp(3)
             }
         }
+        textCol.addView(title)
+        textCol.addView(status)
+        headerRow.addView(textCol)
 
         val progressBar = ProgressBar(
             this,
@@ -352,7 +482,9 @@ class DownloadsActivity : AppCompatActivity() {
                 rowPause[url]?.visibility = View.GONE
                 rowCopyLog[url]?.visibility = View.GONE
                 rowClear[url]?.visibility = View.VISIBLE
+                rowIsActive[url] = false
                 DownloadService.cancel(this@DownloadsActivity, url)
+                refreshFilterAndChrome()
             }
         }
 
@@ -404,8 +536,7 @@ class DownloadsActivity : AppCompatActivity() {
         actionsRow.addView(deleteFile)
         actionsRow.addView(clear)
 
-        row.addView(title)
-        row.addView(status)
+        row.addView(headerRow)
         row.addView(progressBar)
         row.addView(detail)
         row.addView(actionsRow)
@@ -447,10 +578,132 @@ class DownloadsActivity : AppCompatActivity() {
         rowMode.remove(url)
         rowOutput.remove(url)
         rowDisplayTitle.remove(url)
+        rowIsActive.remove(url)
+        rowIsAudio.remove(url)
+        rowFileSize.remove(url)
         cancelledUrls.remove(url)
         pausedRows.remove(url)
         DownloadProgressBus.remove(url)
         DownloadHistory.remove(this, url)
+        refreshFilterAndChrome()
+    }
+
+    private fun updateFilterChipStyles() {
+        val colorText = ContextCompat.getColor(this, R.color.graball_text)
+        filterChips.forEach { (filter, chip) ->
+            val selected = filter == currentFilter
+            chip.setBackgroundResource(if (selected) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg)
+            chip.setTextColor(if (selected) Color.WHITE else colorText)
+            chip.setTypeface(null, if (selected) Typeface.BOLD else Typeface.NORMAL)
+        }
+    }
+
+    private fun refreshFilterAndChrome() {
+        if (!::queueContainer.isInitialized) return
+        val totalCount = rowViews.size
+        val activeCount = rowViews.keys.count { rowIsActive[it] == true }
+        val finishedCount = (totalCount - activeCount).coerceAtLeast(0)
+
+        var visibleCount = 0
+        rowViews.forEach { (url, view) ->
+            val isActive = rowIsActive[url] == true
+            val isAudio = rowIsAudio[url] == true
+            val show = when (currentFilter) {
+                Filter.ALL -> true
+                Filter.ACTIVE -> isActive
+                Filter.AUDIO -> isAudio
+                Filter.VIDEO -> !isAudio
+            }
+            view.visibility = if (show) View.VISIBLE else View.GONE
+            if (show) visibleCount++
+        }
+
+        countSubView.text = when {
+            activeCount > 0 && finishedCount > 0 -> "$activeCount active · $finishedCount saved"
+            activeCount > 0 -> "$activeCount active download${if (activeCount == 1) "" else "s"}"
+            totalCount > 0 -> "$totalCount item${if (totalCount == 1) "" else "s"} · Downloads/GrabAll"
+            else -> "Saved in Downloads/GrabAll"
+        }
+
+        btnClearCompleted.visibility = if (finishedCount > 0) View.VISIBLE else View.GONE
+
+        if (visibleCount == 0) {
+            emptyBox.visibility = View.VISIBLE
+            when (currentFilter) {
+                Filter.ALL -> {
+                    emptyTitle.text = "No downloads yet"
+                    emptySub.text = "Paste any video link on Grab or tap Download on a YouTube video to save it here."
+                }
+                Filter.ACTIVE -> {
+                    emptyTitle.text = "No active downloads"
+                    emptySub.text = "In-progress and paused downloads will appear here."
+                }
+                Filter.VIDEO -> {
+                    emptyTitle.text = "No video downloads"
+                    emptySub.text = "Saved MP4 videos will appear here."
+                }
+                Filter.AUDIO -> {
+                    emptyTitle.text = "No audio downloads"
+                    emptySub.text = "Saved M4A and MP3 tracks will appear here."
+                }
+            }
+        } else {
+            emptyBox.visibility = View.GONE
+        }
+    }
+
+    private fun confirmClearCompleted() {
+        val finishedUrls = rowViews.keys.filter { rowIsActive[it] != true }
+        if (finishedUrls.isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle("Clear finished items?")
+            .setMessage(
+                "Remove ${finishedUrls.size} completed/failed item${if (finishedUrls.size == 1) "" else "s"} from this list?\n" +
+                    "Your downloaded files stay safely in storage."
+            )
+            .setPositiveButton("Clear") { _, _ ->
+                finishedUrls.forEach { removeRowAndHistory(it) }
+                Toast.makeText(this, "Cleared ${finishedUrls.size} items", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun resolveOutputSizeLabel(output: String?): String {
+        if (output.isNullOrBlank()) return ""
+        val bytes = try {
+            if (output.startsWith("content://")) {
+                var sz = -1L
+                contentResolver.query(
+                    Uri.parse(output),
+                    arrayOf(OpenableColumns.SIZE),
+                    null,
+                    null,
+                    null
+                )?.use { cursor ->
+                    if (cursor.moveToFirst() && !cursor.isNull(0)) {
+                        sz = cursor.getLong(0)
+                    }
+                }
+                sz
+            } else {
+                val f = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "GrabAll/$output"
+                )
+                if (f.isFile) f.length() else -1L
+            }
+        } catch (_: Exception) {
+            -1L
+        }
+        if (bytes <= 0L) return ""
+        val mb = bytes / (1024.0 * 1024.0)
+        return when {
+            mb >= 1024.0 -> String.format(Locale.US, "%.2f GB", mb / 1024.0)
+            mb >= 100.0 -> String.format(Locale.US, "%.0f MB", mb)
+            mb >= 1.0 -> String.format(Locale.US, "%.1f MB", mb)
+            else -> String.format(Locale.US, "%.0f KB", bytes / 1024.0)
+        }
     }
 
     private fun confirmDeleteFile(url: String) {
@@ -745,7 +998,16 @@ class DownloadsActivity : AppCompatActivity() {
         }
 
         val mode = rowMode[state.id] ?: DownloadProgressBus.modes[state.id]
+        if (!mode.isNullOrBlank()) {
+            rowMode[state.id] = mode
+        }
+        val isAudioRow = (mode?.contains("Audio", ignoreCase = true) == true) ||
+            (state.output?.let { isAudioOutput(it) } == true) ||
+            (rowIsAudio[state.id] == true)
+        rowIsAudio[state.id] = isAudioRow
+
         if (cancelledUrls.contains(state.id)) {
+            rowIsActive[state.id] = false
             statusView.text = getString(R.string.queue_cancelled)
             statusView.setTextColor(ContextCompat.getColor(this, R.color.graball_subtext))
             detailView?.visibility = View.GONE
@@ -757,6 +1019,7 @@ class DownloadsActivity : AppCompatActivity() {
             openView?.visibility = View.GONE
             deleteView?.visibility = View.GONE
             clearView?.visibility = View.VISIBLE
+            refreshFilterAndChrome()
             return
         }
 
@@ -769,6 +1032,8 @@ class DownloadsActivity : AppCompatActivity() {
         if (state.status == DownloadProgressBus.Status.COMPLETE) {
             if (state.output != null) {
                 rowOutput[state.id] = state.output
+                val sz = resolveOutputSizeLabel(state.output)
+                if (sz.isNotBlank()) rowFileSize[state.id] = sz
             }
             val finalTitle = resolveFriendlyTitle(state.id, state.title, rowOutput[state.id])
             rowDisplayTitle[state.id] = finalTitle
@@ -783,6 +1048,7 @@ class DownloadsActivity : AppCompatActivity() {
         }
 
         val modeSuffix = mode?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
+        val sizeSuffix = rowFileSize[state.id]?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
         statusView.text = when (state.status) {
             DownloadProgressBus.Status.PREPARING ->
                 getString(R.string.queue_preparing) + modeSuffix
@@ -794,7 +1060,7 @@ class DownloadsActivity : AppCompatActivity() {
                 base + itemSuffix + modeSuffix
             }
             DownloadProgressBus.Status.COMPLETE ->
-                getString(R.string.queue_done) + modeSuffix
+                getString(R.string.queue_done) + modeSuffix + sizeSuffix
             DownloadProgressBus.Status.FAILED ->
                 getString(R.string.queue_failed) + modeSuffix
             DownloadProgressBus.Status.PAUSED ->
@@ -837,6 +1103,7 @@ class DownloadsActivity : AppCompatActivity() {
         val isActive = state.status == DownloadProgressBus.Status.DOWNLOADING ||
             state.status == DownloadProgressBus.Status.PAUSED ||
             state.status == DownloadProgressBus.Status.PREPARING
+        rowIsActive[state.id] = isActive
         cancelView?.visibility = if (isActive) View.VISIBLE else View.GONE
         pauseView?.visibility = if (
             state.status == DownloadProgressBus.Status.DOWNLOADING ||
@@ -864,6 +1131,7 @@ class DownloadsActivity : AppCompatActivity() {
 
         val hasOutput = state.status == DownloadProgressBus.Status.COMPLETE &&
             rowOutput.containsKey(state.id)
+        openView?.text = if (isAudioRow) "▶ Play" else "▶ Open"
         openView?.visibility = if (hasOutput) View.VISIBLE else View.GONE
         deleteView?.visibility = if (hasOutput) View.VISIBLE else View.GONE
 
@@ -878,6 +1146,7 @@ class DownloadsActivity : AppCompatActivity() {
         } else {
             detailView?.visibility = View.GONE
         }
+        refreshFilterAndChrome()
     }
 
     private val tabSwipe by lazy { NavHelper.TabSwipeHelper(this) }

@@ -22,9 +22,16 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.TextPaint
+import android.text.TextUtils
+import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
 import android.util.Rational
 import android.view.GestureDetector
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
@@ -34,6 +41,7 @@ import android.view.ViewOutlineProvider
 import android.view.Window
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -52,6 +60,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.graball.BrowseActivity
 import com.graball.LoginActivity
 import com.graball.R
+import com.graball.SleepTimerManager
 import com.graball.engine.WebViewCookieSync
 import java.util.concurrent.Executors
 import kotlin.math.abs
@@ -77,6 +86,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var playerView: PlayerView
     private lateinit var audioOnlyBanner: TextView
     private lateinit var subtitleOverlay: TextView
+    private lateinit var holdSpeedPill: TextView
+    private lateinit var btnScreenUnlock: TextView
     private lateinit var gestureHud: TextView
     private lateinit var playerLoadingBox: LinearLayout
     private lateinit var playerLoadingText: TextView
@@ -84,12 +95,15 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var btnTopCaptions: TextView
     private lateinit var btnTopQuality: TextView
     private lateinit var btnTopAspect: TextView
+    private lateinit var btnTopLock: TextView
     private lateinit var detailsContainer: LinearLayout
 
     private lateinit var videoTitle: TextView
     private lateinit var videoMeta: TextView
     private lateinit var descChevron: TextView
     private lateinit var videoDescription: TextView
+    private lateinit var chaptersRow: HorizontalScrollView
+    private lateinit var chaptersContainer: LinearLayout
     private lateinit var channelAvatar: ImageView
     private lateinit var channelNameView: TextView
     private lateinit var channelSubsView: TextView
@@ -103,20 +117,27 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var actionOpenWeb: TextView
     private lateinit var actionBgAudio: TextView
     private lateinit var actionSpeed: TextView
+    private lateinit var actionSleepTimer: TextView
+    private lateinit var actionShare: TextView
     private lateinit var actionBookmark: TextView
     private lateinit var actionSponsorBlock: TextView
     private lateinit var relatedList: RecyclerView
     private lateinit var relatedAdapter: YtItemAdapter
     private lateinit var floatingAudio: FloatingAudioController
 
+    private data class VideoChapter(val timeMs: Long, val timeLabel: String, val title: String)
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private var lastRelatedVideoId: String? = null
+    private var lastChaptersDescKey: String? = null
     private var currentEngagement: YouTubeInnerTube.VideoEngagement? = null
     private var lastSponsorSkipShown: String? = null
     private var lastChannelAvatarUrl: String? = null
     private var descriptionExpanded = false
     private var isFullscreen = false
+    private var isScreenLocked = false
+    private var isHolding2x = false
     private var inPipMode = false
     private var isControllerVisible = false
     private var explicitBgAudioRequested = false
@@ -125,6 +146,35 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
     private val hideHudRunnable = Runnable {
         gestureHud.visibility = View.GONE
+    }
+
+    private val hideUnlockRunnable = Runnable {
+        if (::btnScreenUnlock.isInitialized) {
+            btnScreenUnlock.visibility = View.GONE
+        }
+    }
+
+    private val holdSpeedRunnable = Runnable {
+        if (isScreenLocked || inPipMode) return@Runnable
+        val svc = YouTubePlaybackService.instance ?: return@Runnable
+        val st = YouTubePlaybackService.currentState
+        if (!svc.isReadyForSeek() || st.isAudioOnly) return@Runnable
+        isHolding2x = true
+        svc.setTemporarySpeed(2.0f)
+        holdSpeedPill.visibility = View.VISIBLE
+        playerView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+
+    private val sleepTimerListener: (SleepTimerManager.State) -> Unit = { st ->
+        if (::actionSleepTimer.isInitialized) {
+            actionSleepTimer.text = st.shortChipLabel()
+            actionSleepTimer.setBackgroundResource(
+                if (st.isActive) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
+            )
+            actionSleepTimer.setTextColor(
+                ContextCompat.getColor(this, R.color.graball_text)
+            )
+        }
     }
 
     private var subtitleTickerRunning = false
@@ -163,6 +213,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
         playerView = findViewById(R.id.ytPlayerView)
         audioOnlyBanner = findViewById(R.id.audioOnlyBanner)
         subtitleOverlay = findViewById(R.id.ytSubtitleOverlay)
+        holdSpeedPill = findViewById(R.id.holdSpeedPill)
+        btnScreenUnlock = findViewById(R.id.btnScreenUnlock)
         gestureHud = findViewById(R.id.gestureHud)
         playerLoadingBox = findViewById(R.id.playerLoadingBox)
         playerLoadingText = findViewById(R.id.playerLoadingText)
@@ -170,12 +222,17 @@ class YouTubePlayerActivity : AppCompatActivity() {
         btnTopCaptions = findViewById(R.id.btnTopCaptions)
         btnTopQuality = findViewById(R.id.btnTopQuality)
         btnTopAspect = findViewById(R.id.btnTopAspect)
+        btnTopLock = findViewById(R.id.btnTopLock)
         detailsContainer = findViewById(R.id.detailsContainer)
 
         videoTitle = findViewById(R.id.playerVideoTitle)
         videoMeta = findViewById(R.id.playerVideoMeta)
         descChevron = findViewById(R.id.playerDescChevron)
         videoDescription = findViewById(R.id.playerDescription)
+        videoDescription.movementMethod = LinkMovementMethod.getInstance()
+        videoDescription.highlightColor = Color.TRANSPARENT
+        chaptersRow = findViewById(R.id.playerChaptersRow)
+        chaptersContainer = findViewById(R.id.playerChaptersContainer)
         channelAvatar = findViewById(R.id.playerChannelAvatar)
         channelNameView = findViewById(R.id.playerChannelName)
         channelSubsView = findViewById(R.id.playerChannelSubs)
@@ -195,7 +252,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
             val desc = YouTubePlaybackService.currentState.streamInfo?.description.orEmpty().trim()
             if (desc.isBlank()) return@setOnClickListener
             descriptionExpanded = !descriptionExpanded
-            videoDescription.text = desc
+            videoDescription.text = if (descriptionExpanded) buildClickableDescription(desc) else ""
             videoDescription.visibility = if (descriptionExpanded) View.VISIBLE else View.GONE
             descChevron.text = if (descriptionExpanded) "⌃" else "⌄"
         }
@@ -211,6 +268,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
         actionOpenWeb = findViewById(R.id.actionOpenWeb)
         actionBgAudio = findViewById(R.id.actionBgAudio)
         actionSpeed = findViewById(R.id.actionSpeed)
+        actionSleepTimer = findViewById(R.id.actionSleepTimer)
+        actionShare = findViewById(R.id.actionShare)
         actionBookmark = findViewById(R.id.actionBookmark)
         actionSponsorBlock = findViewById(R.id.actionSponsorBlock)
         relatedList = findViewById(R.id.relatedList)
@@ -227,6 +286,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
         btnTopQuality.setOnClickListener { showQualityPicker() }
         btnTopCaptions.setOnClickListener { showCaptionsPicker() }
         btnTopAspect.setOnClickListener { cycleAspectRatio() }
+        btnTopLock.setOnClickListener { lockFullscreen() }
+        btnScreenUnlock.setOnClickListener { unlockFullscreen(showFeedback = true) }
         // Disable PlayerView's own tap-to-toggle so our GestureDetector is the
         // single source of truth (prevents the double-toggle bug where tapping
         // to hide immediately re-shows controls!).
@@ -274,6 +335,12 @@ class YouTubePlayerActivity : AppCompatActivity() {
         }
 
         actionSpeed.setOnClickListener { showSpeedPicker() }
+        actionSleepTimer.setOnClickListener {
+            SleepTimerManager.showPickerDialog(this) {
+                if (isFullscreen && !inPipMode) applyChromeVisibility()
+            }
+        }
+        actionShare.setOnClickListener { shareCurrentVideo() }
 
         actionBookmark.setOnClickListener {
             val item = YouTubePlaybackService.currentState.currentItem ?: return@setOnClickListener
@@ -368,10 +435,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
             // user explicitly enabled Audio-Only mode).
             svc.setVideoSurfaceVisible(true)
         }
-        if (!inPipMode) {
+        if (!inPipMode && !isScreenLocked) {
             playerView.showController()
         }
         YouTubePlaybackService.addListener(stateListener)
+        SleepTimerManager.addListener(sleepTimerListener)
     }
 
     override fun onResume() {
@@ -383,6 +451,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        releaseHoldSpeedIfActive()
         stopSubtitleTicker()
         floatingAudio.detach()
         super.onPause()
@@ -390,6 +459,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
     override fun onStop() {
         YouTubePlaybackService.removeListener(stateListener)
+        SleepTimerManager.removeListener(sleepTimerListener)
         // Guard with activeInstance so a stale/closing instance can never detach
         // ExoPlayer or disable video for a newer active player screen.
         if (activeInstance === this) {
@@ -412,6 +482,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
             activeInstance = null
         }
         mainHandler.removeCallbacks(hideHudRunnable)
+        mainHandler.removeCallbacks(hideUnlockRunnable)
+        mainHandler.removeCallbacks(holdSpeedRunnable)
         try {
             unregisterReceiver(pipReceiver)
         } catch (_: Exception) {
@@ -481,6 +553,10 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
+        if (isFullscreen && isScreenLocked) {
+            flashUnlockButton()
+            return
+        }
         if (isFullscreen) {
             toggleFullscreen()
         } else {
@@ -561,13 +637,14 @@ class YouTubePlayerActivity : AppCompatActivity() {
         descChevron.visibility = if (descText.isNotBlank()) View.VISIBLE else View.INVISIBLE
         if (descriptionExpanded) {
             if (descText.isNotBlank()) {
-                videoDescription.text = descText
+                videoDescription.text = buildClickableDescription(descText)
             } else {
                 descriptionExpanded = false
                 videoDescription.visibility = View.GONE
                 descChevron.text = "⌄"
             }
         }
+        updateChaptersStrip(item?.id.orEmpty(), descText)
 
         if (!state.error.isNullOrBlank()) {
             videoError.text = state.error
@@ -1182,16 +1259,21 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
     @Suppress("DEPRECATION")
     private fun applyChromeVisibility() {
+        if ((!isFullscreen || inPipMode) && isScreenLocked) {
+            isScreenLocked = false
+            mainHandler.removeCallbacks(hideUnlockRunnable)
+            if (::btnScreenUnlock.isInitialized) btnScreenUnlock.visibility = View.GONE
+        }
         val hideDetails = inPipMode || isFullscreen
         detailsContainer.visibility = if (hideDetails) View.GONE else View.VISIBLE
-        playerTopOverlay.visibility = if (inPipMode) {
+        playerTopOverlay.visibility = if (inPipMode || isScreenLocked) {
             View.GONE
         } else if (playerView.isControllerFullyVisible) {
             View.VISIBLE
         } else {
             View.GONE
         }
-        playerView.useController = !inPipMode
+        playerView.useController = !inPipMode && !isScreenLocked
 
         val params = playerContainer.layoutParams
         params.height = if (hideDetails) {
@@ -1225,6 +1307,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
             }
         }
         btnTopAspect.visibility = if (isFullscreen && !inPipMode) View.VISIBLE else View.GONE
+        btnTopLock.visibility = if (isFullscreen && !inPipMode) View.VISIBLE else View.GONE
         playerView.resizeMode = if (isFullscreen && !inPipMode) {
             fullscreenResizeMode
         } else {
@@ -1255,7 +1338,195 @@ class YouTubePlayerActivity : AppCompatActivity() {
             lp.bottomMargin = targetBottom
             subtitleOverlay.layoutParams = lp
         }
-        subtitleOverlay.textSize = if (isFullscreen) 17f else 13.5f
+        val sizePref = YouTubeStore.getCaptionTextSize(this)
+        subtitleOverlay.textSize = when (sizePref) {
+            0 -> if (isFullscreen) 14.5f else 11.5f
+            2 -> if (isFullscreen) 20.5f else 16.0f
+            else -> if (isFullscreen) 17.0f else 13.5f
+        }
+    }
+
+    private fun lockFullscreen() {
+        if (!isFullscreen || inPipMode) return
+        releaseHoldSpeedIfActive()
+        isScreenLocked = true
+        playerView.hideController()
+        playerTopOverlay.visibility = View.GONE
+        playerView.useController = false
+        flashUnlockButton()
+    }
+
+    private fun unlockFullscreen(showFeedback: Boolean) {
+        if (!isScreenLocked) return
+        isScreenLocked = false
+        mainHandler.removeCallbacks(hideUnlockRunnable)
+        btnScreenUnlock.visibility = View.GONE
+        playerView.useController = !inPipMode
+        if (!inPipMode) {
+            playerView.showController()
+            playerTopOverlay.visibility = View.VISIBLE
+        }
+        if (showFeedback) showHud("🔓 Screen unlocked")
+    }
+
+    private fun flashUnlockButton() {
+        btnScreenUnlock.visibility = View.VISIBLE
+        mainHandler.removeCallbacks(hideUnlockRunnable)
+        mainHandler.postDelayed(hideUnlockRunnable, 2800L)
+    }
+
+    private fun releaseHoldSpeedIfActive() {
+        mainHandler.removeCallbacks(holdSpeedRunnable)
+        if (isHolding2x) {
+            isHolding2x = false
+            YouTubePlaybackService.instance?.setTemporarySpeed(null)
+            if (::holdSpeedPill.isInitialized) {
+                holdSpeedPill.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun shareCurrentVideo() {
+        val st = YouTubePlaybackService.currentState
+        val item = st.currentItem ?: return
+        val title = st.streamInfo?.title?.takeIf { it.isNotBlank() } ?: item.title
+        val url = "https://youtu.be/${item.id}"
+        val text = if (title.isNotBlank()) "$title\n$url" else url
+        try {
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, title)
+                putExtra(Intent.EXTRA_TEXT, text)
+            }
+            startActivity(Intent.createChooser(sendIntent, "Share video"))
+        } catch (_: Exception) {
+            Toast.makeText(this, "No share app available", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // ---- Clickable Timestamps & Video Chapters ----
+
+    private val timestampRegex = Regex("(?<![\\d:])(\\d{1,2}:)?(\\d{1,2}):(\\d{2})(?![\\d:])")
+
+    private fun parseTimestampMs(raw: String): Long? {
+        val parts = raw.split(':').mapNotNull { it.toLongOrNull() }
+        return when (parts.size) {
+            2 -> if (parts[1] < 60L) (parts[0] * 60L + parts[1]) * 1000L else null
+            3 -> if (parts[1] < 60L && parts[2] < 60L) (parts[0] * 3600L + parts[1] * 60L + parts[2]) * 1000L else null
+            else -> null
+        }
+    }
+
+    private fun seekToTimestamp(ms: Long, label: String) {
+        val svc = YouTubePlaybackService.instance ?: return
+        if (!svc.isReadyForSeek()) {
+            Toast.makeText(this, "Video is still loading…", Toast.LENGTH_SHORT).show()
+            return
+        }
+        svc.seekTo(ms)
+        showHud("⏩ $label")
+    }
+
+    private fun buildClickableDescription(desc: String): SpannableStringBuilder {
+        val sb = SpannableStringBuilder(desc)
+        val linkColor = ContextCompat.getColor(this, R.color.graball_orange)
+        timestampRegex.findAll(desc).forEach { match ->
+            val raw = match.value
+            val ms = parseTimestampMs(raw) ?: return@forEach
+            val span = object : ClickableSpan() {
+                override fun onClick(widget: View) {
+                    seekToTimestamp(ms, raw)
+                }
+
+                override fun updateDrawState(ds: TextPaint) {
+                    ds.color = linkColor
+                    ds.isFakeBoldText = true
+                    ds.isUnderlineText = false
+                }
+            }
+            sb.setSpan(span, match.range.first, match.range.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        return sb
+    }
+
+    private fun extractChapters(desc: String): List<VideoChapter> {
+        if (desc.isBlank()) return emptyList()
+        val seenTimes = HashSet<Long>()
+        val chapters = mutableListOf<VideoChapter>()
+        desc.lineSequence().forEach { rawLine ->
+            val line = rawLine.trim()
+            if (line.length < 4 || line.length > 140) return@forEach
+            val match = timestampRegex.find(line) ?: return@forEach
+            val tsText = match.value
+            val ms = parseTimestampMs(tsText) ?: return@forEach
+            val before = line.substring(0, match.range.first).trim()
+            val after = line.substring(match.range.last + 1).trim()
+            // Accept standard "0:00 Title" (with optional bullet/bracket) or "Title - 0:00"
+            val titleCandidate = when {
+                before.length <= 4 && after.isNotBlank() -> after
+                after.length <= 2 && before.isNotBlank() -> before
+                else -> return@forEach
+            }
+            val cleaned = titleCandidate
+                .trimStart('-', '–', '—', ':', '|', '•', ')', ']', ' ')
+                .trimEnd('-', '–', '—', ':', '|', '(', '[', ' ')
+                .trim()
+            if (cleaned.isNotBlank() && seenTimes.add(ms)) {
+                chapters.add(VideoChapter(timeMs = ms, timeLabel = tsText, title = cleaned))
+            }
+        }
+        if (chapters.size < 2) return emptyList()
+        return chapters.sortedBy { it.timeMs }.take(40)
+    }
+
+    private fun updateChaptersStrip(videoId: String, desc: String) {
+        val key = "$videoId:${desc.hashCode()}"
+        if (key == lastChaptersDescKey) return
+        lastChaptersDescKey = key
+
+        val chapters = extractChapters(desc)
+        chaptersContainer.removeAllViews()
+        if (chapters.isEmpty()) {
+            chaptersRow.visibility = View.GONE
+            return
+        }
+        val dp = resources.displayMetrics.density
+        val textColor = ContextCompat.getColor(this, R.color.graball_text)
+        val orangeColor = ContextCompat.getColor(this, R.color.graball_orange)
+        chapters.forEachIndexed { idx, ch ->
+            val chip = TextView(this).apply {
+                val label = SpannableStringBuilder().apply {
+                    append(ch.timeLabel)
+                    setSpan(
+                        android.text.style.ForegroundColorSpan(orangeColor),
+                        0,
+                        ch.timeLabel.length,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                    append("  ")
+                    append(ch.title)
+                }
+                text = label
+                textSize = 11.5f
+                setTextColor(textColor)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                maxWidth = (190 * dp).toInt()
+                setBackgroundResource(R.drawable.yt_chip_bg)
+                setPadding((10 * dp).toInt(), (6 * dp).toInt(), (10 * dp).toInt(), (6 * dp).toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    if (idx < chapters.lastIndex) marginEnd = (6 * dp).toInt()
+                }
+                setOnClickListener {
+                    seekToTimestamp(ch.timeMs, "${ch.timeLabel} · ${ch.title}")
+                }
+            }
+            chaptersContainer.addView(chip)
+        }
+        chaptersRow.visibility = View.VISIBLE
     }
 
     private fun renderSubtitleOverlay() {
@@ -1366,7 +1637,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
             this,
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onDoubleTap(e: MotionEvent): Boolean {
-                    if (inPipMode) return false
+                    if (inPipMode || isScreenLocked) return false
+                    releaseHoldSpeedIfActive()
                     val svc = YouTubePlaybackService.instance ?: return false
                     if (!svc.isReadyForSeek()) return false
                     val isRight = e.x > playerContainer.width / 2f
@@ -1377,7 +1649,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
                 }
 
                 override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                    if (inPipMode) return false
+                    if (inPipMode || isScreenLocked || isHolding2x) return false
                     if (playerView.isControllerFullyVisible) {
                         playerView.hideController()
                         playerTopOverlay.visibility = View.GONE
@@ -1443,11 +1715,23 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         playerView.setOnTouchListener { _, event ->
             if (inPipMode) return@setOnTouchListener false
+            if (isScreenLocked) {
+                if (event.actionMasked == MotionEvent.ACTION_UP) {
+                    if (btnScreenUnlock.visibility == View.VISIBLE) {
+                        mainHandler.removeCallbacks(hideUnlockRunnable)
+                        btnScreenUnlock.visibility = View.GONE
+                    } else {
+                        flashUnlockButton()
+                    }
+                }
+                return@setOnTouchListener true
+            }
             if (isFullscreen) {
                 scaleDetector.onTouchEvent(event)
             }
             val multiTouch = event.pointerCount > 1 || scaleDetector.isInProgress
             if (multiTouch) {
+                releaseHoldSpeedIfActive()
                 draggingVertical = false
                 lastDy = 0f
                 return@setOnTouchListener true
@@ -1472,6 +1756,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
                     startBrightness = if (curB in 0f..1f) curB else 0.5f
                     startVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                     maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                    mainHandler.removeCallbacks(holdSpeedRunnable)
+                    mainHandler.postDelayed(holdSpeedRunnable, 320L)
                     // Consume touch on the video surface so PlayerView.onTouchEvent
                     // doesn't double-toggle controls behind our GestureDetector!
                     // (Child Play/Pause/SeekBar buttons still handle their own taps.)
@@ -1480,6 +1766,12 @@ class YouTubePlayerActivity : AppCompatActivity() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.x - downX
                     val dy = downY - event.y // upward swipe = positive, downward = negative
+                    if (isHolding2x) {
+                        return@setOnTouchListener true
+                    }
+                    if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
+                        mainHandler.removeCallbacks(holdSpeedRunnable)
+                    }
                     if (!draggingVertical && abs(dy) > touchSlop * 2 && abs(dy) > abs(dx) * 1.4f) {
                         draggingVertical = true
                     }
@@ -1517,7 +1809,9 @@ class YouTubePlayerActivity : AppCompatActivity() {
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (draggingVertical && !isFullscreen && event.actionMasked == MotionEvent.ACTION_UP) {
+                    val wasHolding = isHolding2x
+                    releaseHoldSpeedIfActive()
+                    if (!wasHolding && draggingVertical && !isFullscreen && event.actionMasked == MotionEvent.ACTION_UP) {
                         if (lastDy < -portraitSwipeThresholdPx) {
                             enterPipOrMinimize()
                         } else if (lastDy > portraitSwipeThresholdPx) {
@@ -1556,6 +1850,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
             val mark = if (idx == activeIdx) "✓ " else ""
             labels.add("$mark${cap.label}")
         }
+        val sizeLabels = arrayOf("Small", "Medium", "Large")
+        val currentSizeIdx = YouTubeStore.getCaptionTextSize(this)
         AlertDialog.Builder(this)
             .setTitle("Subtitles / Captions")
             .setItems(labels.toTypedArray()) { _, which ->
@@ -1578,6 +1874,36 @@ class YouTubePlayerActivity : AppCompatActivity() {
                         }
                     }
                 }
+            }
+            .setNeutralButton("Aa Size: ${sizeLabels[currentSizeIdx]}") { _, _ ->
+                showSubtitleSizePicker()
+            }
+            .setOnDismissListener {
+                if (isFullscreen && !inPipMode) {
+                    applyChromeVisibility()
+                }
+            }
+            .show()
+    }
+
+    private fun showSubtitleSizePicker() {
+        val current = YouTubeStore.getCaptionTextSize(this)
+        val options = arrayOf(
+            if (current == 0) "✓ Small" else "Small",
+            if (current == 1) "✓ Medium (Default)" else "Medium (Default)",
+            if (current == 2) "✓ Large" else "Large"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Subtitle Text Size")
+            .setItems(options) { _, which ->
+                YouTubeStore.setCaptionTextSize(this, which)
+                updateSubtitleOverlayPosition()
+                val name = when (which) {
+                    0 -> "Small"
+                    2 -> "Large"
+                    else -> "Medium"
+                }
+                showHud("Subtitle size: $name")
             }
             .setOnDismissListener {
                 if (isFullscreen && !inPipMode) {
