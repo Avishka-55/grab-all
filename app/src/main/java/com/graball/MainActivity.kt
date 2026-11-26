@@ -153,10 +153,7 @@ class MainActivity : AppCompatActivity() {
             clipboardBanner.visibility = View.GONE
             val kind = LinkDetector.detect(url)
             if (kind == LinkKind.UNKNOWN) return
-            if (!openYouTubeLinkSheet(url, kind, clearInputOnAction = false)) {
-                linkInput.setText(url)
-                showGrabPanel(url, kind)
-            }
+            openUnifiedDownloadSheet(url, kind, clearInputOnAction = false)
         }
         clipboardBanner.setOnClickListener { triggerDetectedClipboardLink() }
         clipboardActionBtn.setOnClickListener { triggerDetectedClipboardLink() }
@@ -324,9 +321,7 @@ class MainActivity : AppCompatActivity() {
             if (kind != LinkKind.UNKNOWN) {
                 dismissedClipboardUrl = input
                 clipboardBanner.visibility = View.GONE
-                if (!openYouTubeLinkSheet(input, kind, clearInputOnAction = true)) {
-                    showGrabPanel(input, kind)
-                }
+                openUnifiedDownloadSheet(input, kind, clearInputOnAction = true)
             } else {
                 // Keywords detected -> jump directly into YouTube search!
                 grabPanel.visibility = android.view.View.GONE
@@ -529,51 +524,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Route any YouTube video or playlist URL straight into GrabAll's modern
-     * Download Bottom Sheet (with real resolutions, file sizes, and Watch Ad-Free
-     * / Listen Audio quick actions). Returns false for non-YouTube URLs so they
-     * continue using the generic Grab panel.
+     * Route ANY supported video or playlist URL (YouTube, Facebook, TikTok,
+     * Instagram, X, Reddit, Vimeo, etc.) straight into GrabAll's modern
+     * Download Bottom Sheet with real resolutions and file sizes.
      */
-    private fun openYouTubeLinkSheet(
+    private fun openUnifiedDownloadSheet(
         url: String,
         kind: LinkKind,
         clearInputOnAction: Boolean
-    ): Boolean {
-        if (!FastYouTubeDownloader.isYouTubeUrl(url)) return false
-        val plId = FastYouTubeDownloader.extractPlaylistId(url)
-        val vidId = FastYouTubeDownloader.extractVideoId(url)
-        val item = when {
-            kind == LinkKind.PLAYLIST && !plId.isNullOrBlank() -> YtItem(
-                id = plId,
-                title = "YouTube Playlist",
-                channel = "",
-                isPlaylist = true
-            )
-            !vidId.isNullOrBlank() -> YtItem(
-                id = vidId,
-                title = "YouTube Video",
-                channel = "",
-                thumbnailUrl = "https://i.ytimg.com/vi/$vidId/hqdefault.jpg"
-            )
-            else -> return false
-        }
+    ) {
         grabPanel.visibility = View.GONE
-        DownloadSheetHelper.show(
+        DownloadSheetHelper.showForUrl(
             context = this,
-            item = item,
-            showQuickActions = true
+            url = url,
+            kind = kind
         ) {
             if (clearInputOnAction && !linkInput.text.isNullOrEmpty()) {
                 linkInput.setText("")
             }
         }
-        return true
     }
 
     /**
-     * Shared links land here from the YouTube app, Chrome, etc.
-     * (ACTION_SEND, text/plain). YouTube links open directly in the modern
-     * Download & Watch bottom sheet; other links open the Grab panel.
+     * Shared links land here from YouTube, Facebook, TikTok, Instagram, Chrome, etc.
+     * (ACTION_SEND, text/plain). Opens directly in the modern Download Bottom Sheet.
      */
     private fun handleShareIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_SEND) {
@@ -589,18 +563,10 @@ class MainActivity : AppCompatActivity() {
             linkInput.setText(url)
             return
         }
-        if (FastYouTubeDownloader.isYouTubeUrl(url)) {
-            linkInput.post {
-                if (!isFinishing && !isDestroyed) {
-                    if (!openYouTubeLinkSheet(url, kind, clearInputOnAction = false)) {
-                        linkInput.setText(url)
-                        showGrabPanel(url, kind)
-                    }
-                }
+        linkInput.post {
+            if (!isFinishing && !isDestroyed) {
+                openUnifiedDownloadSheet(url, kind, clearInputOnAction = false)
             }
-        } else {
-            linkInput.setText(url)
-            showGrabPanel(url, kind)
         }
     }
 
@@ -660,15 +626,20 @@ class MainActivity : AppCompatActivity() {
             return
         }
         detectedClipboardUrl = url
+        val lowerUrl = url.lowercase()
         val isYt = FastYouTubeDownloader.isYouTubeUrl(url)
         clipboardLabel.text = when {
             isYt && kind == LinkKind.PLAYLIST -> "📋 YouTube playlist on clipboard"
             isYt -> "📋 YouTube link on clipboard"
+            lowerUrl.contains("facebook.com") || lowerUrl.contains("fb.watch") -> "📋 Facebook link on clipboard"
+            lowerUrl.contains("tiktok.com") -> "📋 TikTok link on clipboard"
+            lowerUrl.contains("instagram.com") -> "📋 Instagram link on clipboard"
+            lowerUrl.contains("x.com") || lowerUrl.contains("twitter.com") -> "📋 X link on clipboard"
             kind == LinkKind.PLAYLIST -> "📋 Playlist link on clipboard"
             else -> "📋 Video link on clipboard"
         }
         clipboardPreview.text = LinkDetector.preview(url)
-        clipboardActionBtn.text = if (isYt) "Grab / Watch" else "Grab"
+        clipboardActionBtn.text = if (isYt) "Grab / Watch" else "Download"
         clipboardBanner.visibility = View.VISIBLE
     }
 

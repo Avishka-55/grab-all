@@ -184,17 +184,29 @@ class FastYouTubeDownloader(
         }
 
         val parallelConns = concurrency.coerceIn(4, 6)
-        if (info.title.isNotBlank()) {
-            callback.onTitleResolved(info.title)
+        val effectiveTitle = if (!DownloadProgressBus.isPlaceholderTitle(info.title)) {
+            info.title
+        } else {
+            DownloadProgressBus.titles[url]?.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+                ?: fetchYouTubeOEmbedTitle(videoId)
+                ?: info.title
         }
-        val safeTitle = sanitizeFileName(info.title).ifBlank { videoId }
+        val effectiveInfo = if (effectiveTitle != info.title && effectiveTitle.isNotBlank()) {
+            info.copy(title = effectiveTitle)
+        } else {
+            info
+        }
+        if (!DownloadProgressBus.isPlaceholderTitle(effectiveInfo.title)) {
+            callback.onTitleResolved(effectiveInfo.title)
+        }
+        val safeTitle = sanitizeFileName(effectiveInfo.title).ifBlank { videoId }
         val resultFile = if (audioOnly) {
             downloadAudioTrack(
-                info = info,
+                info = effectiveInfo,
                 targetDir = stagingDir,
                 fileBaseName = safeTitle,
                 albumTitle = "",
-                tempTag = "s_${info.videoId}",
+                tempTag = "s_${effectiveInfo.videoId}",
                 parallelConns = parallelConns,
                 onByteProgress = { done, total ->
                     emitSingleProgress(done, total, callback)
@@ -206,10 +218,10 @@ class FastYouTubeDownloader(
             )
         } else {
             downloadVideoTrack(
-                info = info,
+                info = effectiveInfo,
                 targetDir = stagingDir,
                 fileBaseName = safeTitle,
-                tempTag = "s_${info.videoId}",
+                tempTag = "s_${effectiveInfo.videoId}",
                 parallelConns = parallelConns,
                 onByteProgress = { done, total ->
                     emitSingleProgress(done, total, callback)
@@ -1558,13 +1570,57 @@ class FastYouTubeDownloader(
             return "$cleaned${sep}range=$start-$end"
         }
 
-        fun sanitizeFileName(raw: String): String {
-            return raw
-                .replace(Regex("""[\\/:*?"<>|\u0000-\u001F]"""), " ")
+        /**
+         * Public zero-auth oEmbed lookup (~150ms) used as a safety net when a
+         * fallback InnerTube client omits `videoDetails.title`, so downloaded
+         * files are saved with the real YouTube title instead of "YouTube Video".
+         */
+        fun fetchYouTubeOEmbedTitle(videoId: String): String? {
+            if (videoId.isBlank()) return null
+            return try {
+                val req = Request.Builder()
+                    .url("https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$videoId&format=json")
+                    .header("User-Agent", "Mozilla/5.0")
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return null
+                    val body = resp.body?.string().orEmpty()
+                    val title = org.json.JSONObject(body).optString("title").trim()
+                    title.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        /**
+         * Sanitizes a video/audio title for Android & Linux filesystems and trims
+         * strictly by UTF-8 BYTE length (<= 120 bytes) so multi-byte Sinhala,
+         * Tamil, Hindi, CJK, or emoji titles never trigger `[Errno 36] File name too long`.
+         */
+        fun sanitizeFileName(raw: String, maxUtf8Bytes: Int = 120): String {
+            val cleaned = raw
+                .replace(Regex("""[\\/:*?"<>|｜\u0000-\u001F]"""), " ")
                 .replace(Regex("""\s+"""), " ")
                 .trim()
                 .trim('.')
-                .take(100)
+            if (cleaned.toByteArray(Charsets.UTF_8).size <= maxUtf8Bytes) {
+                return cleaned
+            }
+            val sb = StringBuilder()
+            var byteCount = 0
+            var i = 0
+            while (i < cleaned.length) {
+                val cp = cleaned.codePointAt(i)
+                val charCount = Character.charCount(cp)
+                val piece = cleaned.substring(i, i + charCount)
+                val pieceBytes = piece.toByteArray(Charsets.UTF_8).size
+                if (byteCount + pieceBytes > maxUtf8Bytes) break
+                sb.append(piece)
+                byteCount += pieceBytes
+                i += charCount
+            }
+            return sb.toString().trim().trim('.')
         }
 
         private fun formatSpeed(bytesPerSec: Long): String {

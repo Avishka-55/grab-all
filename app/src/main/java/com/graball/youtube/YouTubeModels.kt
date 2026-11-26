@@ -67,6 +67,16 @@ data class CaptionTrack(
     val isAuto: Boolean = false
 )
 
+data class HlsAudioTrack(
+    val groupId: String,
+    val name: String,
+    val language: String,
+    val url: String,
+    val isOriginal: Boolean = false,
+    val isDefault: Boolean = false,
+    val isDubbedOrDescriptive: Boolean = false
+)
+
 data class VideoStreamInfo(
     val videoId: String,
     val title: String,
@@ -77,6 +87,7 @@ data class VideoStreamInfo(
     val thumbnailUrl: String,
     val hlsUrl: String?,
     val hlsVariants: List<StreamFormat> = emptyList(),
+    val hlsAudioTracks: List<HlsAudioTrack> = emptyList(),
     val videoStreams: List<StreamFormat>,
     val audioStreams: List<StreamFormat>,
     val muxedStreams: List<StreamFormat>,
@@ -228,12 +239,15 @@ data class VideoStreamInfo(
     /** Fallback muxed stream (video + audio in one file) when adaptive merge isn't available. */
     fun pickMuxedStream(targetHeight: Int?): StreamFormat? {
         if (muxedStreams.isEmpty()) return null
+        val pool = muxedStreams.filter { it.isOriginalAudio }.ifEmpty {
+            muxedStreams.filter { !it.isDubbedOrDescriptive }.ifEmpty { muxedStreams }
+        }
         return if (targetHeight == null) {
-            muxedStreams.maxByOrNull { normalizeHeight(it.height) }
+            pool.maxByOrNull { normalizeHeight(it.height) }
         } else {
-            muxedStreams.filter { normalizeHeight(it.height) in 1..targetHeight }
+            pool.filter { normalizeHeight(it.height) in 1..targetHeight }
                 .maxByOrNull { normalizeHeight(it.height) }
-                ?: muxedStreams.minByOrNull { kotlin.math.abs(normalizeHeight(it.height) - targetHeight) }
+                ?: pool.minByOrNull { kotlin.math.abs(normalizeHeight(it.height) - targetHeight) }
         }
     }
 

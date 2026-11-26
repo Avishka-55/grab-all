@@ -17,6 +17,7 @@ import android.view.ViewGroup
 import android.view.ViewOutlineProvider
 import android.view.Window
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -29,7 +30,15 @@ import com.graball.R
 import com.graball.engine.DownloadPrefs
 import com.graball.engine.DownloadProgressBus
 import com.graball.engine.DownloadService
+import com.graball.engine.FastYouTubeDownloader
+import com.graball.engine.LinkDetector
+import com.graball.engine.LinkKind
+import com.graball.engine.RuntimeExtractor
 import com.graball.engine.RuntimePaths
+import com.graball.engine.WebViewCookieSync
+import com.graball.engine.YtDlpRunner
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -65,16 +74,116 @@ object DownloadSheetHelper {
     private val resolverExecutor = Executors.newCachedThreadPool()
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * Universal entry point for ANY pasted, clipboard-detected, or shared URL
+     * (YouTube, Facebook, TikTok, Instagram, X, Reddit, Vimeo, etc.).
+     * Opens the modern Download Bottom Sheet with async resolution + real file sizes.
+     */
+    fun showForUrl(
+        context: Context,
+        url: String,
+        kind: LinkKind,
+        onActionTaken: (() -> Unit)? = null
+    ) {
+        if (FastYouTubeDownloader.isYouTubeUrl(url)) {
+            val plId = FastYouTubeDownloader.extractPlaylistId(url)
+            val vidId = FastYouTubeDownloader.extractVideoId(url)
+            val ytItem = when {
+                kind == LinkKind.PLAYLIST && !plId.isNullOrBlank() -> YtItem(
+                    id = plId,
+                    title = "YouTube Playlist",
+                    channel = "",
+                    isPlaylist = true
+                )
+                !vidId.isNullOrBlank() -> YtItem(
+                    id = vidId,
+                    title = "YouTube Video",
+                    channel = "",
+                    thumbnailUrl = "https://i.ytimg.com/vi/$vidId/hqdefault.jpg"
+                )
+                else -> null
+            }
+            if (ytItem != null) {
+                show(
+                    context = context,
+                    item = ytItem,
+                    showQuickActions = true,
+                    onActionTaken = onActionTaken
+                )
+                return
+            }
+        }
+
+        val platform = detectPlatform(url)
+        val placeholderItem = YtItem(
+            id = "",
+            title = if (kind == LinkKind.PLAYLIST) "${platform.name} Playlist" else "${platform.name} Video",
+            channel = LinkDetector.preview(url),
+            isPlaylist = (kind == LinkKind.PLAYLIST)
+        )
+        showInternal(
+            context = context,
+            item = placeholderItem,
+            showQuickActions = false,
+            externalUrl = url,
+            platformIcon = platform.icon,
+            platformName = platform.name,
+            onActionTaken = onActionTaken
+        )
+    }
+
     fun show(
         context: Context,
         item: YtItem,
         showQuickActions: Boolean = false,
         onActionTaken: (() -> Unit)? = null
     ) {
+        showInternal(
+            context = context,
+            item = item,
+            showQuickActions = showQuickActions,
+            externalUrl = null,
+            platformIcon = "▶",
+            platformName = "YouTube",
+            onActionTaken = onActionTaken
+        )
+    }
+
+    private data class PlatformMeta(val name: String, val icon: String)
+
+    private fun detectPlatform(url: String): PlatformMeta {
+        val lower = url.lowercase(Locale.US)
+        return when {
+            lower.contains("facebook.com") || lower.contains("fb.watch") || lower.contains("fb.com") ->
+                PlatformMeta("Facebook", "📘")
+            lower.contains("tiktok.com") ->
+                PlatformMeta("TikTok", "🎵")
+            lower.contains("instagram.com") || lower.contains("instagr.am") ->
+                PlatformMeta("Instagram", "📸")
+            lower.contains("twitter.com") || lower.contains("x.com") ->
+                PlatformMeta("X", "𝕏")
+            lower.contains("reddit.com") || lower.contains("redd.it") ->
+                PlatformMeta("Reddit", "🟠")
+            lower.contains("vimeo.com") ->
+                PlatformMeta("Vimeo", "🎬")
+            else -> PlatformMeta("Video", "🌐")
+        }
+    }
+
+    private fun showInternal(
+        context: Context,
+        item: YtItem,
+        showQuickActions: Boolean,
+        externalUrl: String?,
+        platformIcon: String,
+        platformName: String,
+        onActionTaken: (() -> Unit)?
+    ) {
         val density = context.resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()
 
         var currentItem = item
+        val targetUrl = externalUrl ?: item.watchUrl
         val prefs = DownloadPrefs.load(context)
         val savedAudioFormat = DownloadPrefs.getAudioFormat(context)
         val colorBg = ContextCompat.getColor(context, R.color.graball_nav)
@@ -127,11 +236,10 @@ object DownloadSheetHelper {
             ).apply { bottomMargin = dp(14) }
         }
 
-        val thumbView = ImageView(context).apply {
+        val thumbBox = FrameLayout(context).apply {
             layoutParams = LinearLayout.LayoutParams(dp(92), dp(52)).apply {
                 marginEnd = dp(12)
             }
-            scaleType = ImageView.ScaleType.CENTER_CROP
             setBackgroundColor(colorCard)
             outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) {
@@ -140,13 +248,36 @@ object DownloadSheetHelper {
             }
             clipToOutline = true
         }
+        thumbBox.addView(
+            TextView(context).apply {
+                text = platformIcon
+                textSize = 22f
+                gravity = Gravity.CENTER
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+        )
+        val thumbView = ImageView(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+        thumbBox.addView(thumbView)
         val thumbUrl = item.thumbnailUrl.ifBlank {
-            if (!item.isPlaylist && item.id.isNotBlank()) "https://i.ytimg.com/vi/${item.id}/hqdefault.jpg" else ""
+            if (externalUrl == null && !item.isPlaylist && item.id.isNotBlank()) {
+                "https://i.ytimg.com/vi/${item.id}/hqdefault.jpg"
+            } else {
+                ""
+            }
         }
         if (thumbUrl.isNotBlank()) {
             ThumbnailLoader.load(thumbUrl, thumbView, targetWidthPx = 320)
         }
-        headerRow.addView(thumbView)
+        headerRow.addView(thumbBox)
 
         val titleCol = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -676,7 +807,7 @@ object DownloadSheetHelper {
 
         downloadBtn.setOnClickListener {
             val chosen = selectedOption ?: return@setOnClickListener
-            val url = item.watchUrl
+            val url = targetUrl
             val playlistMode = if (item.isPlaylist) {
                 when (selectedPlaylistPos) {
                     0 -> "20"
@@ -696,9 +827,9 @@ object DownloadSheetHelper {
             if (!staging.exists()) staging.mkdirs()
 
             val fileName = if (playlistMode == "single") {
-                "%(title)s.%(ext)s"
+                "%(title).120B.%(ext)s"
             } else {
-                "%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s"
+                "%(playlist_title).80B/%(playlist_index)s - %(title).100B.%(ext)s"
             }
             val template = File(staging, fileName).absolutePath
 
@@ -728,11 +859,11 @@ object DownloadSheetHelper {
                 )
             )
 
-            if (currentItem.title.isNotBlank() &&
-                currentItem.title != "YouTube Video" &&
-                currentItem.title != "YouTube Playlist"
-            ) {
+            if (!DownloadProgressBus.isPlaceholderTitle(currentItem.title)) {
                 DownloadProgressBus.titles[url] = currentItem.title
+            }
+            if (currentItem.thumbnailUrl.startsWith("http")) {
+                DownloadProgressBus.thumbnails[url] = currentItem.thumbnailUrl
             }
             DownloadService.startDownload(
                 context, url, template, chosen.audioOnly, chosen.maxHeight, playlistMode
@@ -761,6 +892,39 @@ object DownloadSheetHelper {
             }
         }
         dialog.show()
+
+        // Non-YouTube platforms (Facebook, TikTok, Instagram, X, Reddit, Vimeo, etc.)
+        if (externalUrl != null) {
+            if (item.isPlaylist) {
+                renderOptions(info = null)
+                return
+            }
+            val cachedExt = getCachedInfo(externalUrl)
+            if (cachedExt != null) {
+                renderOptions(info = cachedExt)
+                return
+            }
+            loadingText.text = "Loading $platformName video & sizes…"
+            val appCtx = context.applicationContext
+            resolverExecutor.execute {
+                val resolved = resolveExternalUrlInfo(appCtx, externalUrl, platformName)
+                if (resolved != null) {
+                    cacheStreamInfo(externalUrl, resolved)
+                }
+                mainHandler.post {
+                    if (dismissed) return@post
+                    if (resolved != null) {
+                        renderOptions(info = resolved)
+                    } else {
+                        renderOptions(
+                            info = null,
+                            fallbackNote = "Quick preview unavailable — pick a quality to download directly."
+                        )
+                    }
+                }
+            }
+            return
+        }
 
         // Populate formats: instant for playlists, currently-playing video, or cache;
         // otherwise fast background InnerTube resolution (~250-400ms).
@@ -814,13 +978,30 @@ object DownloadSheetHelper {
 
         val appCtx = context.applicationContext
         resolverExecutor.execute {
-            val resolved = try {
+            var resolved = try {
                 YouTubeInnerTube.resolveForDownload(
                     context = appCtx,
                     videoId = item.id
                 ).info
             } catch (_: Exception) {
                 null
+            }
+            // Guarantee a real title even if a fallback InnerTube client omitted videoDetails.title
+            if (resolved != null && DownloadProgressBus.isPlaceholderTitle(resolved.title)) {
+                val oembedTitle = FastYouTubeDownloader.fetchYouTubeOEmbedTitle(item.id)
+                if (!oembedTitle.isNullOrBlank()) {
+                    resolved = resolved.copy(title = oembedTitle)
+                }
+            } else if (resolved == null && DownloadProgressBus.isPlaceholderTitle(currentItem.title)) {
+                val oembedTitle = FastYouTubeDownloader.fetchYouTubeOEmbedTitle(item.id)
+                if (!oembedTitle.isNullOrBlank()) {
+                    mainHandler.post {
+                        if (!dismissed) {
+                            currentItem = currentItem.copy(title = oembedTitle)
+                            titleTv.text = oembedTitle
+                        }
+                    }
+                }
             }
             if (resolved != null) {
                 cacheStreamInfo(item.id, resolved)
@@ -839,19 +1020,160 @@ object DownloadSheetHelper {
         }
     }
 
+    private fun getCachedInfo(cacheKey: String): VideoStreamInfo? {
+        if (cacheKey.isBlank()) return null
+        synchronized(cacheLock) {
+            val entry = infoCache[cacheKey] ?: return null
+            if (System.currentTimeMillis() - entry.cachedAtMs <= CACHE_TTL_MS) {
+                return entry.info
+            }
+            infoCache.remove(cacheKey)
+        }
+        return null
+    }
+
     private fun getInstantStreamInfo(videoId: String): VideoStreamInfo? {
         if (videoId.isBlank()) return null
         YouTubePlaybackService.currentState.streamInfo
             ?.takeIf { it.videoId == videoId && it.availableHeights().isNotEmpty() }
             ?.let { return it }
-        synchronized(cacheLock) {
-            val entry = infoCache[videoId] ?: return null
-            if (System.currentTimeMillis() - entry.cachedAtMs <= CACHE_TTL_MS) {
-                return entry.info
+        return getCachedInfo(videoId)
+    }
+
+    /**
+     * Resolves metadata, thumbnail, real resolutions, and file sizes for Facebook,
+     * TikTok, Instagram, X, Reddit, Vimeo, and other supported sites via GrabAll's
+     * bundled yt-dlp extractor (--dump-single-json).
+     */
+    private fun resolveExternalUrlInfo(
+        context: Context,
+        url: String,
+        platformName: String
+    ): VideoStreamInfo? {
+        return try {
+            if (!RuntimeExtractor.extractIfNeeded(context, DownloadService.RUNTIME_VERSION)) {
+                return null
             }
-            infoCache.remove(videoId)
+            WebViewCookieSync.exportYouTubeCookiesIfLoggedIn(context)
+            val cookies = RuntimePaths.cookiesFile(context).takeIf { it.exists() }
+            val runner = YtDlpRunner(
+                pythonBinary = RuntimePaths.pythonBinary(context),
+                ytDlpScript = RuntimePaths.ytDlpScript(context),
+                ffmpegDir = RuntimePaths.ffmpegDir(context),
+                quickJsBinary = RuntimePaths.quickJsBinary(context),
+                cookiesFile = cookies,
+                cacheDir = context.cacheDir,
+                homeDir = context.filesDir,
+                certFile = RuntimePaths.certFile(context),
+                pythonHomeDir = RuntimePaths.pythonHomeDir(context),
+                pythonLibDir = RuntimePaths.pythonLibDir(context),
+                pythonPathDir = RuntimePaths.ytDlpBundleDir(context)
+            )
+            val (raw, _) = runner.extractInfoJson(url, timeoutSec = 20L)
+            if (raw.isNullOrBlank()) return null
+
+            val root = JSONObject(raw)
+            val rawTitle = root.optString("title").ifBlank { root.optString("fulltitle") }
+            val cleanTitle = cleanSocialTitle(rawTitle).ifBlank { "$platformName Video" }
+            val channel = root.optString("uploader")
+                .ifBlank { root.optString("channel") }
+                .ifBlank { platformName }
+            val durationSec = root.optLong("duration", 0L)
+            val thumb = root.optString("thumbnail").takeIf { it.startsWith("http") }.orEmpty()
+            val formats = root.optJSONArray("formats") ?: JSONArray()
+
+            val videoStreams = mutableListOf<StreamFormat>()
+            val audioStreams = mutableListOf<StreamFormat>()
+            val muxedStreams = mutableListOf<StreamFormat>()
+
+            for (i in 0 until formats.length()) {
+                val f = formats.optJSONObject(i) ?: continue
+                val fUrl = f.optString("url")
+                if (!fUrl.startsWith("http")) continue
+                val vcodec = f.optString("vcodec", "")
+                val acodec = f.optString("acodec", "")
+                val formatId = f.optString("format_id", "").lowercase(Locale.US)
+                val ext = f.optString("ext", "mp4")
+                var height = f.optInt("height", 0)
+                val width = f.optInt("width", 0)
+                if (height > 0 && width > 0) {
+                    // Portrait Reels/TikToks: use short side so 1080x1920 shows as 1080p, 720x1280 as 720p!
+                    height = minOf(height, width)
+                }
+                if (height <= 0) {
+                    height = when {
+                        formatId == "hd" || formatId.contains("hd") -> 720
+                        formatId == "sd" || formatId.contains("sd") -> 360
+                        else -> 0
+                    }
+                }
+                val tbr = (f.optDouble("tbr", 0.0) * 1000.0).toInt()
+                    .takeIf { it > 0 }
+                    ?: (f.optDouble("vbr", 0.0) * 1000.0).toInt()
+                    .takeIf { it > 0 }
+                    ?: (f.optDouble("abr", 0.0) * 1000.0).toInt()
+                val fileSize = f.optLong("filesize", 0L).takeIf { it > 0L }
+                    ?: f.optLong("filesize_approx", 0L).coerceAtLeast(0L)
+
+                val hasVideo = vcodec != "none" && (vcodec.isNotBlank() || height > 0)
+                val hasAudio = acodec != "none" && (acodec.isNotBlank() || !hasVideo)
+                val mime = when {
+                    hasVideo && !hasAudio -> "video/$ext; codecs=\"$vcodec\""
+                    !hasVideo && hasAudio -> "audio/$ext; codecs=\"$acodec\""
+                    else -> "video/$ext; codecs=\"$vcodec, $acodec\""
+                }
+                val normH = if (height > 0) VideoStreamInfo.normalizeHeight(height) else 0
+                val fmt = StreamFormat(
+                    itag = i,
+                    url = fUrl,
+                    mimeType = mime,
+                    qualityLabel = if (normH > 0) "${normH}p" else ext.uppercase(Locale.US),
+                    height = normH,
+                    bitrate = tbr,
+                    isAudioOnly = !hasVideo && hasAudio,
+                    isVideoOnly = hasVideo && !hasAudio,
+                    isMuxed = hasVideo && hasAudio,
+                    contentLengthBytes = fileSize
+                )
+                when {
+                    fmt.isAudioOnly -> audioStreams.add(fmt)
+                    fmt.isVideoOnly -> videoStreams.add(fmt)
+                    fmt.isMuxed -> muxedStreams.add(fmt)
+                }
+            }
+
+            if (thumb.isNotBlank()) {
+                DownloadProgressBus.thumbnails[url] = thumb
+            }
+
+            VideoStreamInfo(
+                videoId = root.optString("id", ""),
+                title = cleanTitle,
+                channel = channel,
+                durationSec = durationSec,
+                viewCount = "",
+                description = "",
+                thumbnailUrl = thumb,
+                hlsUrl = null,
+                videoStreams = videoStreams,
+                audioStreams = audioStreams,
+                muxedStreams = muxedStreams,
+                userAgent = "Mozilla/5.0"
+            )
+        } catch (_: Exception) {
+            null
         }
-        return null
+    }
+
+    /** Strips noisy Facebook/social view+reaction counters from extracted captions. */
+    private fun cleanSocialTitle(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return ""
+        val stripped = trimmed.replace(
+            Regex("""^\s*[\d.,]+[KMBkmb]?\s+views?\b[^|｜]*[|｜]\s*""", RegexOption.IGNORE_CASE),
+            ""
+        ).trim()
+        return (if (stripped.isNotBlank()) stripped else trimmed).take(140)
     }
 
     private fun cacheStreamInfo(videoId: String, info: VideoStreamInfo) {

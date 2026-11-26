@@ -291,7 +291,7 @@ class YouTubePlaybackService : MediaSessionService() {
                     }
 
                     override fun onTracksChanged(tracks: Tracks) {
-                        if (currentStreamMode == StreamMode.HLS_MASTER && selectedHeight != null) {
+                        if (currentStreamMode == StreamMode.HLS_MASTER) {
                             applyTrackSelection()
                         }
                         refreshActiveVideoHeight(tracks)
@@ -817,13 +817,43 @@ class YouTubePlaybackService : MediaSessionService() {
     /** True if the active video has any subtitle/caption tracks available. */
     fun hasAnyCaptions(): Boolean = availableCaptions().isNotEmpty()
 
-    /** Distinct audio tracks for multi-language / dubbed YouTube videos. */
-    fun availableAudioTracks(): List<AudioTrackOption> =
-        currentStreamInfo?.availableAudioTracks().orEmpty()
+    /** Distinct audio tracks for multi-language / dubbed YouTube videos (both DASH & HLS). */
+    fun availableAudioTracks(): List<AudioTrackOption> {
+        val info = currentStreamInfo ?: return emptyList()
+        if (currentStreamMode == StreamMode.HLS_MASTER) {
+            val hlsOptions = buildHlsAudioOptions(player?.currentTracks, info.hlsAudioTracks)
+            if (hlsOptions.isNotEmpty()) return hlsOptions
+        }
+        val dash = info.availableAudioTracks()
+        if (dash.isNotEmpty()) return dash
+        return buildHlsAudioOptions(player?.currentTracks, info.hlsAudioTracks)
+    }
 
     /** Currently active audio language label (for multi-audio picker). */
     fun currentAudioTrackLabel(): String {
         val info = currentStreamInfo ?: return "Original"
+        if (currentStreamMode == StreamMode.HLS_MASTER) {
+            val tracks = player?.currentTracks
+            if (tracks != null) {
+                for (group in tracks.groups) {
+                    if (group.type != C.TRACK_TYPE_AUDIO || !group.isSelected) continue
+                    for (i in 0 until group.length) {
+                        if (group.isTrackSelected(i)) {
+                            val fmt = group.getTrackFormat(i)
+                            val matched = matchHlsAudioMeta(fmt, info.hlsAudioTracks)
+                            return formatHlsAudioLabel(fmt, matched)
+                        }
+                    }
+                }
+            }
+            val options = availableAudioTracks()
+            if (!selectedAudioTrackId.isNullOrBlank()) {
+                options.firstOrNull { it.id == selectedAudioTrackId }?.let { return it.label }
+            }
+            options.firstOrNull { it.isOriginal }?.let { return it.label }
+            options.firstOrNull()?.let { return it.label }
+            return "Original"
+        }
         val active = info.bestAudio(selectedAudioTrackId)
         return active?.audioDisplayName?.takeIf { it.isNotBlank() }
             ?: active?.audioTrackId?.substringBefore('.')?.uppercase()?.takeIf { it.isNotBlank() }
@@ -836,6 +866,12 @@ class YouTubePlaybackService : MediaSessionService() {
         val p = player ?: return
         if (selectedAudioTrackId == trackId) return
         selectedAudioTrackId = trackId
+        if (currentStreamMode == StreamMode.HLS_MASTER) {
+            // Instant zero-reload audio switch directly inside ExoPlayer HLS!
+            applyTrackSelection()
+            broadcastState()
+            return
+        }
         val pos = p.currentPosition.coerceAtLeast(0L)
         val wasPlaying = p.playWhenReady
         attemptedModes.clear()
@@ -1421,8 +1457,11 @@ class YouTubePlaybackService : MediaSessionService() {
     private fun applyTrackSelection() {
         val p = player ?: return
         val chosen = selectedHeight
-        val builder = p.trackSelectionParameters.buildUpon()
+        val currentParams = p.trackSelectionParameters
+        val builder = currentParams.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+            .setPreferredAudioLanguage(null)
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, isEffectivelyAudioOnly())
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             .setPreferredVideoMimeType(null)
@@ -1470,6 +1509,23 @@ class YouTubePlaybackService : MediaSessionService() {
                     .setMinVideoSize(0, 0)
                     .setForceHighestSupportedBitrate(false)
             }
+
+            // CRITICAL for multi-audio / AI-auto-dubbed HLS manifests (VISIONOS / WEB_SAFARI):
+            // 1) Pre-hint the original (or chosen) language BEFORE prepare() so ExoPlayer fetches
+            //    the right audio segments from the very first request.
+            val targetHlsLang = resolvePreferredHlsAudioLanguage(currentStreamInfo, selectedAudioTrackId)
+            if (!targetHlsLang.isNullOrBlank()) {
+                builder.setPreferredAudioLanguage(targetHlsLang)
+            } else {
+                builder.setPreferredAudioLanguage(null)
+            }
+            // 2) Once tracks load (onTracksChanged), lock the exact original/selected TrackGroup
+            //    override so VPN-localized DEFAULT=YES dubs or alphabetical tracks can never win.
+            pickBestHlsAudioOverride(p.currentTracks, currentStreamInfo, selectedAudioTrackId)?.let { (audioGroup, audioIdx) ->
+                builder.setOverrideForType(
+                    TrackSelectionOverride(audioGroup.mediaTrackGroup, listOf(audioIdx))
+                )
+            }
         } else {
             // Single-resolution modes (ADAPTIVE_MERGE, HLS_VARIANT, MUXED):
             // remove size caps so 1440p / 2160p streams are never rejected by ExoPlayer.
@@ -1478,7 +1534,243 @@ class YouTubePlaybackService : MediaSessionService() {
                 .setMinVideoSize(0, 0)
                 .setForceHighestSupportedBitrate(false)
         }
-        p.trackSelectionParameters = builder.build()
+        val nextParams = builder.build()
+        if (nextParams != currentParams) {
+            p.trackSelectionParameters = nextParams
+        }
+    }
+
+    private fun resolvePreferredHlsAudioLanguage(
+        info: VideoStreamInfo?,
+        preferredTrackId: String?
+    ): String? {
+        val hlsTracks = info?.hlsAudioTracks.orEmpty()
+        if (!preferredTrackId.isNullOrBlank()) {
+            if (preferredTrackId.startsWith("hls:")) {
+                val parts = preferredTrackId.split(':')
+                val lang = parts.getOrNull(1)?.takeIf { it.length in 2..8 }
+                if (!lang.isNullOrBlank()) return lang
+            }
+            val base = preferredTrackId.substringBefore('.')
+            if (base.isNotBlank()) return base
+        }
+        hlsTracks.firstOrNull { it.isOriginal && it.language.isNotBlank() }?.let { return it.language }
+        hlsTracks.firstOrNull { it.isDefault && !it.isDubbedOrDescriptive && it.language.isNotBlank() }?.let { return it.language }
+        val nonDubbed = hlsTracks.filter { !it.isDubbedOrDescriptive && it.language.isNotBlank() }
+        if (nonDubbed.isNotEmpty()) {
+            nonDubbed.firstOrNull { it.language.startsWith("en", ignoreCase = true) }?.let { return it.language }
+            return nonDubbed.first().language
+        }
+        return null
+    }
+
+    private fun matchHlsAudioMeta(
+        fmt: androidx.media3.common.Format,
+        hlsTracks: List<HlsAudioTrack>
+    ): HlsAudioTrack? {
+        if (hlsTracks.isEmpty()) return null
+        val fmtId = fmt.id.orEmpty()
+        val fmtLabel = fmt.label.orEmpty()
+        val fmtLang = fmt.language.orEmpty()
+        // 1) Exact GROUP-ID:NAME match
+        if (fmtId.isNotBlank()) {
+            hlsTracks.firstOrNull {
+                fmtId.equals("${it.groupId}:${it.name}", ignoreCase = true) ||
+                    (it.name.isNotBlank() && fmtId.endsWith(":${it.name}", ignoreCase = true))
+            }?.let { return it }
+        }
+        // 2) Exact NAME match
+        if (fmtLabel.isNotBlank()) {
+            hlsTracks.firstOrNull { it.name.equals(fmtLabel, ignoreCase = true) }?.let { return it }
+        }
+        // 3) Language match (prefer original if multiple entries share the same language)
+        if (fmtLang.isNotBlank()) {
+            val langMatches = hlsTracks.filter { it.language.equals(fmtLang, ignoreCase = true) }
+            if (langMatches.isNotEmpty()) {
+                return langMatches.firstOrNull { it.isOriginal } ?: langMatches.first()
+            }
+        }
+        return null
+    }
+
+    private fun hlsAudioOptionId(
+        fmt: androidx.media3.common.Format,
+        matched: HlsAudioTrack?
+    ): String {
+        val lang = (matched?.language?.ifBlank { null } ?: fmt.language.orEmpty()).lowercase()
+        val name = (matched?.name?.ifBlank { null } ?: fmt.label.orEmpty()).trim().lowercase()
+        return when {
+            lang.isNotBlank() && name.isNotBlank() -> "hls:$lang:$name"
+            name.isNotBlank() -> "hls:$name"
+            lang.isNotBlank() -> "hls:$lang"
+            else -> "hls:${fmt.id.orEmpty()}"
+        }
+    }
+
+    private fun formatHlsAudioLabel(
+        fmt: androidx.media3.common.Format,
+        matched: HlsAudioTrack?
+    ): String {
+        val rawName = matched?.name?.ifBlank { null } ?: fmt.label.orEmpty().trim()
+        val rawLang = matched?.language?.ifBlank { null } ?: fmt.language.orEmpty().trim()
+        if (rawName.isNotBlank()) return rawName
+        if (rawLang.isNotBlank()) {
+            val display = try {
+                java.util.Locale.forLanguageTag(rawLang).getDisplayName(java.util.Locale.ENGLISH)
+            } catch (_: Exception) {
+                rawLang.uppercase()
+            }
+            return display.ifBlank { rawLang.uppercase() }
+        }
+        return "Original"
+    }
+
+    private fun isHlsTrackOriginal(
+        fmt: androidx.media3.common.Format,
+        matched: HlsAudioTrack?
+    ): Boolean {
+        if (matched?.isOriginal == true) return true
+        val label = fmt.label.orEmpty().lowercase()
+        val id = fmt.id.orEmpty().lowercase()
+        return label.contains("original") || id.contains(".4")
+    }
+
+    private fun isHlsTrackDubOrDesc(
+        fmt: androidx.media3.common.Format,
+        matched: HlsAudioTrack?
+    ): Boolean {
+        if (isHlsTrackOriginal(fmt, matched)) return false
+        if (matched?.isDubbedOrDescriptive == true) return true
+        val label = fmt.label.orEmpty().lowercase()
+        if (label.contains("dubbed") || label.contains("descriptive")) return true
+        return (fmt.roleFlags and (C.ROLE_FLAG_DUB or C.ROLE_FLAG_DESCRIBES_VIDEO)) != 0
+    }
+
+    private fun buildHlsAudioOptions(
+        tracks: Tracks?,
+        hlsTracks: List<HlsAudioTrack>
+    ): List<AudioTrackOption> {
+        val grouped = LinkedHashMap<String, AudioTrackOption>()
+        if (tracks != null) {
+            for (group in tracks.groups) {
+                if (group.type != C.TRACK_TYPE_AUDIO) continue
+                for (i in 0 until group.length) {
+                    val fmt = group.getTrackFormat(i)
+                    val matched = matchHlsAudioMeta(fmt, hlsTracks)
+                    val id = hlsAudioOptionId(fmt, matched)
+                    val label = formatHlsAudioLabel(fmt, matched)
+                    val isOrig = isHlsTrackOriginal(fmt, matched)
+                    val isDef = matched?.isDefault == true ||
+                        (fmt.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0
+                    val existing = grouped[id]
+                    if (existing == null) {
+                        grouped[id] = AudioTrackOption(
+                            id = id,
+                            label = label,
+                            isOriginal = isOrig,
+                            isDefault = isDef
+                        )
+                    } else if (isOrig && !existing.isOriginal) {
+                        grouped[id] = existing.copy(isOriginal = true)
+                    }
+                }
+            }
+        }
+        if (grouped.isEmpty() && hlsTracks.isNotEmpty()) {
+            for (t in hlsTracks) {
+                val lang = t.language.lowercase()
+                val name = t.name.trim().lowercase()
+                val id = when {
+                    lang.isNotBlank() && name.isNotBlank() -> "hls:$lang:$name"
+                    name.isNotBlank() -> "hls:$name"
+                    else -> "hls:$lang"
+                }
+                val label = t.name.ifBlank { t.language.uppercase().ifBlank { "Original" } }
+                val existing = grouped[id]
+                if (existing == null) {
+                    grouped[id] = AudioTrackOption(
+                        id = id,
+                        label = label,
+                        isOriginal = t.isOriginal,
+                        isDefault = t.isDefault
+                    )
+                } else if (t.isOriginal && !existing.isOriginal) {
+                    grouped[id] = existing.copy(isOriginal = true)
+                }
+            }
+        }
+        return grouped.values.sortedWith(
+            compareByDescending<AudioTrackOption> { it.isOriginal }
+                .thenByDescending { it.isDefault }
+                .thenBy { it.label.lowercase() }
+        )
+    }
+
+    private fun pickBestHlsAudioOverride(
+        tracks: Tracks,
+        info: VideoStreamInfo?,
+        preferredTrackId: String?
+    ): Pair<Tracks.Group, Int>? {
+        val hlsTracks = info?.hlsAudioTracks.orEmpty()
+        val candidates = mutableListOf<Triple<Tracks.Group, Int, androidx.media3.common.Format>>()
+        for (group in tracks.groups) {
+            if (group.type != C.TRACK_TYPE_AUDIO) continue
+            for (i in 0 until group.length) {
+                if (group.isTrackSupported(i)) {
+                    candidates.add(Triple(group, i, group.getTrackFormat(i)))
+                }
+            }
+        }
+        if (candidates.size <= 1) return null
+
+        val anyOriginal = candidates.any { (_, _, fmt) ->
+            isHlsTrackOriginal(fmt, matchHlsAudioMeta(fmt, hlsTracks))
+        }
+
+        var bestGroup: Tracks.Group? = null
+        var bestIdx = -1
+        var bestScore = Long.MIN_VALUE
+
+        for ((group, idx, fmt) in candidates) {
+            val matched = matchHlsAudioMeta(fmt, hlsTracks)
+            val optionId = hlsAudioOptionId(fmt, matched)
+            val isOrig = isHlsTrackOriginal(fmt, matched)
+            val isDub = isHlsTrackDubOrDesc(fmt, matched)
+            val isDef = matched?.isDefault == true ||
+                (fmt.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0
+            val lang = (matched?.language?.ifBlank { null } ?: fmt.language.orEmpty()).lowercase()
+            val labelLower = (matched?.name?.ifBlank { null } ?: fmt.label.orEmpty()).lowercase()
+
+            var score = 0L
+            if (!preferredTrackId.isNullOrBlank()) {
+                if (optionId == preferredTrackId ||
+                    lang == preferredTrackId.lowercase() ||
+                    preferredTrackId.startsWith("$lang.", ignoreCase = true)
+                ) {
+                    score += 100_000_000L
+                }
+            } else {
+                if (isOrig) {
+                    score += 50_000_000L
+                } else if (isDub) {
+                    score -= 50_000_000L
+                } else {
+                    if (isDef) score += 500_000L
+                    if (!anyOriginal && (lang.startsWith("en") || labelLower.contains("english"))) {
+                        score += 100_000L
+                    }
+                }
+            }
+            // Prefer higher audio bitrate (e.g. 128k AAC over 48k AAC) within the same track
+            score += (fmt.bitrate.coerceAtLeast(0) / 100L)
+
+            if (score > bestScore) {
+                bestScore = score
+                bestGroup = group
+                bestIdx = idx
+            }
+        }
+        return if (bestGroup != null && bestIdx >= 0) bestGroup to bestIdx else null
     }
 
     private fun applyVideoTrackEnabled(enabled: Boolean) {

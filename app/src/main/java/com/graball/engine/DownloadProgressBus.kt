@@ -47,6 +47,27 @@ object DownloadProgressBus {
     /** Display title per URL (video or playlist title), updated as soon as known. */
     val titles = mutableMapOf<String, String>()
 
+    /** Optional resolved thumbnail URL per download URL (for Facebook/TikTok/Instagram/X cards). */
+    val thumbnails = mutableMapOf<String, String>()
+
+    /** True when [title] is blank, a raw URL, or a generic placeholder label. */
+    fun isPlaceholderTitle(title: String?): Boolean {
+        val t = title?.trim().orEmpty()
+        if (t.isBlank() || t.startsWith("http://", ignoreCase = true) || t.startsWith("https://", ignoreCase = true)) {
+            return true
+        }
+        return t.equals("YouTube Video", ignoreCase = true) ||
+            t.equals("YouTube Playlist", ignoreCase = true) ||
+            t.equals("YouTube Audio", ignoreCase = true) ||
+            t.equals("Facebook Video", ignoreCase = true) ||
+            t.equals("TikTok Video", ignoreCase = true) ||
+            t.equals("Instagram Video", ignoreCase = true) ||
+            t.equals("Instagram Reel", ignoreCase = true) ||
+            t.equals("X Video", ignoreCase = true) ||
+            t.equals("Video", ignoreCase = true) ||
+            t.equals("Playlist", ignoreCase = true)
+    }
+
     /**
      * Latest state per URL. The bus keeps no history of events, but a
      * Downloads screen that opens mid-download still needs to know a
@@ -69,6 +90,7 @@ object DownloadProgressBus {
         val removed = lastStates.remove(id)
         modes.remove(id)
         titles.remove(id)
+        thumbnails.remove(id)
         if (removed != null) {
             notifyCountListeners()
         }
@@ -103,8 +125,10 @@ object DownloadProgressBus {
     }
 
     fun post(state: State) {
-        val resolvedTitle = state.title?.takeIf { it.isNotBlank() } ?: titles[state.id]
-        if (!resolvedTitle.isNullOrBlank()) {
+        val incoming = state.title?.takeIf { !isPlaceholderTitle(it) }
+        val existing = titles[state.id]?.takeIf { !isPlaceholderTitle(it) }
+        val resolvedTitle = incoming ?: existing ?: state.title?.takeIf { it.isNotBlank() } ?: titles[state.id]
+        if (!isPlaceholderTitle(resolvedTitle) && resolvedTitle != null) {
             titles[state.id] = resolvedTitle
         }
         val enriched = if (state.title == resolvedTitle) state else state.copy(title = resolvedTitle)

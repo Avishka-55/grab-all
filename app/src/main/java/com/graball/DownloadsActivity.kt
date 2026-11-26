@@ -196,27 +196,27 @@ class DownloadsActivity : AppCompatActivity() {
      * 3. Compact cleaned host + path fallback while still preparing
      */
     private fun resolveFriendlyTitle(url: String, explicitTitle: String?, output: String?): String {
-        val explicit = explicitTitle?.trim()?.takeIf { it.isNotBlank() && !it.startsWith("http") }
+        val explicit = explicitTitle?.trim()?.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
         if (explicit != null) return explicit
 
         val busTitle = DownloadProgressBus.titles[url]?.trim()
-            ?.takeIf { it.isNotBlank() && !it.startsWith("http") }
+            ?.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
         if (busTitle != null) return busTitle
 
         if (!output.isNullOrBlank()) {
             if (output.startsWith("content://")) {
                 queryContentDisplayName(Uri.parse(output))?.let { name ->
                     val stripped = name.substringBeforeLast('.').ifBlank { name }
-                    if (stripped.isNotBlank()) return stripped
+                    if (!DownloadProgressBus.isPlaceholderTitle(stripped)) return stripped
                 }
             } else {
                 val parts = output.trim('/').split('/')
-                if (parts.size >= 2 && parts[0].isNotBlank()) {
+                if (parts.size >= 2 && !DownloadProgressBus.isPlaceholderTitle(parts[0])) {
                     // Playlist subfolder name
                     return parts[0]
                 }
                 val base = parts.lastOrNull().orEmpty().substringBeforeLast('.')
-                if (base.isNotBlank()) return base
+                if (!DownloadProgressBus.isPlaceholderTitle(base)) return base
             }
         }
 
@@ -350,7 +350,12 @@ class DownloadsActivity : AppCompatActivity() {
         thumbBox.addView(placeholderIcon)
 
         val ytVidId = FastYouTubeDownloader.extractVideoId(url)
-        if (!ytVidId.isNullOrBlank()) {
+        val thumbUrl = if (!ytVidId.isNullOrBlank()) {
+            "https://i.ytimg.com/vi/$ytVidId/mqdefault.jpg"
+        } else {
+            DownloadProgressBus.thumbnails[url]
+        }
+        if (!thumbUrl.isNullOrBlank()) {
             val thumbIv = ImageView(this).apply {
                 scaleType = ImageView.ScaleType.CENTER_CROP
                 layoutParams = FrameLayout.LayoutParams(
@@ -359,11 +364,7 @@ class DownloadsActivity : AppCompatActivity() {
                 )
             }
             thumbBox.addView(thumbIv)
-            ThumbnailLoader.load(
-                "https://i.ytimg.com/vi/$ytVidId/mqdefault.jpg",
-                thumbIv,
-                targetWidthPx = 240
-            )
+            ThumbnailLoader.load(thumbUrl, thumbIv, targetWidthPx = 240)
         }
         headerRow.addView(thumbBox)
 

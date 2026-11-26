@@ -433,12 +433,21 @@ class YtDlpRunner(
         extraArgs: List<String>
     ): List<String> {
         val ytDlpCache = prepareYtDlpCacheDir()
+        // Cap %(title)s and %(playlist_title)s by UTF-8 BYTES (.120B / .80B) so
+        // Sinhala/Tamil/Hindi/CJK/emoji captions from Facebook, TikTok, Instagram,
+        // or YouTube NEVER hit Linux's 255-byte NAME_MAX limit ([Errno 36] File name too long)!
+        val safeOutputTemplate = outputTemplate
+            .replace("%(title)s", "%(title).120B")
+            .replace("%(playlist_title)s", "%(playlist_title).80B")
         val cmd = mutableListOf(
             pythonBinary.absolutePath,
             "-c",
             EJS_CACHE_BOOTSTRAP,
             ytDlpScript.absolutePath,
             "--newline",
+            // Cross-platform filename safety (prevents Errno 36 & invalid MediaStore chars)
+            "--trim-filenames", "100",
+            "--windows-filenames",
             // Multi-fragment & 2M chunked HTTP acceleration (saturates 50+ Mbps
             // links on HLS/DASH and bypasses YouTube's per-stream throttle).
             "--concurrent-fragments", "6",
@@ -449,9 +458,10 @@ class YtDlpRunner(
             // staging dir) instead of failing at the first drop, and
             // time out stalled sockets so a dead connection is noticed.
             "--retries", "30",
+            "--fragment-retries", "15",
             "--retry-sleep", "linear=1:10",
             "--socket-timeout", "30",
-            "-o", outputTemplate
+            "-o", safeOutputTemplate
         )
         if (ytDlpCache != null) {
             cmd += listOf("--cache-dir", ytDlpCache.absolutePath)

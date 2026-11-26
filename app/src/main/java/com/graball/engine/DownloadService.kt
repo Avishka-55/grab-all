@@ -301,9 +301,9 @@ class DownloadService : Service() {
             val uri = MediaStorePublisher.publish(this, file, file.name, targetSubfolder)
             if (uri != null) {
                 session.publishedPaths.add(file.absolutePath)
-                if (DownloadProgressBus.titles[session.url].isNullOrBlank()) {
-                    val inferred = playlistSubfolder?.takeIf { it.isNotBlank() }
-                        ?: file.nameWithoutExtension.takeIf { it.isNotBlank() }
+                if (DownloadProgressBus.isPlaceholderTitle(DownloadProgressBus.titles[session.url])) {
+                    val inferred = playlistSubfolder?.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+                        ?: file.nameWithoutExtension.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
                     if (inferred != null) {
                         DownloadProgressBus.titles[session.url] = inferred
                     }
@@ -613,7 +613,9 @@ class DownloadService : Service() {
                         session.fastDownloader = fast
                         val fastResult = fast.run(object : FastYouTubeDownloader.Callback {
                             override fun onTitleResolved(title: String) {
-                                DownloadProgressBus.titles[url] = title
+                                if (!DownloadProgressBus.isPlaceholderTitle(title)) {
+                                    DownloadProgressBus.titles[url] = title
+                                }
                             }
 
                             override fun onProgress(
