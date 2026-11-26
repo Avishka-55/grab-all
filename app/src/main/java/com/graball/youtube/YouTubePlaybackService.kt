@@ -125,6 +125,8 @@ class YouTubePlaybackService : MediaSessionService() {
     private var isForegroundActive = false
     private var loadGeneration = 0
     private var stallRetries = 0
+    /** Set when a subtitle track breaks playback; streams then load without subtitles. */
+    private var subtitlesBroken = false
 
     /** itags that answered 403/416 for the current video; skipped on the next fresh resolve. */
     private val failedItags = mutableSetOf<Int>()
@@ -334,6 +336,32 @@ class YouTubePlaybackService : MediaSessionService() {
                             } else {
                                 0L
                             }
+                        // A broken subtitle track must never kill the video: drop subtitles
+                        // for this stream and resume right where we were.
+                        if (info != null && captionsEnabled && !subtitlesBroken &&
+                            info.captionTracks.isNotEmpty() &&
+                            error.errorCode != PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS
+                        ) {
+                            Log.w(TAG, "Subtitles broke playback (${error.errorCodeName}); retrying without them")
+                            subtitlesBroken = true
+                            captionsEnabled = false
+                            attemptedModes.clear()
+                            prepareStream(info, resumePosMs = pos, playImmediately = true)
+                            lastSponsorSkip = null
+                            broadcastState()
+                            return
+                        }
+                        val recoverable = error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
+                            error.errorCode == PlaybackException.ERROR_CODE_FAILED_RUNTIME_CHECK ||
+                            error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ||
+                            error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ||
+                            error.errorCode == PlaybackException.ERROR_CODE_UNSPECIFIED
+                        if (info != null && recoverable) {
+                            // Corrupt/poisoned cache entries or dead URLs: wipe and retry.
+                            if (error.errorCode != PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
+                                evictStreamFromCache(info)
+                            }
+                        }
                         if (info != null && error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
                             evictStreamFromCache(info)
                             // Remember the format that was rejected so the fresh
@@ -352,7 +380,7 @@ class YouTubePlaybackService : MediaSessionService() {
                         // If a transient HTTP error (e.g. 403/416/503 from an early seek or
                         // expired/rate-limited GoogleVideo range) hits with no fallback mode
                         // left, silently re-resolve a fresh stream once at the target position.
-                        if (error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS &&
+                        if (recoverable &&
                             autoRecoveryAttempts < 2 &&
                             queueIndex in queue.indices
                         ) {
@@ -366,7 +394,7 @@ class YouTubePlaybackService : MediaSessionService() {
                             )
                             return
                         }
-                        lastError = "Playback failed (${error.errorCodeName}). Tap Retry or Download."
+                        lastError = "Playback failed (${error.errorCodeName}${error.cause?.javaClass?.simpleName?.let { " / $it" } ?: ""}). Tap Retry or Download."
                         broadcastState()
                     }
                 })
@@ -825,6 +853,7 @@ class YouTubePlaybackService : MediaSessionService() {
             stallRetries = 0
             failedItags.clear()
             failedItagsVideoId = null
+            subtitlesBroken = false
         }
         // Watchdog: if resolving hangs (slow/blocked network tier), silently retry
         // once instead of leaving the user on an endless spinner.
@@ -1085,7 +1114,7 @@ class YouTubePlaybackService : MediaSessionService() {
 
         fun attachSubtitles(baseSource: MediaSource): MediaSource {
             val tracks = info.captionTracks
-            if (tracks.isEmpty()) return baseSource
+            if (tracks.isEmpty() || subtitlesBroken) return baseSource
             val subSources = tracks.take(4).mapIndexed { idx, cap ->
                 val subConfig = MediaItem.SubtitleConfiguration.Builder(Uri.parse(cap.vttUrl))
                     .setMimeType(MimeTypes.TEXT_VTT)
@@ -1094,6 +1123,7 @@ class YouTubePlaybackService : MediaSessionService() {
                     .setSelectionFlags(if (idx == 0) C.SELECTION_FLAG_DEFAULT else 0)
                     .build()
                 SingleSampleMediaSource.Factory(httpFactory)
+                    .setTreatLoadErrorsAsEndOfStream(true)
                     .createMediaSource(subConfig, C.TIME_UNSET)
             }
             val all = arrayOf(baseSource) + subSources.toTypedArray()

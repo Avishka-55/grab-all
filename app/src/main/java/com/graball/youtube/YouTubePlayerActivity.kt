@@ -884,6 +884,73 @@ class YouTubePlayerActivity : AppCompatActivity() {
         }
         sheet.addView(loadMoreBtn)
 
+        // Compose row: write + post a comment natively (needs YouTube sign-in).
+        var createParams: String? = null
+        val composeInput = android.widget.EditText(this).apply {
+            hint = "Add a comment…"
+            textSize = 13f
+            maxLines = 4
+            setHintTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_subtext))
+            setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_text))
+            setBackgroundResource(R.drawable.yt_chip_bg)
+            setPadding((12 * dp).toInt(), (8 * dp).toInt(), (12 * dp).toInt(), (8 * dp).toInt())
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val sendBtn = TextView(this).apply {
+            text = "Post"
+            textSize = 13f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(ContextCompat.getColor(this@YouTubePlayerActivity, R.color.graball_text))
+            setBackgroundResource(R.drawable.yt_chip_selected)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams((64 * dp).toInt(), (38 * dp).toInt()).apply {
+                marginStart = (8 * dp).toInt()
+            }
+        }
+        val composeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (8 * dp).toInt() }
+            addView(composeInput)
+            addView(sendBtn)
+        }
+        sheet.addView(composeRow)
+        sendBtn.setOnClickListener {
+            val text = composeInput.text.toString().trim()
+            if (text.isEmpty()) return@setOnClickListener
+            val params = createParams
+            if (params.isNullOrBlank()) {
+                Toast.makeText(
+                    this,
+                    "Sign in to YouTube (👤 on the home screen) to comment",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@setOnClickListener
+            }
+            sendBtn.isEnabled = false
+            sendBtn.text = "…"
+            io.execute {
+                val (ok, msg) = YouTubeInnerTube.postComment(this, params, text)
+                runOnUiThread {
+                    sendBtn.isEnabled = true
+                    sendBtn.text = "Post"
+                    if (isFinishing) return@runOnUiThread
+                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                    if (ok) {
+                        composeInput.setText("")
+                        loadedComments.add(0, YouTubeInnerTube.YtComment("You", text, "just now", ""))
+                        statusText.visibility = View.GONE
+                        listRv.visibility = View.VISIBLE
+                        commentAdapter.notifyItemInserted(0)
+                        listRv.scrollToPosition(0)
+                    }
+                }
+            }
+        }
+
         fun fetchBatch(token: String, append: Boolean) {
             if (loadingMore) return
             loadingMore = true
@@ -896,13 +963,14 @@ class YouTubePlayerActivity : AppCompatActivity() {
                     loadingMore = false
                     if (isFinishing || !dialog.isShowing) return@runOnUiThread
                     nextToken = page.continuationToken
+                    if (!page.createCommentParams.isNullOrBlank()) createParams = page.createCommentParams
                     if (!append) {
                         loadedComments.clear()
                     }
                     val start = loadedComments.size
                     loadedComments.addAll(page.comments)
                     if (loadedComments.isEmpty()) {
-                        statusText.text = "No comments found. Tap 'Post' to open in YouTube Web."
+                        statusText.text = "No comments yet — be the first to comment below."
                         statusText.visibility = View.VISIBLE
                         listRv.visibility = View.GONE
                         loadMoreBtn.visibility = View.GONE
@@ -936,6 +1004,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
             win.setGravity(Gravity.BOTTOM)
             val sheetHeight = (resources.displayMetrics.heightPixels * 0.72f).toInt()
             win.setLayout(WindowManager.LayoutParams.MATCH_PARENT, sheetHeight)
+            win.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
         dialog.show()
         fetchBatch(initialToken, append = false)

@@ -102,7 +102,8 @@ object YouTubeInnerTube {
 
     data class CommentsPage(
         val comments: List<YtComment>,
-        val continuationToken: String?
+        val continuationToken: String?,
+        val createCommentParams: String? = null
     )
 
     enum class ChannelTab(val params: String) {
@@ -1144,7 +1145,65 @@ object YouTubeInnerTube {
         val seen = mutableSetOf<String>()
         collectComments(root, out, seen)
         val next = findContinuationToken(root)?.takeIf { it != continuationToken }
-        return CommentsPage(comments = out.take(40), continuationToken = next)
+        val createParams = findCreateCommentParams(root)
+        return CommentsPage(comments = out.take(40), continuationToken = next, createCommentParams = createParams)
+    }
+
+    private fun findCreateCommentParams(node: Any?): String? {
+        when (node) {
+            is JSONObject -> {
+                val direct = node.optString("createCommentParams")
+                if (direct.isNotBlank()) return direct
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    if (k in AD_KEYS) continue
+                    findCreateCommentParams(node.opt(k))?.let { return it }
+                }
+            }
+            is JSONArray -> {
+                for (i in 0 until node.length()) {
+                    findCreateCommentParams(node.opt(i))?.let { return it }
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Posts a top-level comment as the signed-in user via
+     * `/youtubei/v1/comment/create_comment`. Returns (success, message).
+     */
+    fun postComment(context: Context, createCommentParams: String, text: String): Pair<Boolean, String> {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+            ?: return false to "Sign in to YouTube first (👤 on the home screen)"
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val body = JSONObject().apply {
+            put("context", webContext(cfg))
+            put("commentText", text)
+            put("createCommentParams", createCommentParams)
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/comment/create_comment?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        ) ?: return false to "Couldn't post — check your connection or sign in again"
+        root.optJSONObject("error")?.let {
+            return false to it.optString("message").ifBlank { "YouTube rejected the comment" }
+        }
+        val actions = root.optJSONArray("actions")
+        if (actions != null) {
+            for (i in 0 until actions.length()) {
+                if (actions.optJSONObject(i)?.has("createCommentAction") == true) return true to "Comment posted"
+            }
+        }
+        val status = root.optString("actionResult")
+        return if (actions != null && actions.length() > 0 || status.isNotBlank()) {
+            true to "Comment posted"
+        } else {
+            false to "YouTube didn't confirm the comment — try again"
+        }
     }
 
     /** Fetches top comments for a video using its `/next` continuation token. */
