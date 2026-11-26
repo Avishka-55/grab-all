@@ -76,6 +76,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var playerContainer: FrameLayout
     private lateinit var playerView: PlayerView
     private lateinit var audioOnlyBanner: TextView
+    private lateinit var subtitleOverlay: TextView
     private lateinit var gestureHud: TextView
     private lateinit var playerLoadingBox: LinearLayout
     private lateinit var playerLoadingText: TextView
@@ -126,6 +127,20 @@ class YouTubePlayerActivity : AppCompatActivity() {
         gestureHud.visibility = View.GONE
     }
 
+    private var subtitleTickerRunning = false
+    private val subtitleTicker = object : Runnable {
+        override fun run() {
+            if (!subtitleTickerRunning) return
+            renderSubtitleOverlay()
+            val state = YouTubePlaybackService.currentState
+            if (!state.captionsEnabled || !state.isPlaying || inPipMode) {
+                subtitleTickerRunning = false
+                return
+            }
+            mainHandler.postDelayed(this, 150L)
+        }
+    }
+
     private val pipReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -147,6 +162,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         playerContainer = findViewById(R.id.playerContainer)
         playerView = findViewById(R.id.ytPlayerView)
         audioOnlyBanner = findViewById(R.id.audioOnlyBanner)
+        subtitleOverlay = findViewById(R.id.ytSubtitleOverlay)
         gestureHud = findViewById(R.id.gestureHud)
         playerLoadingBox = findViewById(R.id.playerLoadingBox)
         playerLoadingText = findViewById(R.id.playerLoadingText)
@@ -225,6 +241,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
                 isControllerVisible = (visibility == View.VISIBLE)
                 playerTopOverlay.visibility = if (inPipMode) View.GONE else visibility
                 updateAudioOnlyBannerVisibility(YouTubePlaybackService.currentState)
+                updateSubtitleOverlayPosition()
             }
         )
 
@@ -362,9 +379,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
         if (!inPipMode && !isFullscreen) {
             floatingAudio.attach()
         }
+        syncSubtitleTicker(YouTubePlaybackService.currentState)
     }
 
     override fun onPause() {
+        stopSubtitleTicker()
         floatingAudio.detach()
         super.onPause()
     }
@@ -579,6 +598,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
             if (state.captionsEnabled) R.drawable.yt_chip_selected else R.drawable.yt_badge_bg
         )
         btnTopCaptions.setTextColor(ccColor)
+        syncSubtitleTicker(state)
 
         if (item != null) {
             updateBookmarkChip(YouTubeStore.isBookmarked(this, item.id))
@@ -1217,6 +1237,73 @@ class YouTubePlayerActivity : AppCompatActivity() {
             floatingAudio.attach()
         }
         updateAudioOnlyBannerVisibility(YouTubePlaybackService.currentState)
+        updateSubtitleOverlayPosition()
+        syncSubtitleTicker(YouTubePlaybackService.currentState)
+    }
+
+    private fun updateSubtitleOverlayPosition() {
+        if (!::subtitleOverlay.isInitialized) return
+        val dp = resources.displayMetrics.density
+        val lp = subtitleOverlay.layoutParams as? FrameLayout.LayoutParams ?: return
+        val bottomDp = when {
+            inPipMode -> 6
+            isControllerVisible -> if (isFullscreen) 78 else 56
+            else -> if (isFullscreen) 22 else 12
+        }
+        val targetBottom = (bottomDp * dp).toInt()
+        if (lp.bottomMargin != targetBottom) {
+            lp.bottomMargin = targetBottom
+            subtitleOverlay.layoutParams = lp
+        }
+        subtitleOverlay.textSize = if (isFullscreen) 17f else 13.5f
+    }
+
+    private fun renderSubtitleOverlay() {
+        if (!::subtitleOverlay.isInitialized) return
+        val state = YouTubePlaybackService.currentState
+        if (inPipMode || !state.captionsEnabled || state.isAudioOnly) {
+            if (subtitleOverlay.visibility != View.GONE) {
+                subtitleOverlay.visibility = View.GONE
+            }
+            return
+        }
+        val line = YouTubePlaybackService.instance?.currentSubtitleText()
+        if (line.isNullOrBlank()) {
+            if (subtitleOverlay.visibility != View.GONE) {
+                subtitleOverlay.visibility = View.GONE
+            }
+        } else {
+            if (subtitleOverlay.text.toString() != line) {
+                subtitleOverlay.text = line
+            }
+            if (subtitleOverlay.visibility != View.VISIBLE) {
+                subtitleOverlay.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    private fun syncSubtitleTicker(state: YouTubePlaybackState) {
+        renderSubtitleOverlay()
+        val shouldTick = state.captionsEnabled &&
+            state.isPlaying &&
+            !state.isAudioOnly &&
+            !inPipMode &&
+            lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+            (YouTubePlaybackService.instance?.hasLoadedSubtitles() == true)
+        if (shouldTick) {
+            if (!subtitleTickerRunning) {
+                subtitleTickerRunning = true
+                mainHandler.removeCallbacks(subtitleTicker)
+                mainHandler.postDelayed(subtitleTicker, 150L)
+            }
+        } else {
+            stopSubtitleTicker()
+        }
+    }
+
+    private fun stopSubtitleTicker() {
+        subtitleTickerRunning = false
+        mainHandler.removeCallbacks(subtitleTicker)
     }
 
     private fun cycleAspectRatio() {
@@ -1474,14 +1561,48 @@ class YouTubePlayerActivity : AppCompatActivity() {
             .setItems(labels.toTypedArray()) { _, which ->
                 if (which == 0) {
                     svc.selectCaption(null)
-                    playerView.subtitleView?.setCues(emptyList())
+                    subtitleOverlay.visibility = View.GONE
+                    stopSubtitleTicker()
                     showHud("Subtitles: OFF")
                 } else {
                     val chosenIdx = which - 1
-                    svc.selectCaption(chosenIdx)
                     val label = tracks.getOrNull(chosenIdx)?.label ?: "ON"
-                    showHud("CC: $label")
+                    showHud("Loading CC: $label…")
+                    svc.selectCaption(chosenIdx) { loaded ->
+                        if (isFinishing) return@selectCaption
+                        if (loaded) {
+                            showHud("CC: $label")
+                            syncSubtitleTicker(YouTubePlaybackService.currentState)
+                        } else {
+                            showHud("Couldn't load captions for this track")
+                        }
+                    }
                 }
+            }
+            .setOnDismissListener {
+                if (isFullscreen && !inPipMode) {
+                    applyChromeVisibility()
+                }
+            }
+            .show()
+    }
+
+    private fun showAudioTrackPicker() {
+        val svc = YouTubePlaybackService.instance ?: return
+        val tracks = svc.availableAudioTracks()
+        if (tracks.size <= 1) return
+        val currentLabel = svc.currentAudioTrackLabel()
+        val labels = tracks.map { t ->
+            val mark = if (t.label == currentLabel) "✓ " else ""
+            val suffix = if (t.isOriginal && !t.label.contains("original", ignoreCase = true)) " (Original)" else ""
+            "$mark${t.label}$suffix"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Audio Language")
+            .setItems(labels) { _, which ->
+                val chosen = tracks[which]
+                svc.selectAudioTrack(chosen.id)
+                showHud("Audio: ${chosen.label}")
             }
             .setOnDismissListener {
                 if (isFullscreen && !inPipMode) {
@@ -1505,12 +1626,20 @@ class YouTubePlayerActivity : AppCompatActivity() {
             activeH != null && activeH in heights -> activeH
             else -> null
         }
-        val labels = mutableListOf(
+        val audioTracks = svc.availableAudioTracks()
+        val hasMultiAudio = audioTracks.size > 1
+        val labels = mutableListOf<String>()
+        if (hasMultiAudio) {
+            labels.add("🔊 Audio: ${svc.currentAudioTrackLabel()} ▸")
+        }
+        labels.add(
             if (!state.isAudioOnly && state.selectedHeight == null) {
                 if (activeH != null) "✓ Auto (${activeH}p)" else "✓ Auto"
             } else {
                 "Auto"
-            },
+            }
+        )
+        labels.add(
             if (state.isAudioOnly) "✓ Audio only (battery saver)" else "Audio only (battery saver)"
         )
         heights.forEach { h ->
@@ -1524,7 +1653,12 @@ class YouTubePlayerActivity : AppCompatActivity() {
         val dialog = AlertDialog.Builder(this)
             .setTitle(pickerTitle)
             .setItems(labels.toTypedArray()) { _, which ->
-                when (which) {
+                val offset = if (hasMultiAudio) 1 else 0
+                if (hasMultiAudio && which == 0) {
+                    showAudioTrackPicker()
+                    return@setItems
+                }
+                when (which - offset) {
                     0 -> {
                         svc.setAudioOnlyMode(false)
                         svc.setQuality(null)
@@ -1535,7 +1669,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
                         showHud("Audio Only")
                     }
                     else -> {
-                        val h = heights[which - 2]
+                        val h = heights[which - offset - 2]
                         svc.setAudioOnlyMode(false)
                         svc.setQuality(h)
                         showHud("Quality: ${h}p")

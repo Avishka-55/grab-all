@@ -36,7 +36,12 @@ data class StreamFormat(
     val isAudioOnly: Boolean,
     val isVideoOnly: Boolean,
     val isMuxed: Boolean,
-    val contentLengthBytes: Long = 0L
+    val contentLengthBytes: Long = 0L,
+    val audioTrackId: String = "",
+    val audioDisplayName: String = "",
+    val isOriginalAudio: Boolean = false,
+    val isDefaultAudio: Boolean = false,
+    val isDubbedOrDescriptive: Boolean = false
 ) {
     fun estimatedSizeBytes(durationSec: Long): Long {
         if (contentLengthBytes > 0L) return contentLengthBytes
@@ -46,6 +51,13 @@ data class StreamFormat(
         return 0L
     }
 }
+
+data class AudioTrackOption(
+    val id: String,
+    val label: String,
+    val isOriginal: Boolean,
+    val isDefault: Boolean
+)
 
 data class CaptionTrack(
     val langCode: String,
@@ -85,12 +97,75 @@ data class VideoStreamInfo(
         return heights
     }
 
-    /** Pick the best audio-only stream (prefer M4A/AAC for universal hardware decode). */
-    fun bestAudio(): StreamFormat? {
-        val m4a = audioStreams
-            .filter { it.mimeType.contains("mp4", ignoreCase = true) || it.mimeType.contains("aac", ignoreCase = true) }
-            .maxByOrNull { it.bitrate }
-        return m4a ?: audioStreams.maxByOrNull { it.bitrate }
+    /**
+     * Pick the best audio-only stream, strictly preferring the video's
+     * ORIGINAL language track over AI auto-dubs / foreign dubs / descriptive
+     * tracks, and then preferring M4A/AAC highest bitrate within that track.
+     */
+    fun bestAudio(preferredTrackId: String? = null): StreamFormat? {
+        if (audioStreams.isEmpty()) return null
+
+        fun pickBestInPool(pool: List<StreamFormat>): StreamFormat? {
+            if (pool.isEmpty()) return null
+            val m4a = pool
+                .filter { it.mimeType.contains("mp4", ignoreCase = true) || it.mimeType.contains("aac", ignoreCase = true) }
+                .maxByOrNull { it.bitrate }
+            return m4a ?: pool.maxByOrNull { it.bitrate }
+        }
+
+        if (!preferredTrackId.isNullOrBlank()) {
+            val matching = audioStreams.filter { it.audioTrackId == preferredTrackId }
+            if (matching.isNotEmpty()) return pickBestInPool(matching)
+        }
+
+        // 1) Creator's original audio track (never an AI dub!)
+        val originals = audioStreams.filter { it.isOriginalAudio }
+        if (originals.isNotEmpty()) return pickBestInPool(originals)
+
+        // 2) YouTube default audio track (as long as it isn't flagged dubbed/descriptive)
+        val defaults = audioStreams.filter { it.isDefaultAudio && !it.isDubbedOrDescriptive }
+        if (defaults.isNotEmpty()) return pickBestInPool(defaults)
+
+        // 3) Any non-dubbed, non-descriptive track
+        val nonDubbed = audioStreams.filter { !it.isDubbedOrDescriptive }
+        if (nonDubbed.isNotEmpty()) {
+            val enNonDubbed = nonDubbed.filter {
+                it.audioTrackId.startsWith("en", ignoreCase = true) ||
+                    it.audioDisplayName.contains("english", ignoreCase = true)
+            }
+            if (enNonDubbed.isNotEmpty() && nonDubbed.any { it.audioTrackId.isNotBlank() }) {
+                return pickBestInPool(enNonDubbed)
+            }
+            return pickBestInPool(nonDubbed)
+        }
+
+        return pickBestInPool(audioStreams)
+    }
+
+    /** Distinct audio languages available on this video (empty or size 1 for normal single-audio videos). */
+    fun availableAudioTracks(): List<AudioTrackOption> {
+        val grouped = LinkedHashMap<String, AudioTrackOption>()
+        for (f in audioStreams) {
+            val id = f.audioTrackId
+            if (id.isBlank()) continue
+            val label = f.audioDisplayName.ifBlank { id.substringBefore('.').uppercase() }
+            val existing = grouped[id]
+            if (existing == null) {
+                grouped[id] = AudioTrackOption(
+                    id = id,
+                    label = label,
+                    isOriginal = f.isOriginalAudio,
+                    isDefault = f.isDefaultAudio
+                )
+            } else if (f.isOriginalAudio && !existing.isOriginal) {
+                grouped[id] = existing.copy(isOriginal = true)
+            }
+        }
+        return grouped.values.sortedWith(
+            compareByDescending<AudioTrackOption> { it.isOriginal }
+                .thenByDescending { it.isDefault }
+                .thenBy { it.label.lowercase() }
+        )
     }
 
     /** Exact or bitrate-estimated audio file size in bytes (pass [mp3BitrateKbps] for MP3 transcode). */

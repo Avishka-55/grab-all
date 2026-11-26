@@ -1952,9 +1952,12 @@ object YouTubeInnerTube {
             val itag = obj.optInt("itag", 0)
             val height = obj.optInt("height", 0)
             val bitrate = obj.optInt("bitrate", 0)
+            val contentLength = obj.optString("contentLength").toLongOrNull()
+                ?: obj.optLong("contentLength", 0L).coerceAtLeast(0L)
             val qualityLabel = obj.optString("qualityLabel", if (height > 0) "${height}p" else "")
             val isVideo = mime.startsWith("video/")
             val isAudio = mime.startsWith("audio/")
+            val audioMeta = if (isAudio) extractInnerTubeAudioMeta(obj, finalUrl) else EMPTY_AUDIO_META
             val fmt = StreamFormat(
                 itag = itag,
                 url = finalUrl,
@@ -1964,7 +1967,13 @@ object YouTubeInnerTube {
                 bitrate = bitrate,
                 isAudioOnly = isAudio,
                 isVideoOnly = isVideo && !p.isMuxedDefault,
-                isMuxed = p.isMuxedDefault
+                isMuxed = p.isMuxedDefault,
+                contentLengthBytes = contentLength,
+                audioTrackId = audioMeta.id,
+                audioDisplayName = audioMeta.displayName,
+                isOriginalAudio = audioMeta.isOriginal,
+                isDefaultAudio = audioMeta.isDefault,
+                isDubbedOrDescriptive = audioMeta.isDubbedOrDescriptive
             )
             when {
                 p.isMuxedDefault -> muxedStreams.add(fmt)
@@ -2149,6 +2158,41 @@ object YouTubeInnerTube {
         )
     }
 
+    private data class AudioTrackMeta(
+        val id: String = "",
+        val displayName: String = "",
+        val isOriginal: Boolean = false,
+        val isDefault: Boolean = false,
+        val isDubbedOrDescriptive: Boolean = false
+    )
+
+    private val EMPTY_AUDIO_META = AudioTrackMeta()
+
+    private fun extractInnerTubeAudioMeta(obj: JSONObject, url: String): AudioTrackMeta {
+        val at = obj.optJSONObject("audioTrack")
+        val id = at?.optString("id").orEmpty()
+        val displayName = at?.optString("displayName").orEmpty()
+        val isDefault = at?.optBoolean("audioIsDefault", false) == true
+        val decodedUrl = url.lowercase()
+        val hasOrigTag = decodedUrl.contains("acont%3doriginal") || decodedUrl.contains("acont=original")
+        val hasDubTag = decodedUrl.contains("acont%3ddubbed") || decodedUrl.contains("acont=dubbed") ||
+            decodedUrl.contains("acont%3ddescriptive") || decodedUrl.contains("acont=descriptive")
+        val idIsOriginal = id.endsWith(".4")
+        val idIsDubOrDesc = id.endsWith(".10") || id.endsWith(".2") || id.endsWith(".3")
+        val nameLower = displayName.lowercase()
+        val nameIsOriginal = nameLower.contains("original")
+        val nameIsDubOrDesc = nameLower.contains("dubbed") || nameLower.contains("descriptive")
+        val isOriginal = hasOrigTag || idIsOriginal || nameIsOriginal
+        val isDubbedOrDesc = !isOriginal && (hasDubTag || idIsDubOrDesc || nameIsDubOrDesc)
+        return AudioTrackMeta(
+            id = id,
+            displayName = displayName,
+            isOriginal = isOriginal,
+            isDefault = isDefault,
+            isDubbedOrDescriptive = isDubbedOrDesc
+        )
+    }
+
     private fun parseInnerTubeFormats(
         arr: JSONArray?,
         isMuxedDefault: Boolean,
@@ -2170,6 +2214,7 @@ object YouTubeInnerTube {
             val qualityLabel = obj.optString("qualityLabel", if (height > 0) "${height}p" else "")
             val isVideo = mime.startsWith("video/")
             val isAudio = mime.startsWith("audio/")
+            val audioMeta = if (isAudio) extractInnerTubeAudioMeta(obj, url) else EMPTY_AUDIO_META
             val fmt = StreamFormat(
                 itag = itag,
                 url = url,
@@ -2180,7 +2225,12 @@ object YouTubeInnerTube {
                 isAudioOnly = isAudio,
                 isVideoOnly = isVideo && !isMuxedDefault,
                 isMuxed = isMuxedDefault,
-                contentLengthBytes = contentLength
+                contentLengthBytes = contentLength,
+                audioTrackId = audioMeta.id,
+                audioDisplayName = audioMeta.displayName,
+                isOriginalAudio = audioMeta.isOriginal,
+                isDefaultAudio = audioMeta.isDefault,
+                isDubbedOrDescriptive = audioMeta.isDubbedOrDescriptive
             )
             when {
                 isMuxedDefault -> muxedOut.add(fmt)
@@ -2279,17 +2329,53 @@ object YouTubeInnerTube {
                     !hasVideo && hasAudio -> "audio/$ext; codecs=\"$acodec\""
                     else -> "video/$ext; codecs=\"$vcodec, $acodec\""
                 }
+                val isAudioOnlyFmt = !hasVideo && hasAudio
+                val ytLang = if (isAudioOnlyFmt) f.optString("language").orEmpty() else ""
+                val ytNote = if (isAudioOnlyFmt) f.optString("format_note").orEmpty() else ""
+                val ytLangPref = if (isAudioOnlyFmt) f.optInt("language_preference", 0) else 0
+                val urlLower = url.lowercase()
+                val noteLower = ytNote.lowercase()
+                val ytOrig = isAudioOnlyFmt && (
+                    ytLangPref >= 5 ||
+                        noteLower.contains("original") ||
+                        urlLower.contains("acont%3doriginal") ||
+                        urlLower.contains("acont=original")
+                    )
+                val ytDefault = isAudioOnlyFmt && (ytOrig || noteLower.contains("default"))
+                val ytDubOrDesc = isAudioOnlyFmt && !ytOrig && (
+                    ytLangPref < 0 ||
+                        noteLower.contains("dubbed") ||
+                        noteLower.contains("descriptive") ||
+                        urlLower.contains("acont%3ddubbed") ||
+                        urlLower.contains("acont=dubbed") ||
+                        urlLower.contains("acont%3ddescriptive")
+                    )
+                val ytTrackId = if (isAudioOnlyFmt && ytLang.isNotBlank()) {
+                    if (ytOrig) "$ytLang.4" else ytLang
+                } else {
+                    ""
+                }
+                val ytTrackName = if (isAudioOnlyFmt && ytLang.isNotBlank()) {
+                    if (ytOrig) "${ytLang.uppercase()} (original)" else ytLang.uppercase()
+                } else {
+                    ""
+                }
                 val fmt = StreamFormat(
-                    itag = f.optString("format_id").toIntOrNull() ?: 0,
+                    itag = f.optString("format_id").substringBefore('-').toIntOrNull() ?: 0,
                     url = url,
                     mimeType = mime,
                     qualityLabel = if (height > 0) "${height}p" else ext,
                     height = height,
                     bitrate = tbr,
-                    isAudioOnly = !hasVideo && hasAudio,
+                    isAudioOnly = isAudioOnlyFmt,
                     isVideoOnly = hasVideo && !hasAudio,
                     isMuxed = hasVideo && hasAudio,
-                    contentLengthBytes = fileSize
+                    contentLengthBytes = fileSize,
+                    audioTrackId = ytTrackId,
+                    audioDisplayName = ytTrackName,
+                    isOriginalAudio = ytOrig,
+                    isDefaultAudio = ytDefault,
+                    isDubbedOrDescriptive = ytDubOrDesc
                 )
                 when {
                     fmt.isMuxed -> muxedStreams.add(fmt)
