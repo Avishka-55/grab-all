@@ -1485,7 +1485,14 @@ object YouTubeInnerTube {
             )
         )
         if (visionOs.info != null) {
-            return visionOs
+            val vAudio = visionOs.info.audioStreams
+            val onlyDubbedReturned = vAudio.isNotEmpty() &&
+                vAudio.none { it.isOriginalAudio } &&
+                vAudio.all { it.isDubbedOrDescriptive }
+            if (!onlyDubbedReturned) {
+                return visionOs
+            }
+            Log.d(TAG, "VISIONOS returned only dubbed audio for $videoId; trying next client for original audio")
         }
         tier1Error = visionOs.error
 
@@ -1571,7 +1578,7 @@ object YouTubeInnerTube {
         if (includeHlsFallback) {
             val safariRoot = requestWebSafariPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             if (safariRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(videoId, safariRoot, WEB_SAFARI_UA)
+                val parsed = parseDecryptedPlayerRoot(videoId, safariRoot, WEB_SAFARI_UA, authHeaders = authHeaders)
                 if (parsed.info != null &&
                     (parsed.info.hlsVariants.isNotEmpty() || !parsed.info.hlsUrl.isNullOrBlank())
                 ) {
@@ -1633,7 +1640,7 @@ object YouTubeInnerTube {
             put("osName", "Tizen")
             put("osVersion", "2.4.0")
             put("hl", "en")
-            put("gl", cfg.gl)
+            put("gl", "US")
             if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
         }
         val body = JSONObject().apply {
@@ -1681,7 +1688,7 @@ object YouTubeInnerTube {
             put("clientVersion", cfg.clientVersion)
             put("userAgent", WEB_SAFARI_UA)
             put("hl", "en")
-            put("gl", cfg.gl)
+            put("gl", "US")
             if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
         }
         val body = JSONObject().apply {
@@ -1722,7 +1729,8 @@ object YouTubeInnerTube {
         videoId: String,
         root: JSONObject,
         userAgent: String,
-        poToken: String? = null
+        poToken: String? = null,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null
     ): ResolveResult {
         val playStatus = root.optJSONObject("playabilityStatus")
         val status = playStatus?.optString("status") ?: ""
@@ -1741,7 +1749,7 @@ object YouTubeInnerTube {
         var hlsVariants: List<StreamFormat> = emptyList()
         var hlsAudioTracks: List<HlsAudioTrack> = emptyList()
         if (solvedHlsUrl != null) {
-            val parsedHls = fetchParsedHlsManifest(solvedHlsUrl, userAgent)
+            val parsedHls = fetchParsedHlsManifest(solvedHlsUrl, userAgent, authHeaders)
             if (!parsedHls.ok) {
                 Log.w(TAG, "HLS master manifest failed verification ($videoId); skipping broken HLS")
                 effectiveHlsUrl = null
@@ -1811,14 +1819,19 @@ object YouTubeInnerTube {
      */
     private fun fetchParsedHlsManifest(
         masterUrl: String,
-        userAgent: String
+        userAgent: String,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null
     ): ParsedHlsManifest {
         return try {
-            val req = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url(masterUrl)
                 .header("User-Agent", userAgent)
-                .build()
-            anonClient.newCall(req).execute().use { resp ->
+                .header("Accept-Language", "en-US,en;q=0.9")
+            if (authHeaders != null) {
+                reqBuilder.header("Cookie", authHeaders.cookieHeader)
+            }
+            val clientToUse = if (authHeaders != null) client else anonClient
+            clientToUse.newCall(reqBuilder.build()).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     return ParsedHlsManifest(ok = false)
                 }
@@ -1917,9 +1930,14 @@ object YouTubeInnerTube {
             val chars = charRegex.find(line)?.groupValues?.get(1).orEmpty().lowercase()
 
             val decodedUri = urlDecode(urlDecode(uri)).lowercase()
+            val uriXtags = extractXTagsFromUrl(uri)
+            val acont = uriXtags["acont"].orEmpty().lowercase()
             val nameLower = name.lowercase()
-            val hasOrigTag = decodedUri.contains("acont=original")
-            val hasDubTag = decodedUri.contains("acont=dubbed") ||
+            val hasOrigTag = acont == "original" || decodedUri.contains("acont=original")
+            val hasDubTag = acont.contains("dubbed") ||
+                acont.contains("descriptive") ||
+                acont.contains("auto") ||
+                decodedUri.contains("acont=dubbed") ||
                 decodedUri.contains("acont=descriptive") ||
                 decodedUri.contains("acont=auto")
             val isOrig = hasOrigTag || nameLower.contains("original")
@@ -1929,14 +1947,15 @@ object YouTubeInnerTube {
                     nameLower.contains("descriptive") ||
                     chars.contains("describes-video")
                 )
+            val resolvedLang = lang.ifBlank { uriXtags["lang"].orEmpty() }
             out.add(
                 HlsAudioTrack(
                     groupId = groupId,
                     name = name,
-                    language = lang,
+                    language = resolvedLang,
                     url = uri,
                     isOriginal = isOrig,
-                    isDefault = isDefault,
+                    isDefault = isDefault && !isDubOrDesc,
                     isDubbedOrDescriptive = isDubOrDesc
                 )
             )
@@ -2244,28 +2263,190 @@ object YouTubeInnerTube {
 
     private val EMPTY_AUDIO_META = AudioTrackMeta()
 
+    /**
+     * Parses YouTube's `xtags` metadata from either:
+     * 1) Plain colon-separated `key=value:key=value` text (e.g. `acont=original:lang=en`), or
+     * 2) Base64-URL-safe Protobuf wire format (`repeated Item { 1: name, 2: value }`)
+     *    used by modern InnerTube `adaptiveFormats` objects.
+     */
+    private fun decodeXTagsMap(raw: String?): Map<String, String> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        val decodedStr = urlDecode(urlDecode(raw)).trim()
+        val out = LinkedHashMap<String, String>()
+        if (decodedStr.contains('=')) {
+            for (part in decodedStr.split(':', ';', '&')) {
+                val eq = part.indexOf('=')
+                if (eq > 0 && eq < part.lastIndex) {
+                    val k = part.substring(0, eq).trim().lowercase()
+                    val v = part.substring(eq + 1).trim()
+                    if (k.isNotBlank() && v.isNotBlank()) out[k] = v
+                }
+            }
+            if (out.isNotEmpty()) return out
+        }
+        // Try Base64 URL-safe Protobuf wire format: repeated field 1 (length-delimited) -> { 1: key, 2: value }
+        val bytes = try {
+            android.util.Base64.decode(raw.trim(), android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP)
+        } catch (_: Exception) {
+            try {
+                android.util.Base64.decode(raw.trim(), android.util.Base64.DEFAULT)
+            } catch (_: Exception) {
+                return emptyMap()
+            }
+        }
+        parseXTagsProtobuf(bytes, 0, bytes.size, out)
+        return out
+    }
+
+    private fun parseXTagsProtobuf(
+        buf: ByteArray,
+        start: Int,
+        end: Int,
+        out: MutableMap<String, String>
+    ) {
+        var pos = start
+        fun readVarint(): Long {
+            var result = 0L
+            var shift = 0
+            while (pos < end && shift < 64) {
+                val b = buf[pos++].toInt() and 0xFF
+                result = result or ((b and 0x7F).toLong() shl shift)
+                if ((b and 0x80) == 0) return result
+                shift += 7
+            }
+            return -1L
+        }
+        while (pos < end) {
+            val tag = readVarint()
+            if (tag <= 0L) break
+            val fieldNum = (tag ushr 3).toInt()
+            val wireType = (tag and 0x07).toInt()
+            when (wireType) {
+                0 -> readVarint()
+                1 -> pos += 8
+                2 -> {
+                    val len = readVarint().toInt()
+                    if (len < 0 || pos + len > end) break
+                    val msgStart = pos
+                    val msgEnd = pos + len
+                    pos = msgEnd
+                    if (fieldNum == 1) {
+                        var innerPos = msgStart
+                        var itemKey: String? = null
+                        var itemVal: String? = null
+                        while (innerPos < msgEnd) {
+                            var innerTag = 0L
+                            var s = 0
+                            while (innerPos < msgEnd && s < 64) {
+                                val b = buf[innerPos++].toInt() and 0xFF
+                                innerTag = innerTag or ((b and 0x7F).toLong() shl s)
+                                if ((b and 0x80) == 0) break
+                                s += 7
+                            }
+                            val innerField = (innerTag ushr 3).toInt()
+                            val innerWire = (innerTag and 0x07).toInt()
+                            if (innerWire == 2) {
+                                var strLen = 0
+                                var ls = 0
+                                while (innerPos < msgEnd && ls < 32) {
+                                    val b = buf[innerPos++].toInt() and 0xFF
+                                    strLen = strLen or ((b and 0x7F) shl ls)
+                                    if ((b and 0x80) == 0) break
+                                    ls += 7
+                                }
+                                if (strLen < 0 || innerPos + strLen > msgEnd) break
+                                val text = String(buf, innerPos, strLen, Charsets.UTF_8)
+                                innerPos += strLen
+                                if (innerField == 1) itemKey = text.trim().lowercase()
+                                else if (innerField == 2) itemVal = text.trim()
+                            } else {
+                                break
+                            }
+                        }
+                        if (!itemKey.isNullOrBlank() && !itemVal.isNullOrBlank()) {
+                            out[itemKey] = itemVal
+                        }
+                    }
+                }
+                5 -> pos += 4
+                else -> break
+            }
+        }
+    }
+
+    private fun extractXTagsFromUrl(url: String): Map<String, String> {
+        if (url.isBlank()) return emptyMap()
+        val queryMatch = Regex("""[?&]xtags=([^&]+)""").find(url)?.groupValues?.get(1)
+        if (!queryMatch.isNullOrBlank()) {
+            val parsed = decodeXTagsMap(queryMatch)
+            if (parsed.isNotEmpty()) return parsed
+        }
+        val pathMatch = Regex("""/xtags/([^/?#]+)""").find(url)?.groupValues?.get(1)
+        if (!pathMatch.isNullOrBlank()) {
+            val parsed = decodeXTagsMap(pathMatch)
+            if (parsed.isNotEmpty()) return parsed
+        }
+        return emptyMap()
+    }
+
     private fun extractInnerTubeAudioMeta(obj: JSONObject, url: String): AudioTrackMeta {
         val at = obj.optJSONObject("audioTrack")
-        val id = at?.optString("id").orEmpty()
-        val displayName = at?.optString("displayName").orEmpty()
-        val isDefault = at?.optBoolean("audioIsDefault", false) == true
-        // Double-decode so both `acont%3Doriginal` and `acont%253Doriginal` are caught.
+        var id = at?.optString("id").orEmpty()
+        var displayName = at?.optString("displayName").orEmpty()
+        val langCodeFromJson = at?.optString("languageCode").orEmpty()
+        val isAutoDubbedFlag = at?.optBoolean("isAutoDubbed", false) == true
+        val rawIsDefault = at?.optBoolean("audioIsDefault", false) == true
+
+        // Read BOTH the JSON `xtags` field (often Base64-encoded Protobuf!) AND URL `xtags`
+        val xtagsFromJson = decodeXTagsMap(obj.optString("xtags"))
+        val xtagsFromUrl = extractXTagsFromUrl(url)
+        val acont = (xtagsFromUrl["acont"] ?: xtagsFromJson["acont"]).orEmpty().lowercase()
+        val xLang = (xtagsFromUrl["lang"] ?: xtagsFromJson["lang"] ?: langCodeFromJson).orEmpty()
+
         val decodedUrl = urlDecode(urlDecode(url)).lowercase()
-        val hasOrigTag = decodedUrl.contains("acont=original")
-        val hasDubTag = decodedUrl.contains("acont=dubbed") ||
-            decodedUrl.contains("acont=descriptive")
+        val hasOrigTag = acont == "original" || decodedUrl.contains("acont=original")
+        val hasDubTag = acont.contains("dubbed") ||
+            acont.contains("descriptive") ||
+            acont.contains("auto") ||
+            decodedUrl.contains("acont=dubbed") ||
+            decodedUrl.contains("acont=descriptive") ||
+            decodedUrl.contains("acont=auto")
         val idIsOriginal = id.endsWith(".4")
         val idIsDubOrDesc = id.endsWith(".10") || id.endsWith(".2") || id.endsWith(".3")
         val nameLower = displayName.lowercase()
-        val nameIsOriginal = nameLower.contains("original")
+        val nameIsOriginal = !isAutoDubbedFlag && nameLower.contains("original")
         val nameIsDubOrDesc = nameLower.contains("dubbed") || nameLower.contains("descriptive")
+
         val isOriginal = hasOrigTag || idIsOriginal || nameIsOriginal
-        val isDubbedOrDesc = !isOriginal && (hasDubTag || idIsDubOrDesc || nameIsDubOrDesc)
+        val isDubbedOrDesc = !isOriginal && (isAutoDubbedFlag || hasDubTag || idIsDubOrDesc || nameIsDubOrDesc)
+
+        // Synthesize a clean track id & label if the client omitted `audioTrack` JSON but xtags had lang/acont
+        if (id.isBlank() && xLang.isNotBlank()) {
+            id = when {
+                isOriginal -> "$xLang.4"
+                isDubbedOrDesc -> "$xLang.10"
+                else -> xLang
+            }
+        }
+        if (displayName.isBlank() && xLang.isNotBlank()) {
+            val niceLang = try {
+                java.util.Locale.forLanguageTag(xLang).getDisplayName(java.util.Locale.ENGLISH)
+            } catch (_: Exception) {
+                xLang.uppercase()
+            }.ifBlank { xLang.uppercase() }
+            displayName = when {
+                isOriginal -> "$niceLang (original)"
+                isAutoDubbedFlag || acont.contains("dubbed-auto") -> "$niceLang (auto-dubbed)"
+                isDubbedOrDesc -> "$niceLang (dubbed)"
+                else -> niceLang
+            }
+        }
+
         return AudioTrackMeta(
             id = id,
             displayName = displayName,
             isOriginal = isOriginal,
-            isDefault = isDefault,
+            isDefault = rawIsDefault && !isDubbedOrDesc,
             isDubbedOrDescriptive = isDubbedOrDesc
         )
     }
@@ -2633,6 +2814,11 @@ object YouTubeInnerTube {
                 if (!visitorData.isNullOrBlank()) {
                     reqBuilder.header("X-Goog-Visitor-Id", visitorData)
                 }
+            }
+            // On VPN, never let a foreign VPN country's Accept-Language leak onto /player
+            // requests (otherwise YouTube bakes that VPN country's AI dub into muxed HLS!).
+            if (url.contains("/youtubei/v1/player")) {
+                reqBuilder.header("Accept-Language", "en-US,en;q=0.9")
             }
 
             if (authHeaders != null) {

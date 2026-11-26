@@ -93,6 +93,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var playerLoadingText: TextView
     private lateinit var playerTopOverlay: LinearLayout
     private lateinit var btnTopCaptions: TextView
+    private lateinit var btnTopAudio: TextView
     private lateinit var btnTopQuality: TextView
     private lateinit var btnTopAspect: TextView
     private lateinit var btnTopLock: TextView
@@ -220,6 +221,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         playerLoadingText = findViewById(R.id.playerLoadingText)
         playerTopOverlay = findViewById(R.id.playerTopOverlay)
         btnTopCaptions = findViewById(R.id.btnTopCaptions)
+        btnTopAudio = findViewById(R.id.btnTopAudio)
         btnTopQuality = findViewById(R.id.btnTopQuality)
         btnTopAspect = findViewById(R.id.btnTopAspect)
         btnTopLock = findViewById(R.id.btnTopLock)
@@ -285,6 +287,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.btnFullscreen).setOnClickListener { toggleFullscreen() }
         btnTopQuality.setOnClickListener { showQualityPicker() }
         btnTopCaptions.setOnClickListener { showCaptionsPicker() }
+        btnTopAudio.setOnClickListener { showAudioTrackPicker() }
         btnTopAspect.setOnClickListener { cycleAspectRatio() }
         btnTopLock.setOnClickListener { lockFullscreen() }
         btnScreenUnlock.setOnClickListener { unlockFullscreen(showFeedback = true) }
@@ -675,6 +678,19 @@ class YouTubePlayerActivity : AppCompatActivity() {
             if (state.captionsEnabled) R.drawable.yt_chip_selected else R.drawable.yt_badge_bg
         )
         btnTopCaptions.setTextColor(ccColor)
+        val audioTracks = svc?.availableAudioTracks().orEmpty()
+        if (audioTracks.size > 1) {
+            val activeAudioLabel = svc?.currentAudioTrackLabel().orEmpty()
+            val shortCode = activeAudioLabel
+                .substringBefore('(')
+                .trim()
+                .take(8)
+                .ifBlank { "Audio" }
+            btnTopAudio.text = "🔊 $shortCode"
+            btnTopAudio.visibility = View.VISIBLE
+        } else {
+            btnTopAudio.visibility = View.GONE
+        }
         syncSubtitleTicker(state)
 
         if (item != null) {

@@ -465,7 +465,8 @@ class DownloadService : Service() {
             startDownload(
                 this, url, params.outputTemplate, params.audioOnly,
                 params.maxHeight, params.playlistMode,
-                params.selectedVideoIds?.let { ArrayList(it) }
+                params.selectedVideoIds?.let { ArrayList(it) },
+                params.audioTrackId
             )
             return START_NOT_STICKY
         }
@@ -483,6 +484,8 @@ class DownloadService : Service() {
             safeIntent.getStringExtra(EXTRA_PLAYLIST_MODE) ?: "single"
         val selectedVideoIds = safeIntent.getStringArrayListExtra(EXTRA_SELECTED_IDS)
             ?.takeIf { it.isNotEmpty() }
+        val audioTrackId = safeIntent.getStringExtra(EXTRA_AUDIO_TRACK_ID)
+            ?.takeIf { it.isNotBlank() }
 
         // Guard after all early returns, so a rejected intent never
         // leaves the URL stuck in the set.
@@ -498,7 +501,7 @@ class DownloadService : Service() {
         logsByUrl.remove(url)
         val session = Session(url, outputTemplate, audioOnly)
         sessions[url] = session
-        val params = DownloadParams(outputTemplate, audioOnly, maxHeight, playlistMode, selectedVideoIds)
+        val params = DownloadParams(outputTemplate, audioOnly, maxHeight, playlistMode, selectedVideoIds, audioTrackId)
         paramsByUrl[url] = params
         saveParams(this, url, params)
         // The network this download starts on: a switch away from it
@@ -608,7 +611,8 @@ class DownloadService : Service() {
                             playlistMode = playlistMode,
                             concurrency = DownloadPrefs.resolvedConcurrency(this),
                             selectedVideoIds = selectedVideoIds?.toSet(),
-                            fastM4a = DownloadPrefs.isFastM4a(this)
+                            fastM4a = DownloadPrefs.isFastM4a(this),
+                            preferredAudioTrackId = audioTrackId
                         )
                         session.fastDownloader = fast
                         val fastResult = fast.run(object : FastYouTubeDownloader.Callback {
@@ -737,7 +741,7 @@ class DownloadService : Service() {
                     val runnerDone = CountDownLatch(1)
                     newRunner.download(
                         url, outputTemplate,
-                        formatArgs(audioOnly, maxHeight, DownloadPrefs.isFastM4a(this)) +
+                        formatArgs(audioOnly, maxHeight, DownloadPrefs.isFastM4a(this), audioTrackId) +
                             playlistArgs(playlistMode),
                         object : DownloadListener {
                             override fun onProgress(progress: DownloadProgress) {
@@ -994,6 +998,7 @@ class DownloadService : Service() {
         private const val EXTRA_MAX_HEIGHT = "com.graball.engine.extra.MAX_HEIGHT"
         private const val EXTRA_PLAYLIST_MODE = "com.graball.engine.extra.PLAYLIST_MODE"
         private const val EXTRA_SELECTED_IDS = "com.graball.engine.extra.SELECTED_IDS"
+        private const val EXTRA_AUDIO_TRACK_ID = "com.graball.engine.extra.AUDIO_TRACK_ID"
         private const val ACTION_CANCEL = "com.graball.engine.action.CANCEL"
         private const val ACTION_PAUSE = "com.graball.engine.action.PAUSE"
         private const val ACTION_RESUME = "com.graball.engine.action.RESUME"
@@ -1013,7 +1018,8 @@ class DownloadService : Service() {
             val audioOnly: Boolean,
             val maxHeight: Int?,
             val playlistMode: String,
-            val selectedVideoIds: List<String>? = null
+            val selectedVideoIds: List<String>? = null,
+            val audioTrackId: String? = null
         )
 
         private val paramsByUrl = mutableMapOf<String, DownloadParams>()
@@ -1027,7 +1033,8 @@ class DownloadService : Service() {
                     p.audioOnly.toString(),
                     (p.maxHeight ?: 0).toString(),
                     p.playlistMode,
-                    p.selectedVideoIds?.joinToString(",").orEmpty()
+                    p.selectedVideoIds?.joinToString(",").orEmpty(),
+                    p.audioTrackId.orEmpty()
                 ).joinToString("\n")
                 context.getSharedPreferences(PARAMS_PREFS, Context.MODE_PRIVATE)
                     .edit().putString(url, encoded).apply()
@@ -1043,12 +1050,14 @@ class DownloadService : Service() {
                 if (parts.size < 4) return null
                 val selected = parts.getOrNull(4)?.split(",")?.filter { it.isNotBlank() }
                     ?.takeIf { it.isNotEmpty() }
+                val audioTrack = parts.getOrNull(5)?.takeIf { it.isNotBlank() }
                 DownloadParams(
                     outputTemplate = parts[0],
                     audioOnly = parts[1] == "true",
                     maxHeight = parts[2].toIntOrNull()?.takeIf { it > 0 },
                     playlistMode = parts[3],
-                    selectedVideoIds = selected
+                    selectedVideoIds = selected,
+                    audioTrackId = audioTrack
                 )
             } catch (_: Exception) {
                 null
@@ -1076,7 +1085,8 @@ class DownloadService : Service() {
             audioOnly: Boolean = false,
             maxHeight: Int? = null,
             playlistMode: String = "single",
-            selectedVideoIds: ArrayList<String>? = null
+            selectedVideoIds: ArrayList<String>? = null,
+            audioTrackId: String? = null
         ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 putExtra(EXTRA_URL, url)
@@ -1086,6 +1096,9 @@ class DownloadService : Service() {
                 putExtra(EXTRA_PLAYLIST_MODE, playlistMode)
                 if (!selectedVideoIds.isNullOrEmpty()) {
                     putStringArrayListExtra(EXTRA_SELECTED_IDS, selectedVideoIds)
+                }
+                if (!audioTrackId.isNullOrBlank()) {
+                    putExtra(EXTRA_AUDIO_TRACK_ID, audioTrackId)
                 }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1110,29 +1123,43 @@ class DownloadService : Service() {
         private fun formatArgs(
             audioOnly: Boolean,
             maxHeight: Int?,
-            fastM4a: Boolean = false
+            fastM4a: Boolean = false,
+            audioTrackId: String? = null
         ): List<String> {
+            val langCode = audioTrackId
+                ?.removePrefix("hls:")
+                ?.substringBefore(':')
+                ?.substringBefore('.')
+                ?.takeIf { it.matches(Regex("[a-zA-Z]{2,3}(-[a-zA-Z0-9]+)?")) }
+            val langFilter = if (langCode != null) "[language^=$langCode]" else ""
             if (audioOnly) {
                 return if (fastM4a) {
+                    val f = if (langFilter.isNotEmpty()) {
+                        "bestaudio$langFilter[ext=m4a]/bestaudio$langFilter/bestaudio[ext=m4a]/bestaudio"
+                    } else {
+                        "bestaudio[ext=m4a]/bestaudio"
+                    }
                     listOf(
-                        "-f", "bestaudio[ext=m4a]/bestaudio",
+                        "-f", f,
                         "--extract-audio", "--audio-format", "m4a",
                         "--embed-metadata", "--embed-thumbnail"
                     )
                 } else {
+                    val f = if (langFilter.isNotEmpty()) "bestaudio$langFilter/bestaudio" else "bestaudio"
                     listOf(
-                        "-f", "bestaudio",
+                        "-f", f,
                         "--extract-audio", "--audio-format", "mp3", "--audio-quality", "4",
                         "--embed-metadata", "--embed-thumbnail"
                     )
                 }
             }
             val cap = if (maxHeight != null) "[height<=$maxHeight]" else ""
-            // Prefer H.264 (avc1) + AAC (m4a) first so the remuxed MP4
-            // plays with hardware video AND working audio on every device
-            // from Android 5 through Android 16 (older players fail on
-            // Opus-in-MP4), falling back cleanly to any audio/video.
-            val format = "bestvideo$cap[vcodec^=avc1]+bestaudio[ext=m4a]/" +
+            val bestAud = if (langFilter.isNotEmpty()) {
+                "bestaudio$langFilter[ext=m4a]/bestaudio$langFilter/bestaudio[ext=m4a]"
+            } else {
+                "bestaudio[ext=m4a]"
+            }
+            val format = "bestvideo$cap[vcodec^=avc1]+$bestAud/" +
                 "bestvideo$cap[vcodec^=avc1]+bestaudio/" +
                 "best$cap[vcodec^=avc1]/best$cap/best"
             return listOf("-f", format, "--remux-video", "mp4")

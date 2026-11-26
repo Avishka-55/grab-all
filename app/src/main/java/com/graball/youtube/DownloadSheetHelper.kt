@@ -471,6 +471,7 @@ object DownloadSheetHelper {
 
         var selectedOption: FormatOption? = null
         var selectedPlaylistPos = (prefs.playlistPos - 1).coerceIn(0, 3)
+        var selectedAudioTrackId: String? = null
         val optionCardUpdaters = mutableListOf<Pair<FormatOption, (Boolean) -> Unit>>()
 
         fun updateCta() {
@@ -701,6 +702,65 @@ object DownloadSheetHelper {
                 )
             }
 
+            // Audio Language Selector (shown automatically for multi-audio / AI-dubbed YouTube videos)
+            val audioTracks = info?.availableAudioTracks().orEmpty()
+            if (audioTracks.size > 1) {
+                val activeTrack = audioTracks.firstOrNull { it.id == selectedAudioTrackId }
+                    ?: audioTracks.firstOrNull { it.isOriginal }
+                    ?: audioTracks.first()
+                selectedAudioTrackId = activeTrack.id
+                val origSuffix = if (activeTrack.isOriginal && !activeTrack.label.contains("original", ignoreCase = true)) {
+                    " (Original)"
+                } else {
+                    ""
+                }
+                val audioRow = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(10).toFloat()
+                        setColor(colorCard)
+                        setStroke(dp(1), 0x33FFFFFF)
+                    }
+                    setPadding(dp(12), dp(9), dp(12), dp(9))
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = dp(8) }
+                }
+                audioRow.addView(
+                    TextView(context).apply {
+                        text = "🔊 Audio Language"
+                        textSize = 12f
+                        setTextColor(colorSub)
+                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+                )
+                audioRow.addView(
+                    TextView(context).apply {
+                        text = "${activeTrack.label}$origSuffix ▾"
+                        textSize = 12.5f
+                        setTypeface(null, Typeface.BOLD)
+                        setTextColor(colorOrange)
+                    }
+                )
+                audioRow.setOnClickListener {
+                    val labels = audioTracks.map { t ->
+                        val mark = if (t.id == selectedAudioTrackId) "✓ " else ""
+                        val tag = if (t.isOriginal && !t.label.contains("original", ignoreCase = true)) " (Original)" else ""
+                        "$mark${t.label}$tag"
+                    }.toTypedArray()
+                    android.app.AlertDialog.Builder(context)
+                        .setTitle("Audio Language")
+                        .setItems(labels) { _, which ->
+                            selectedAudioTrackId = audioTracks[which].id
+                            renderOptions(info, fallbackNote)
+                        }
+                        .show()
+                }
+                body.addView(audioRow)
+            }
+
             // Music section
             val m4aBytes = info?.estimatedAudioSizeBytes(mp3BitrateKbps = null) ?: 0L
             val mp3Bytes = info?.estimatedAudioSizeBytes(mp3BitrateKbps = 192) ?: 0L
@@ -866,7 +926,8 @@ object DownloadSheetHelper {
                 DownloadProgressBus.thumbnails[url] = currentItem.thumbnailUrl
             }
             DownloadService.startDownload(
-                context, url, template, chosen.audioOnly, chosen.maxHeight, playlistMode
+                context, url, template, chosen.audioOnly, chosen.maxHeight, playlistMode,
+                audioTrackId = selectedAudioTrackId
             )
             dialog.dismiss()
             onActionTaken?.invoke()
@@ -904,8 +965,35 @@ object DownloadSheetHelper {
                 renderOptions(info = cachedExt)
                 return
             }
-            loadingText.text = "Loading $platformName video & sizes…"
+            // Instant 0ms UX: show selectable quality cards right away so the user can tap
+            // Download immediately without waiting, while real thumbnail + sizes load quietly above!
+            renderOptions(info = null)
+            loadingText.text = "Checking $platformName sizes…"
+            loadingRow.visibility = View.VISIBLE
+
             val appCtx = context.applicationContext
+            // ~250ms instant thumbnail + title fast-path for TikTok via public oEmbed
+            if (externalUrl.contains("tiktok.com", ignoreCase = true)) {
+                resolverExecutor.execute {
+                    val oembed = fetchTikTokOEmbed(externalUrl) ?: return@execute
+                    mainHandler.post {
+                        if (dismissed) return@post
+                        if (DownloadProgressBus.isPlaceholderTitle(currentItem.title) && oembed.title.isNotBlank()) {
+                            currentItem = currentItem.copy(title = oembed.title)
+                            titleTv.text = oembed.title
+                        }
+                        if (oembed.author.isNotBlank()) {
+                            metaTv.text = oembed.author
+                        }
+                        if (oembed.thumbUrl.startsWith("http") && currentItem.thumbnailUrl.isBlank()) {
+                            currentItem = currentItem.copy(thumbnailUrl = oembed.thumbUrl)
+                            DownloadProgressBus.thumbnails[externalUrl] = oembed.thumbUrl
+                            ThumbnailLoader.load(oembed.thumbUrl, thumbView, targetWidthPx = 320)
+                        }
+                    }
+                }
+            }
+
             resolverExecutor.execute {
                 val resolved = resolveExternalUrlInfo(appCtx, externalUrl, platformName)
                 if (resolved != null) {
@@ -913,13 +1001,9 @@ object DownloadSheetHelper {
                 }
                 mainHandler.post {
                     if (dismissed) return@post
+                    loadingRow.visibility = View.GONE
                     if (resolved != null) {
                         renderOptions(info = resolved)
-                    } else {
-                        renderOptions(
-                            info = null,
-                            fallbackNote = "Quick preview unavailable — pick a quality to download directly."
-                        )
                     }
                 }
             }
@@ -1069,7 +1153,7 @@ object DownloadSheetHelper {
                 pythonLibDir = RuntimePaths.pythonLibDir(context),
                 pythonPathDir = RuntimePaths.ytDlpBundleDir(context)
             )
-            val (raw, _) = runner.extractInfoJson(url, timeoutSec = 20L)
+            val (raw, _) = runner.extractInfoJson(url, timeoutSec = 12L)
             if (raw.isNullOrBlank()) return null
 
             val root = JSONObject(raw)
@@ -1160,6 +1244,29 @@ object DownloadSheetHelper {
                 muxedStreams = muxedStreams,
                 userAgent = "Mozilla/5.0"
             )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private data class QuickOEmbed(val title: String, val author: String, val thumbUrl: String)
+
+    private fun fetchTikTokOEmbed(url: String): QuickOEmbed? {
+        return try {
+            val encoded = java.net.URLEncoder.encode(url, "UTF-8")
+            val req = okhttp3.Request.Builder()
+                .url("https://www.tiktok.com/oembed?url=$encoded")
+                .header("User-Agent", "Mozilla/5.0")
+                .build()
+            YouTubeSessionConfig.anonymousOkHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val obj = JSONObject(resp.body?.string().orEmpty())
+                val title = cleanSocialTitle(obj.optString("title"))
+                val author = obj.optString("author_name").trim()
+                val thumb = obj.optString("thumbnail_url").trim()
+                if (title.isBlank() && thumb.isBlank()) null
+                else QuickOEmbed(title, author, thumb)
+            }
         } catch (_: Exception) {
             null
         }

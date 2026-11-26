@@ -308,23 +308,32 @@ class YtDlpRunner(
         // When cookies exist, skip cookie-less visionos and use a single fast
         // cookie-capable client (`tv_samsung`) with our persistent preprocessed
         // QuickJS player cache (first run ~15-25s; subsequent runs ~1-3s!).
+        val isYt = isYouTubeUrl(url)
         val hasCookies = cookiesFile != null && cookiesFile.exists() && cookiesFile.length() > 0L
         val jsTimeoutSec = maxOf(timeoutSec, 60L)
         val fastAttempts: List<Pair<List<String>, Long>> = when {
-            isYouTubeUrl(url) && hasCookies -> listOf(
+            isYt && hasCookies -> listOf(
                 listOf("--extractor-args", "youtube:player_client=tv_samsung") to jsTimeoutSec,
                 emptyList<String>() to jsTimeoutSec
             )
-            isYouTubeUrl(url) -> listOf(
+            isYt -> listOf(
                 listOf("--extractor-args", "youtube:player_client=visionos") to timeoutSec,
                 emptyList<String>() to jsTimeoutSec
             )
-            else -> listOf(emptyList<String>() to jsTimeoutSec)
+            else -> listOf(
+                // Fast metadata extraction for Facebook, TikTok, Instagram, X, etc.:
+                // respect caller's short timeout and skip slow format probing / retries.
+                listOf(
+                    "--no-check-formats",
+                    "--retries", "1",
+                    "--extractor-retries", "1"
+                ) to timeoutSec.coerceAtLeast(8L)
+            )
         }
 
         var lastErr = "yt-dlp returned no stream info"
         for ((extraClientArgs, attemptTimeout) in fastAttempts) {
-            val (json, err) = runExtractOnce(url, extraClientArgs, attemptTimeout)
+            val (json, err) = runExtractOnce(url, extraClientArgs, attemptTimeout, isYouTube = isYt)
             if (json != null) return json to ""
             if (err.isNotBlank()) lastErr = err
         }
@@ -334,27 +343,30 @@ class YtDlpRunner(
     private fun runExtractOnce(
         url: String,
         extraArgs: List<String>,
-        timeoutSec: Long
+        timeoutSec: Long,
+        isYouTube: Boolean = true
     ): Pair<String?, String> {
         var proc: Process? = null
         return try {
             val ytDlpCache = prepareYtDlpCacheDir()
-            val cmd = mutableListOf(
-                pythonBinary.absolutePath,
-                "-c",
-                EJS_CACHE_BOOTSTRAP,
-                ytDlpScript.absolutePath,
+            val cmd = mutableListOf(pythonBinary.absolutePath)
+            if (isYouTube) {
+                cmd += listOf("-c", EJS_CACHE_BOOTSTRAP, ytDlpScript.absolutePath)
+            } else {
+                cmd += ytDlpScript.absolutePath
+            }
+            cmd += listOf(
                 "--dump-single-json",
                 "--no-playlist",
                 "--no-warnings",
                 "--skip-download",
-                "--socket-timeout", "15"
+                "--socket-timeout", if (isYouTube) "15" else "8"
             )
             if (ytDlpCache != null) {
                 cmd += listOf("--cache-dir", ytDlpCache.absolutePath)
             }
             cmd += extraArgs
-            if (quickJsBinary != null && quickJsBinary.exists()) {
+            if (isYouTube && quickJsBinary != null && quickJsBinary.exists()) {
                 cmd += listOf("--js-runtimes", "quickjs:" + quickJsBinary.absolutePath)
             }
             if (cookiesFile != null && cookiesFile.exists()) {

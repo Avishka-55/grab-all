@@ -55,7 +55,8 @@ class FastYouTubeDownloader(
     private val playlistMode: String,
     private val concurrency: Int,
     private val selectedVideoIds: Set<String>? = null,
-    private val fastM4a: Boolean = true
+    private val fastM4a: Boolean = true,
+    private val preferredAudioTrackId: String? = null
 ) {
     interface Callback {
         fun onTitleResolved(title: String) {}
@@ -760,7 +761,7 @@ class FastYouTubeDownloader(
         parallelConns: Int,
         onByteProgress: (Long, Long) -> Unit
     ): RawAudioStage? {
-        val audio = info.bestAudio() ?: return null
+        val audio = info.bestAudio(preferredAudioTrackId) ?: return null
         val rawExt = if (audio.mimeType.contains("webm", true)) "webm" else "m4a"
         val rawFile = File(targetDir, ".tmp_${tempTag}_audio.$rawExt")
         val thumbFile = File(targetDir, ".tmp_${tempTag}_thumb.jpg")
@@ -967,7 +968,7 @@ class FastYouTubeDownloader(
         onByteProgress: (Long, Long) -> Unit
     ): RawVideoStage? {
         val video = info.pickVideoStream(maxHeight, forDownload = true) ?: return null
-        val audio = info.bestAudio() ?: return null
+        val audio = info.bestAudio(preferredAudioTrackId) ?: return null
         val vExt = if (video.mimeType.contains("webm", true)) "webm" else "mp4"
         val aExt = if (audio.mimeType.contains("webm", true)) "webm" else "m4a"
         val vFile = File(targetDir, ".tmp_${tempTag}_video.$vExt")
