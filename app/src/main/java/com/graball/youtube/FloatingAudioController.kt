@@ -18,6 +18,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
+import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -39,7 +40,10 @@ import kotlin.math.abs
  *   run ONLY while audio is actively playing and the bubble is visible; both
  *   pause/stop immediately on pause, stop, expand, or activity pause.
  */
-class FloatingAudioController(private val activity: Activity) {
+class FloatingAudioController(
+    private val activity: Activity,
+    private val onlyWhenExplicitAudioOnly: Boolean = false
+) {
 
     private enum class Source { NONE, YOUTUBE, LOCAL }
 
@@ -106,8 +110,54 @@ class FloatingAudioController(private val activity: Activity) {
         if (attached) return
         attached = true
         YouTubePlaybackService.addListener(ytListener)
-        PlayerService.addStateListener(localListener)
+        if (!onlyWhenExplicitAudioOnly) {
+            PlayerService.addStateListener(localListener)
+        }
         refreshFromServices()
+    }
+
+    /**
+     * Smoothly launches the circular floating bubble directly out of [anchorView]
+     * (e.g. the "🎧 Audio" button) and glides it to its snapped screen edge.
+     */
+    fun animateLaunchFrom(anchorView: View) {
+        if (!attached) attach()
+        refreshFromServices()
+        val overlay = rootOverlay ?: return
+        val bubble = bubbleFrame ?: return
+        expanded = false
+        pillRow?.visibility = View.GONE
+        backdrop?.visibility = View.GONE
+        bubble.visibility = View.VISIBLE
+
+        overlay.post {
+            if (!attached || rootOverlay !== overlay || bubbleFrame !== bubble) return@post
+            if (overlay.width <= 0 || overlay.height <= 0) return@post
+            val (targetX, targetY) = computeSavedBubbleTarget(overlay, bubble.layoutParams.width)
+            val overlayLoc = IntArray(2)
+            val anchorLoc = IntArray(2)
+            overlay.getLocationInWindow(overlayLoc)
+            anchorView.getLocationInWindow(anchorLoc)
+            val bSize = bubble.layoutParams.width
+            val startX = (anchorLoc[0] - overlayLoc[0]) + (anchorView.width - bSize) / 2f
+            val startY = (anchorLoc[1] - overlayLoc[1]) + (anchorView.height - bSize) / 2f
+
+            bubble.animate().cancel()
+            bubble.x = startX
+            bubble.y = startY
+            bubble.scaleX = 0.25f
+            bubble.scaleY = 0.25f
+            bubble.alpha = 0.2f
+            bubble.animate()
+                .x(targetX)
+                .y(targetY)
+                .scaleX(1f)
+                .scaleY(1f)
+                .alpha(1f)
+                .setDuration(340L)
+                .setInterpolator(DecelerateInterpolator(1.8f))
+                .start()
+        }
     }
 
     fun detach() {
@@ -411,11 +461,8 @@ class FloatingAudioController(private val activity: Activity) {
         }
     }
 
-    private fun positionBubbleFromSaved(parent: FrameLayout) {
-        val bubble = bubbleFrame ?: return
-        if (parent.width <= 0 || parent.height <= 0) return
+    private fun computeSavedBubbleTarget(parent: FrameLayout, bSize: Int): Pair<Float, Float> {
         val margin = (8 * dp)
-        val bSize = bubble.layoutParams.width
         val targetX = if (savedSnapRight) {
             (parent.width - bSize - margin).coerceAtLeast(margin)
         } else {
@@ -424,6 +471,13 @@ class FloatingAudioController(private val activity: Activity) {
         val minY = (56 * dp)
         val maxY = (parent.height - bSize - (86 * dp)).coerceAtLeast(minY)
         val targetY = (parent.height * savedYFraction).coerceIn(minY, maxY)
+        return targetX to targetY
+    }
+
+    private fun positionBubbleFromSaved(parent: FrameLayout) {
+        val bubble = bubbleFrame ?: return
+        if (parent.width <= 0 || parent.height <= 0) return
+        val (targetX, targetY) = computeSavedBubbleTarget(parent, bubble.layoutParams.width)
         bubble.x = targetX
         bubble.y = targetY
     }
@@ -477,7 +531,12 @@ class FloatingAudioController(private val activity: Activity) {
     private fun resolveActiveAudio(): ActiveAudio? {
         val ytState = YouTubePlaybackService.currentState
         val ytItem = ytState.currentItem
-        if (ytItem != null && (ytState.isAudioOnly || ytState.isVideoDisabled)) {
+        val ytQualifies = if (onlyWhenExplicitAudioOnly) {
+            ytItem != null && ytState.isAudioOnly
+        } else {
+            ytItem != null && (ytState.isAudioOnly || ytState.isVideoDisabled)
+        }
+        if (ytQualifies && ytItem != null) {
             return ActiveAudio(
                 source = Source.YOUTUBE,
                 title = ytItem.title,
@@ -486,6 +545,7 @@ class FloatingAudioController(private val activity: Activity) {
                 thumbUrl = ytItem.thumbnailUrl.takeIf { it.isNotBlank() }
             )
         }
+        if (onlyWhenExplicitAudioOnly) return null
         val localSvc = PlayerService.instance
         if (localSvc != null && localSvc.hasLoadedTrack()) {
             return ActiveAudio(
@@ -656,11 +716,15 @@ class FloatingAudioController(private val activity: Activity) {
         setExpanded(false)
         when (src) {
             Source.YOUTUBE -> {
-                activity.startActivity(
-                    Intent(activity, YouTubePlayerActivity::class.java).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    }
-                )
+                if (activity is YouTubePlayerActivity) {
+                    YouTubePlaybackService.instance?.setAudioOnlyMode(false)
+                } else {
+                    activity.startActivity(
+                        Intent(activity, YouTubePlayerActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        }
+                    )
+                }
             }
             Source.LOCAL -> {
                 activity.startActivity(

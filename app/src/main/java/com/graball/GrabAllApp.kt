@@ -19,7 +19,11 @@ class GrabAllApp : Application() {
     override fun onCreate() {
         super.onCreate()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                if (activity !is YouTubePlayerActivity) {
+                    otherActivityCount++
+                }
+            }
             override fun onActivityStarted(activity: Activity) {}
 
             override fun onActivityResumed(activity: Activity) {
@@ -39,6 +43,9 @@ class GrabAllApp : Application() {
 
             override fun onActivityDestroyed(activity: Activity) {
                 floatingControllers.remove(activity)?.detach()
+                if (activity !is YouTubePlayerActivity) {
+                    otherActivityCount = (otherActivityCount - 1).coerceAtLeast(0)
+                }
             }
         })
     }
@@ -47,4 +54,11 @@ class GrabAllApp : Application() {
         activity is PlayerActivity ||
             activity is YouTubePlayerActivity ||
             activity is LoginActivity
+
+    companion object {
+        @Volatile
+        private var otherActivityCount: Int = 0
+
+        fun hasOtherAliveActivity(): Boolean = otherActivityCount > 0
+    }
 }

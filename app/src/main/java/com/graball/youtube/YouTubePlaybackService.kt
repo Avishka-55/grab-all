@@ -107,6 +107,7 @@ class YouTubePlaybackService : MediaSessionService() {
     private var currentStreamInfo: VideoStreamInfo? = null
     private var currentStreamMode: StreamMode? = null
     private val attemptedModes = mutableSetOf<StreamMode>()
+    private val failedModes = mutableSetOf<StreamMode>()
     private var sponsorSegments: List<SponsorSegment> = emptyList()
     private val skippedSegmentKeys = mutableSetOf<String>()
     private var isLoading = false
@@ -293,8 +294,13 @@ class YouTubePlaybackService : MediaSessionService() {
                     }
 
                     override fun onVideoSizeChanged(videoSize: VideoSize) {
-                        if (videoSize.height > 0) {
-                            val normalized = normalizeQualityHeight(videoSize.height)
+                        val shortSide = if (videoSize.width > 0 && videoSize.height > 0) {
+                            minOf(videoSize.width, videoSize.height)
+                        } else {
+                            videoSize.height
+                        }
+                        if (shortSide > 0) {
+                            val normalized = normalizeQualityHeight(shortSide)
                             if (activeVideoHeight != normalized) {
                                 activeVideoHeight = normalized
                                 broadcastState()
@@ -373,6 +379,9 @@ class YouTubePlaybackService : MediaSessionService() {
                                     failedItags.add(it)
                                 }
                             }
+                        }
+                        if (info != null) {
+                            currentStreamMode?.let { failedModes.add(it) }
                         }
                         if (info != null && tryNextStreamMode(info, pos, playImmediately = true)) {
                             return
@@ -754,21 +763,71 @@ class YouTubePlaybackService : MediaSessionService() {
         return p.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
     }
 
-    /** Real playable video heights detected from ExoPlayer tracks + stream metadata. */
+    /** Real playable video heights genuinely available in the active working stream mode. */
     fun availableVideoHeights(): List<Int> {
         val heights = mutableSetOf<Int>()
-        currentStreamInfo?.availableHeights()?.let { heights.addAll(it) }
-        val p = player
-        if (p != null) {
-            for (group in p.currentTracks.groups) {
-                if (group.type != C.TRACK_TYPE_VIDEO) continue
-                for (i in 0 until group.length) {
-                    val h = group.getTrackFormat(i).height
-                    if (h in 144..2160) heights.add(normalizeQualityHeight(h))
+        val info = currentStreamInfo
+        when (currentStreamMode) {
+            StreamMode.ADAPTIVE_MERGE -> {
+                info?.videoStreams?.forEach {
+                    if (it.height > 0) heights.add(normalizeQualityHeight(it.height))
                 }
             }
+            StreamMode.HLS_VARIANT -> {
+                info?.hlsVariants?.forEach {
+                    if (it.height > 0) heights.add(normalizeQualityHeight(it.height))
+                }
+            }
+            StreamMode.MUXED -> {
+                info?.muxedStreams?.forEach {
+                    if (it.height > 0) heights.add(normalizeQualityHeight(it.height))
+                }
+            }
+            StreamMode.HLS_MASTER -> {
+                val p = player
+                if (p != null) {
+                    for (group in p.currentTracks.groups) {
+                        if (group.type != C.TRACK_TYPE_VIDEO) continue
+                        for (i in 0 until group.length) {
+                            val fmt = group.getTrackFormat(i)
+                            val side = if (fmt.width > 0 && fmt.height > 0) minOf(fmt.width, fmt.height) else fmt.height
+                            if (side in 144..2160) heights.add(normalizeQualityHeight(side))
+                        }
+                    }
+                }
+            }
+            null -> Unit
+        }
+        if (heights.isEmpty()) {
+            info?.availableHeights()?.let { heights.addAll(it) }
         }
         return heights.sortedDescending()
+    }
+
+    /** Human-readable live readout of what ExoPlayer is actually decoding right now. */
+    fun currentStreamStatsLabel(): String {
+        val modeLabel = when (currentStreamMode) {
+            StreamMode.ADAPTIVE_MERGE -> "Adaptive"
+            StreamMode.HLS_VARIANT -> "HLS"
+            StreamMode.HLS_MASTER -> "HLS Live"
+            StreamMode.MUXED -> "Muxed"
+            null -> ""
+        }
+        val fmt = player?.videoFormat
+        val res = if (fmt != null && fmt.width > 0 && fmt.height > 0) {
+            "${fmt.width}×${fmt.height}"
+        } else {
+            activeVideoHeight?.let { "${it}p" }.orEmpty()
+        }
+        val codec = fmt?.codecs?.lowercase().orEmpty().let {
+            when {
+                it.contains("av01") -> "AV1"
+                it.contains("vp9") || it.contains("vp09") -> "VP9"
+                it.contains("avc1") || it.contains("h264") -> "H.264"
+                else -> ""
+            }
+        }
+        return listOf(res, codec, modeLabel).filter { it.isNotBlank() }.joinToString(" · ")
     }
 
     fun setQuality(height: Int?) {
@@ -790,8 +849,14 @@ class YouTubePlaybackService : MediaSessionService() {
             return
         }
         val wasPlaying = p.playWhenReady
+        // Skip modes that already failed for this video (e.g. broken adaptive on VPN)
+        // so switching quality jumps directly to the chosen working resolution.
         attemptedModes.clear()
-        prepareStream(info, resumePosMs = pos, playImmediately = wasPlaying)
+        attemptedModes.addAll(failedModes)
+        if (!tryNextStreamMode(info, resumePosMs = pos, playImmediately = wasPlaying)) {
+            attemptedModes.clear()
+            prepareStream(info, resumePosMs = pos, playImmediately = wasPlaying)
+        }
         broadcastState()
     }
 
@@ -882,6 +947,7 @@ class YouTubePlaybackService : MediaSessionService() {
         activeVideoHeight = null
         preparedVideoHeight = null
         attemptedModes.clear()
+        failedModes.clear()
         sponsorSegments = emptyList()
         skippedSegmentKeys.clear()
         player?.stop()

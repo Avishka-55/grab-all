@@ -102,6 +102,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var actionSponsorBlock: TextView
     private lateinit var relatedList: RecyclerView
     private lateinit var relatedAdapter: YtItemAdapter
+    private lateinit var floatingAudio: FloatingAudioController
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
@@ -239,18 +240,12 @@ class YouTubePlayerActivity : AppCompatActivity() {
             explicitBgAudioRequested = next
             svc.setAudioOnlyMode(next)
             if (next) {
-                Toast.makeText(
-                    this,
-                    "🎧 Audio mode active — drag the floating bubble anywhere",
-                    Toast.LENGTH_SHORT
-                ).show()
-                finish()
+                if (!inPipMode && !isFullscreen) {
+                    floatingAudio.animateLaunchFrom(actionBgAudio)
+                }
+                showHud("🎧 Audio Mode ON")
             } else {
-                Toast.makeText(
-                    this,
-                    "Audio only OFF — video resumed",
-                    Toast.LENGTH_SHORT
-                ).show()
+                showHud("Video resumed")
             }
         }
 
@@ -309,6 +304,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         relatedList.layoutManager = LinearLayoutManager(this)
         relatedList.adapter = relatedAdapter
 
+        floatingAudio = FloatingAudioController(this, onlyWhenExplicitAudioOnly = true)
         setupGestures()
         registerPipReceiver()
     }
@@ -316,14 +312,25 @@ class YouTubePlayerActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getBooleanExtra("restore_video", false)) {
-            intent.removeExtra("restore_video")
-            YouTubePlaybackService.instance?.setAudioOnlyMode(false)
+        activeInstance = this
+        val svc = YouTubePlaybackService.instance
+        if (svc != null) {
+            if (intent.getBooleanExtra("restore_video", false)) {
+                intent.removeExtra("restore_video")
+                svc.setAudioOnlyMode(false)
+            }
+            playerView.player = svc.getPlayer()
+            svc.setVideoSurfaceVisible(true)
+        }
+        applyChromeVisibility()
+        if (!inPipMode) {
+            playerView.showController()
         }
     }
 
     override fun onStart() {
         super.onStart()
+        activeInstance = this
         explicitBgAudioRequested = false
         val svc = YouTubePlaybackService.instance
         if (svc != null) {
@@ -343,19 +350,38 @@ class YouTubePlayerActivity : AppCompatActivity() {
         YouTubePlaybackService.addListener(stateListener)
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (!inPipMode && !isFullscreen) {
+            floatingAudio.attach()
+        }
+    }
+
+    override fun onPause() {
+        floatingAudio.detach()
+        super.onPause()
+    }
+
     override fun onStop() {
         YouTubePlaybackService.removeListener(stateListener)
-        playerView.player = null
-        // Anytime the player UI is no longer visible (display turned off, home
-        // pressed, navigated back to mini-player, or PiP closed) — except during
-        // screen rotation — drop the video track so playback runs audio-only!
-        if (!isChangingConfigurations) {
-            YouTubePlaybackService.instance?.setVideoSurfaceVisible(false)
+        // Guard with activeInstance so a stale/closing instance can never detach
+        // ExoPlayer or disable video for a newer active player screen.
+        if (activeInstance === this) {
+            playerView.player = null
+            // Anytime the player UI is no longer visible (display turned off, home
+            // pressed, navigated back to mini-player, or PiP closed) — except during
+            // screen rotation — drop the video track so playback runs audio-only!
+            if (!isChangingConfigurations) {
+                YouTubePlaybackService.instance?.setVideoSurfaceVisible(false)
+            }
         }
         super.onStop()
     }
 
     override fun onDestroy() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
         mainHandler.removeCallbacks(hideHudRunnable)
         try {
             unregisterReceiver(pipReceiver)
@@ -390,15 +416,17 @@ class YouTubePlayerActivity : AppCompatActivity() {
         if (wasInPip && !isInPictureInPictureMode &&
             !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
         ) {
-            YouTubePlaybackService.instance?.let { svc ->
-                svc.pauseIfPlaying()
-                svc.setVideoSurfaceVisible(false)
+            if (activeInstance === this) {
+                YouTubePlaybackService.instance?.let { svc ->
+                    svc.pauseIfPlaying()
+                    svc.setVideoSurfaceVisible(false)
+                }
             }
             return
         }
         applyChromeVisibility()
         val svc = YouTubePlaybackService.instance
-        if (svc != null) {
+        if (svc != null && activeInstance === this) {
             if (isInPictureInPictureMode) {
                 svc.setVideoSurfaceVisible(!YouTubePlaybackService.currentState.isAudioOnly)
             } else {
@@ -428,14 +456,24 @@ class YouTubePlayerActivity : AppCompatActivity() {
         }
     }
 
-    /** Never trap the user or exit to launcher if this player became task root. */
+    /**
+     * Never trap the user or wipe the YouTube Feed back stack when returning
+     * from a split PiP task: if another GrabAll Activity is already alive behind
+     * us, close just this task so Android reveals it at the exact scroll spot!
+     */
     private fun navigateBackCleanly() {
         if (isTaskRoot) {
-            startActivity(
-                Intent(this, com.graball.MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            )
+            if (!com.graball.GrabAllApp.hasOtherAliveActivity()) {
+                startActivity(
+                    Intent(this, com.graball.MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    }
+                )
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                finishAndRemoveTask()
+                return
+            }
         }
         finish()
     }
@@ -443,6 +481,16 @@ class YouTubePlayerActivity : AppCompatActivity() {
     // ---- State Binding ----
 
     private fun bindState(state: YouTubePlaybackState) {
+        // If playback was completely stopped while in PiP (e.g., user started a
+        // local song or tapped Stop in the notification), close the empty PiP box.
+        if (inPipMode && state.currentItem == null && !state.isLoading) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                finishAndRemoveTask()
+            } else {
+                finish()
+            }
+            return
+        }
         val svc = YouTubePlaybackService.instance
         if (svc != null && playerView.player == null) {
             playerView.player = svc.getPlayer()
@@ -1128,6 +1176,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
         } else {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         }
+        if (hideDetails) {
+            floatingAudio.detach()
+        } else if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            floatingAudio.attach()
+        }
         updateAudioOnlyBannerVisibility(YouTubePlaybackService.currentState)
     }
 
@@ -1304,8 +1357,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
             labels.add("$mark${h}p")
         }
 
+        val stats = svc.currentStreamStatsLabel()
+        val pickerTitle = if (stats.isNotBlank()) "Video Quality ($stats)" else "Video Quality"
+
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Video Quality")
+            .setTitle(pickerTitle)
             .setItems(labels.toTypedArray()) { _, which ->
                 when (which) {
                     0 -> {
@@ -1390,5 +1446,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
     companion object {
         private const val ACTION_PIP_PLAY_PAUSE = "com.graball.youtube.PIP_PLAY_PAUSE"
         private const val ACTION_PIP_NEXT = "com.graball.youtube.PIP_NEXT"
+
+        @Volatile
+        private var activeInstance: YouTubePlayerActivity? = null
     }
 }
