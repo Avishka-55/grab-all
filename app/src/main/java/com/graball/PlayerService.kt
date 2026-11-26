@@ -104,6 +104,25 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         var instance: PlayerService? = null
             private set
 
+        private val stateListeners = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
+
+        fun addStateListener(listener: () -> Unit) {
+            stateListeners.add(listener)
+        }
+
+        fun removeStateListener(listener: () -> Unit) {
+            stateListeners.remove(listener)
+        }
+
+        private fun notifyStateChanged() {
+            for (l in stateListeners) {
+                try {
+                    l()
+                } catch (_: Exception) {
+                }
+            }
+        }
+
         /**
          * Stop local playback, persist the last-played track & timestamp,
          * cancel notification ID 2 (even if detached/paused), and stop the service.
@@ -283,7 +302,11 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     }
 
     private fun syncMediaSession() {
-        val session = mediaSession ?: return
+        val session = mediaSession
+        if (session == null) {
+            notifyStateChanged()
+            return
+        }
         if (!hasLoadedTrack()) {
             try {
                 session.setPlaybackState(
@@ -294,6 +317,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
                 session.isActive = false
             } catch (_: Exception) {
             }
+            notifyStateChanged()
             return
         }
         val file = currentFile()
@@ -345,6 +369,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
             }
         } catch (_: Exception) {
         }
+        notifyStateChanged()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -399,6 +424,7 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
         mediaSession = null
         artExecutor.shutdownNow()
         if (instance === this) instance = null
+        notifyStateChanged()
         super.onDestroy()
     }
 
@@ -413,6 +439,23 @@ class PlayerService : Service(), MediaPlayer.OnCompletionListener,
     fun currentFolderLabel(): String = folderLabel
     fun currentTrackMeta(): AlbumArtLoader.TrackMeta? = currentMeta
     fun currentArtBitmap(): Bitmap? = currentArt
+
+    fun displayTitle(): String {
+        return currentMeta?.title?.takeIf { it.isNotBlank() }
+            ?: currentFile()?.nameWithoutExtension
+            ?: externalTitle.takeIf { it.isNotBlank() }
+            ?: "GrabAll Music"
+    }
+
+    fun progressFraction(): Float {
+        val dur = duration()
+        if (dur <= 0) return 0f
+        return (position().toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+    }
+
+    fun togglePlayPause() {
+        if (isPlaying()) pause() else resume()
+    }
 
     fun isPlaying(): Boolean {
         exoPlayer?.let { return try { it.isPlaying } catch (_: Exception) { false } }

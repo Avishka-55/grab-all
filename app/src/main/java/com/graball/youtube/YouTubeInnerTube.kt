@@ -2732,6 +2732,28 @@ object YouTubeInnerTube {
             .ifBlank { extractText(obj.optJSONObject("viewCountText")) }
         val thumb = pickThumb(obj.optJSONObject("thumbnail"))
             .ifBlank { "https://i.ytimg.com/vi/$id/hqdefault.jpg" }
+        val channelId = extractChannelIdFromRuns(obj.optJSONObject("ownerText"))
+            .ifBlank { extractChannelIdFromRuns(obj.optJSONObject("shortBylineText")) }
+            .ifBlank { extractChannelIdFromRuns(obj.optJSONObject("longBylineText")) }
+            .ifBlank {
+                obj.optJSONObject("channelThumbnailSupportedRenderers")
+                    ?.optJSONObject("channelThumbnailWithLinkRenderer")
+                    ?.optJSONObject("navigationEndpoint")
+                    ?.optJSONObject("browseEndpoint")
+                    ?.optString("browseId")
+                    ?.takeIf { it.startsWith("UC") }
+                    .orEmpty()
+            }
+            .ifBlank { extractChannelIdFromAvatar(obj.optJSONObject("avatar")) }
+        val channelAvatar = extractAvatarUrl(obj.optJSONObject("avatar"))
+            .ifBlank {
+                pickThumb(
+                    obj.optJSONObject("channelThumbnailSupportedRenderers")
+                        ?.optJSONObject("channelThumbnailWithLinkRenderer")
+                        ?.optJSONObject("thumbnail")
+                )
+            }
+            .ifBlank { pickThumb(obj.optJSONObject("channelThumbnail")) }
         return YtItem(
             id = id,
             title = title,
@@ -2740,7 +2762,9 @@ object YouTubeInnerTube {
             views = views,
             thumbnailUrl = thumb,
             isPlaylist = false,
-            isLive = isLive
+            isLive = isLive,
+            channelId = channelId,
+            channelAvatarUrl = channelAvatar
         )
     }
 
@@ -2834,6 +2858,10 @@ object YouTubeInnerTube {
             thumb = "https://i.ytimg.com/vi/$id/hqdefault.jpg"
         }
 
+        val metaImage = meta?.optJSONObject("image")
+        val channelId = if (!isPlaylist) extractChannelIdFromAvatar(metaImage) else ""
+        val channelAvatar = if (!isPlaylist) extractAvatarUrl(metaImage) else ""
+
         val isLive = !isPlaylist && badgeText.equals("LIVE", ignoreCase = true)
         return YtItem(
             id = id,
@@ -2844,8 +2872,56 @@ object YouTubeInnerTube {
             thumbnailUrl = thumb,
             isPlaylist = isPlaylist,
             videoCount = if (isPlaylist) badgeText.ifBlank { "Playlist" } else "",
-            isLive = isLive
+            isLive = isLive,
+            channelId = channelId,
+            channelAvatarUrl = channelAvatar
         )
+    }
+
+    private fun extractChannelIdFromRuns(textObj: JSONObject?): String {
+        val runs = textObj?.optJSONArray("runs") ?: return ""
+        for (i in 0 until runs.length()) {
+            val bid = runs.optJSONObject(i)
+                ?.optJSONObject("navigationEndpoint")
+                ?.optJSONObject("browseEndpoint")
+                ?.optString("browseId")
+                .orEmpty()
+            if (bid.startsWith("UC")) return bid
+        }
+        return ""
+    }
+
+    private fun extractChannelIdFromAvatar(imageObj: JSONObject?): String {
+        if (imageObj == null) return ""
+        val decorated = imageObj.optJSONObject("decoratedAvatarViewModel")
+            ?: imageObj.optJSONObject("avatarStackViewModel")
+            ?: imageObj
+        val direct = decorated.optJSONObject("rendererContext")
+            ?.optJSONObject("commandContext")
+            ?.optJSONObject("onTap")
+            ?.optJSONObject("innertubeCommand")
+            ?.optJSONObject("browseEndpoint")
+            ?.optString("browseId")
+            .orEmpty()
+        if (direct.startsWith("UC")) return direct
+        return ""
+    }
+
+    private fun extractAvatarUrl(imageObj: JSONObject?): String {
+        if (imageObj == null) return ""
+        val avatarVm = imageObj.optJSONObject("decoratedAvatarViewModel")
+            ?.optJSONObject("avatar")
+            ?.optJSONObject("avatarViewModel")
+            ?: imageObj.optJSONObject("avatarStackViewModel")
+                ?.optJSONArray("avatars")
+                ?.optJSONObject(0)
+                ?.optJSONObject("avatarViewModel")
+            ?: imageObj.optJSONObject("avatarViewModel")
+            ?: return ""
+        val sources = avatarVm.optJSONObject("image")?.optJSONArray("sources") ?: return ""
+        if (sources.length() == 0) return ""
+        val raw = sources.optJSONObject(sources.length() - 1)?.optString("url").orEmpty()
+        return if (raw.startsWith("//")) "https:$raw" else raw
     }
 
     private fun extractText(obj: JSONObject?): String {

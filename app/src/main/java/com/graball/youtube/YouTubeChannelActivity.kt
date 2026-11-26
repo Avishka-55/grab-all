@@ -37,7 +37,6 @@ class YouTubeChannelActivity : AppCompatActivity() {
     private lateinit var loading: ProgressBar
     private lateinit var emptyView: TextView
     private lateinit var adapter: YtItemAdapter
-    private lateinit var floatingAudio: FloatingAudioController
 
     private val io = Executors.newSingleThreadExecutor()
     private var channelId: String = ""
@@ -132,18 +131,7 @@ class YouTubeChannelActivity : AppCompatActivity() {
             }
         })
 
-        floatingAudio = FloatingAudioController(this)
         selectTab(YouTubeInnerTube.ChannelTab.VIDEOS)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        floatingAudio.attach()
-    }
-
-    override fun onPause() {
-        floatingAudio.detach()
-        super.onPause()
     }
 
     override fun onDestroy() {

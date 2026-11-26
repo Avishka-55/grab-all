@@ -301,6 +301,9 @@ object YouTubeStore {
         put("thumb", item.thumbnailUrl)
         put("playlist", item.isPlaylist)
         put("count", item.videoCount)
+        if (item.isLive) put("live", true)
+        if (item.channelId.isNotBlank()) put("cid", item.channelId)
+        if (item.channelAvatarUrl.isNotBlank()) put("cavatar", item.channelAvatarUrl)
     }
 
     private fun itemFromJson(obj: JSONObject?): YtItem? {
@@ -315,7 +318,10 @@ object YouTubeStore {
             views = obj.optString("views", ""),
             thumbnailUrl = obj.optString("thumb", ""),
             isPlaylist = obj.optBoolean("playlist", false),
-            videoCount = obj.optString("count", "")
+            videoCount = obj.optString("count", ""),
+            isLive = obj.optBoolean("live", false),
+            channelId = obj.optString("cid", ""),
+            channelAvatarUrl = obj.optString("cavatar", "")
         )
     }
 }

@@ -79,7 +79,6 @@ class YouTubeActivity : AppCompatActivity() {
     private lateinit var tabViews: Map<Tab, TextView>
     private lateinit var filterChips: Map<YouTubeInnerTube.SearchFilter, TextView>
     private lateinit var adapter: YtItemAdapter
-    private lateinit var floatingAudio: FloatingAudioController
 
     private val io = Executors.newSingleThreadExecutor()
     private val suggestIo = Executors.newSingleThreadExecutor()
@@ -324,7 +323,8 @@ class YouTubeActivity : AppCompatActivity() {
                     renderBookmarks()
                 }
             },
-            isQueueMode = { currentTab == Tab.QUEUE }
+            isQueueMode = { currentTab == Tab.QUEUE },
+            onChannelClick = { item -> openChannelForItem(item) }
         )
         val layoutManager = LinearLayoutManager(this)
         recycler.layoutManager = layoutManager
@@ -347,7 +347,6 @@ class YouTubeActivity : AppCompatActivity() {
                 }
             }
         })
-        floatingAudio = FloatingAudioController(this)
         setupPullToRefresh()
 
         refreshRecentChips()
@@ -435,7 +434,6 @@ class YouTubeActivity : AppCompatActivity() {
             updateFilterChipStyles()
         }
         YouTubePlaybackService.addListener(playbackListener)
-        floatingAudio.attach()
     }
 
     private fun isSignedInToYouTube(): Boolean {
@@ -479,7 +477,6 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        floatingAudio.detach()
         YouTubePlaybackService.removeListener(playbackListener)
         super.onPause()
     }
@@ -1365,6 +1362,18 @@ class YouTubeActivity : AppCompatActivity() {
             }
         }
         openPlayerScreen()
+    }
+
+    private fun openChannelForItem(item: YtItem) {
+        if (item.channelId.isBlank()) return
+        startActivity(
+            YouTubeChannelActivity.createIntent(
+                context = this,
+                channelId = item.channelId,
+                channelName = item.channel,
+                channelAvatar = item.channelAvatarUrl
+            )
+        )
     }
 
     private fun openPlayerScreen() {

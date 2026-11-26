@@ -97,9 +97,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var actionComments: TextView
     private lateinit var actionOpenWeb: TextView
     private lateinit var actionBgAudio: TextView
-    private lateinit var actionQuality: TextView
     private lateinit var actionSpeed: TextView
-    private lateinit var actionCaptions: TextView
     private lateinit var actionBookmark: TextView
     private lateinit var actionSponsorBlock: TextView
     private lateinit var relatedList: RecyclerView
@@ -189,9 +187,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         actionComments = findViewById(R.id.actionComments)
         actionOpenWeb = findViewById(R.id.actionOpenWeb)
         actionBgAudio = findViewById(R.id.actionBgAudio)
-        actionQuality = findViewById(R.id.actionQuality)
         actionSpeed = findViewById(R.id.actionSpeed)
-        actionCaptions = findViewById(R.id.actionCaptions)
         actionBookmark = findViewById(R.id.actionBookmark)
         actionSponsorBlock = findViewById(R.id.actionSponsorBlock)
         relatedList = findViewById(R.id.relatedList)
@@ -204,7 +200,6 @@ class YouTubePlayerActivity : AppCompatActivity() {
             }
         }
         findViewById<TextView>(R.id.btnTopPip).setOnClickListener { enterPipOrMinimize() }
-        findViewById<TextView>(R.id.actionPip).setOnClickListener { enterPipOrMinimize() }
         findViewById<TextView>(R.id.btnFullscreen).setOnClickListener { toggleFullscreen() }
         btnTopQuality.setOnClickListener { showQualityPicker() }
         btnTopCaptions.setOnClickListener { toggleCaptions() }
@@ -213,18 +208,14 @@ class YouTubePlayerActivity : AppCompatActivity() {
         // to hide immediately re-shows controls!).
         playerView.controllerHideOnTouch = false
         playerView.controllerAutoShow = false
-        // In fullscreen, keep the top overlay synced with ExoPlayer's controls
-        // so it cleanly disappears while watching and reappears on tap.
+        playerView.controllerShowTimeoutMs = 3500
+        // Keep the top overlay (Back / CC / Quality / PiP / Fullscreen) synced with
+        // ExoPlayer's controls in BOTH portrait & fullscreen so it auto-hides cleanly
+        // during playback and reappears on tap.
         playerView.setControllerVisibilityListener(
             PlayerView.ControllerVisibilityListener { visibility ->
                 isControllerVisible = (visibility == View.VISIBLE)
-                if (inPipMode) {
-                    playerTopOverlay.visibility = View.GONE
-                } else if (isFullscreen) {
-                    playerTopOverlay.visibility = visibility
-                } else {
-                    playerTopOverlay.visibility = View.VISIBLE
-                }
+                playerTopOverlay.visibility = if (inPipMode) View.GONE else visibility
                 updateAudioOnlyBannerVisibility(YouTubePlaybackService.currentState)
             }
         )
@@ -263,9 +254,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
             }
         }
 
-        actionQuality.setOnClickListener { showQualityPicker() }
         actionSpeed.setOnClickListener { showSpeedPicker() }
-        actionCaptions.setOnClickListener { toggleCaptions() }
 
         actionBookmark.setOnClickListener {
             val item = YouTubePlaybackService.currentState.currentItem ?: return@setOnClickListener
@@ -303,6 +292,18 @@ class YouTubePlayerActivity : AppCompatActivity() {
                     svc.addToQueue(item)
                 }
                 Toast.makeText(this, "Added to queue", Toast.LENGTH_SHORT).show()
+            },
+            onChannelClick = { item ->
+                if (item.channelId.isNotBlank()) {
+                    startActivity(
+                        YouTubeChannelActivity.createIntent(
+                            context = this,
+                            channelId = item.channelId,
+                            channelName = item.channel,
+                            channelAvatar = item.channelAvatarUrl
+                        )
+                    )
+                }
             }
         )
         relatedList.layoutManager = LinearLayoutManager(this)
@@ -335,6 +336,9 @@ class YouTubePlayerActivity : AppCompatActivity() {
             // Mark video surface visible (automatically restores video unless the
             // user explicitly enabled Audio-Only mode).
             svc.setVideoSurfaceVisible(true)
+        }
+        if (!inPipMode) {
+            playerView.showController()
         }
         YouTubePlaybackService.addListener(stateListener)
     }
@@ -498,13 +502,6 @@ class YouTubePlayerActivity : AppCompatActivity() {
             actualHeight != null -> "⚙ ${actualHeight}p"
             else -> "⚙ Auto"
         }
-        val chipQualityText = when {
-            state.isAudioOnly -> "⚙ Audio"
-            actualHeight != null && state.selectedHeight == null -> "⚙ Auto (${actualHeight}p)"
-            actualHeight != null -> "⚙ ${actualHeight}p"
-            else -> "⚙ Auto"
-        }
-        actionQuality.text = chipQualityText
         btnTopQuality.text = topQualityText
 
         actionSpeed.text = "${trimSpeed(state.playbackSpeed)}×"
@@ -512,14 +509,10 @@ class YouTubePlayerActivity : AppCompatActivity() {
         actionBgAudio.setBackgroundResource(
             if (state.isAudioOnly) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
         )
-        actionCaptions.setBackgroundResource(
-            if (state.captionsEnabled) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
-        )
         val ccColor = ContextCompat.getColor(
             this,
             if (state.captionsEnabled) R.color.graball_text else R.color.graball_subtext
         )
-        actionCaptions.setTextColor(ccColor)
         btnTopCaptions.setBackgroundResource(
             if (state.captionsEnabled) R.drawable.yt_chip_selected else R.drawable.yt_badge_bg
         )
@@ -1109,10 +1102,12 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private fun applyChromeVisibility() {
         val hideDetails = inPipMode || isFullscreen
         detailsContainer.visibility = if (hideDetails) View.GONE else View.VISIBLE
-        playerTopOverlay.visibility = when {
-            inPipMode -> View.GONE
-            isFullscreen -> if (playerView.isControllerFullyVisible) View.VISIBLE else View.GONE
-            else -> View.VISIBLE
+        playerTopOverlay.visibility = if (inPipMode) {
+            View.GONE
+        } else if (playerView.isControllerFullyVisible) {
+            View.VISIBLE
+        } else {
+            View.GONE
         }
         playerView.useController = !inPipMode
 
@@ -1170,7 +1165,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
                     if (inPipMode) return false
                     if (playerView.isControllerFullyVisible) {
                         playerView.hideController()
-                        if (isFullscreen) playerTopOverlay.visibility = View.GONE
+                        playerTopOverlay.visibility = View.GONE
                     } else {
                         playerView.showController()
                         playerTopOverlay.visibility = View.VISIBLE
