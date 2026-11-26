@@ -467,61 +467,6 @@
                     android:textStyle="bold" />
             </LinearLayout>
 
-            <!-- Continue Watching: compact horizontal strip of recently watched
-                 YouTube videos with resume progress bars (hidden when empty). -->
-            <LinearLayout
-                android:id="@+id/continueWatchingSection"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:orientation="vertical"
-                android:visibility="gone">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Continue Watching"
-                        android:textColor="@color/graball_text"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/continueWatchingSeeAll"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:paddingStart="10dp"
-                        android:paddingTop="4dp"
-                        android:paddingEnd="2dp"
-                        android:paddingBottom="4dp"
-                        android:text="See all ›"
-                        android:textColor="@color/graball_orange"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
-                </LinearLayout>
-
-                <HorizontalScrollView
-                    android:id="@+id/continueWatchingScroll"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:overScrollMode="never"
-                    android:scrollbars="none">
-
-                    <LinearLayout
-                        android:id="@+id/continueWatchingContainer"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal" />
-                </HorizontalScrollView>
-            </LinearLayout>
-
             <!-- Quick Grab Sites: a tap opens that site in the
                  in-app browser. YouTube downloads from the browser;
                  TikTok, Instagram and Facebook open for browsing
