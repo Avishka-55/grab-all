@@ -21,10 +21,12 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Rational
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
@@ -43,6 +45,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -79,6 +82,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private lateinit var playerTopOverlay: LinearLayout
     private lateinit var btnTopCaptions: TextView
     private lateinit var btnTopQuality: TextView
+    private lateinit var btnTopAspect: TextView
     private lateinit var detailsContainer: LinearLayout
 
     private lateinit var videoTitle: TextView
@@ -116,6 +120,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private var isControllerVisible = false
     private var explicitBgAudioRequested = false
     private var normalPlayerHeightPx = 0
+    private var fullscreenResizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
 
     private val hideHudRunnable = Runnable {
         gestureHud.visibility = View.GONE
@@ -148,6 +153,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         playerTopOverlay = findViewById(R.id.playerTopOverlay)
         btnTopCaptions = findViewById(R.id.btnTopCaptions)
         btnTopQuality = findViewById(R.id.btnTopQuality)
+        btnTopAspect = findViewById(R.id.btnTopAspect)
         detailsContainer = findViewById(R.id.detailsContainer)
 
         videoTitle = findViewById(R.id.playerVideoTitle)
@@ -204,6 +210,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.btnFullscreen).setOnClickListener { toggleFullscreen() }
         btnTopQuality.setOnClickListener { showQualityPicker() }
         btnTopCaptions.setOnClickListener { toggleCaptions() }
+        btnTopAspect.setOnClickListener { cycleAspectRatio() }
         // Disable PlayerView's own tap-to-toggle so our GestureDetector is the
         // single source of truth (prevents the double-toggle bug where tapping
         // to hide immediately re-shows controls!).
@@ -369,9 +376,12 @@ class YouTubePlayerActivity : AppCompatActivity() {
         if (activeInstance === this) {
             playerView.player = null
             // Anytime the player UI is no longer visible (display turned off, home
-            // pressed, navigated back to mini-player, or PiP closed) — except during
-            // screen rotation — drop the video track so playback runs audio-only!
-            if (!isChangingConfigurations) {
+            // pressed, or navigated back to mini-player) — except during screen
+            // rotation or PiP dismissal while screen is on — drop the video track
+            // so playback runs audio-only without flickering the floating bubble.
+            val screenInteractive = (getSystemService(Context.POWER_SERVICE) as? PowerManager)
+                ?.isInteractive ?: true
+            if (!isChangingConfigurations && !(inPipMode && screenInteractive)) {
                 YouTubePlaybackService.instance?.setVideoSurfaceVisible(false)
             }
         }
@@ -412,15 +422,18 @@ class YouTubePlayerActivity : AppCompatActivity() {
         inPipMode = isInPictureInPictureMode
         // When the user closes/dismisses the PiP window (X or swipe away),
         // Android stops the activity BEFORE calling this callback, so lifecycle
-        // state is CREATED (not STARTED/RESUMED). Pause playback cleanly!
+        // state is CREATED (not STARTED/RESUMED). Fully stop playback (saving
+        // watch progress) so no lingering floating audio bubble or notification appears.
         if (wasInPip && !isInPictureInPictureMode &&
             !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
         ) {
             if (activeInstance === this) {
-                YouTubePlaybackService.instance?.let { svc ->
-                    svc.pauseIfPlaying()
-                    svc.setVideoSurfaceVisible(false)
-                }
+                YouTubePlaybackService.instance?.stopPlayback()
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                finishAndRemoveTask()
+            } else {
+                finish()
             }
             return
         }
@@ -1176,12 +1189,73 @@ class YouTubePlayerActivity : AppCompatActivity() {
         } else {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         }
+        // Extend edge-to-edge into the camera cutout / notch in fullscreen so
+        // Zoom/Fill truly covers 100% of tall screens with no black side pillar.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val attrs = window.attributes
+            val targetCutout = if (isFullscreen && !inPipMode) {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            } else {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+            }
+            if (attrs.layoutInDisplayCutoutMode != targetCutout) {
+                attrs.layoutInDisplayCutoutMode = targetCutout
+                window.attributes = attrs
+            }
+        }
+        btnTopAspect.visibility = if (isFullscreen && !inPipMode) View.VISIBLE else View.GONE
+        playerView.resizeMode = if (isFullscreen && !inPipMode) {
+            fullscreenResizeMode
+        } else {
+            AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+        updateAspectButtonUi()
         if (hideDetails) {
             floatingAudio.detach()
         } else if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
             floatingAudio.attach()
         }
         updateAudioOnlyBannerVisibility(YouTubePlaybackService.currentState)
+    }
+
+    private fun cycleAspectRatio() {
+        val next = when (fullscreenResizeMode) {
+            AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+        applyFullscreenResizeMode(next, showFeedback = true)
+    }
+
+    private fun applyFullscreenResizeMode(mode: Int, showFeedback: Boolean) {
+        fullscreenResizeMode = mode
+        if (isFullscreen && !inPipMode) {
+            playerView.resizeMode = mode
+        }
+        updateAspectButtonUi()
+        if (showFeedback) {
+            val label = when (mode) {
+                AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "Zoomed to fill"
+                AspectRatioFrameLayout.RESIZE_MODE_FILL -> "Stretched to fill"
+                else -> "Original (Fit)"
+            }
+            showHud("Aspect: $label")
+        }
+    }
+
+    private fun updateAspectButtonUi() {
+        btnTopAspect.text = when (fullscreenResizeMode) {
+            AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "Zoom"
+            AspectRatioFrameLayout.RESIZE_MODE_FILL -> "Fill"
+            else -> "Fit"
+        }
+        val active = fullscreenResizeMode != AspectRatioFrameLayout.RESIZE_MODE_FIT
+        btnTopAspect.setTextColor(
+            ContextCompat.getColor(
+                this,
+                if (active) R.color.graball_orange else R.color.graball_text
+            )
+        )
     }
 
     // ---- Gesture Controls ----
@@ -1232,13 +1306,72 @@ class YouTubePlayerActivity : AppCompatActivity() {
         var downY = 0f
         var lastDy = 0f
         var draggingVertical = false
+        var pinchHandled = false
+        var pinchScaleAccum = 1f
         var isLeftSide = true
         var startBrightness = 0.5f
         var startVolume = 0
         var maxVolume = 15
 
+        val scaleDetector = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    if (!isFullscreen || inPipMode) return false
+                    pinchScaleAccum = 1f
+                    pinchHandled = false
+                    draggingVertical = false
+                    return true
+                }
+
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    if (!isFullscreen || inPipMode || pinchHandled) return false
+                    pinchScaleAccum *= detector.scaleFactor
+                    if (pinchScaleAccum > 1.12f) {
+                        pinchHandled = true
+                        if (fullscreenResizeMode != AspectRatioFrameLayout.RESIZE_MODE_ZOOM) {
+                            applyFullscreenResizeMode(
+                                AspectRatioFrameLayout.RESIZE_MODE_ZOOM,
+                                showFeedback = true
+                            )
+                        } else {
+                            showHud("Aspect: Zoomed to fill")
+                        }
+                    } else if (pinchScaleAccum < 0.88f) {
+                        pinchHandled = true
+                        if (fullscreenResizeMode != AspectRatioFrameLayout.RESIZE_MODE_FIT) {
+                            applyFullscreenResizeMode(
+                                AspectRatioFrameLayout.RESIZE_MODE_FIT,
+                                showFeedback = true
+                            )
+                        } else {
+                            showHud("Aspect: Original (Fit)")
+                        }
+                    }
+                    return true
+                }
+            }
+        )
+
         playerView.setOnTouchListener { _, event ->
             if (inPipMode) return@setOnTouchListener false
+            if (isFullscreen) {
+                scaleDetector.onTouchEvent(event)
+            }
+            val multiTouch = event.pointerCount > 1 || scaleDetector.isInProgress
+            if (multiTouch) {
+                draggingVertical = false
+                lastDy = 0f
+                return@setOnTouchListener true
+            }
+            if (pinchHandled) {
+                if (event.actionMasked == MotionEvent.ACTION_UP ||
+                    event.actionMasked == MotionEvent.ACTION_CANCEL
+                ) {
+                    pinchHandled = false
+                }
+                return@setOnTouchListener true
+            }
             detector.onTouchEvent(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
