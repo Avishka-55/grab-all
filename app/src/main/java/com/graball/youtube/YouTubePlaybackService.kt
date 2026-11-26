@@ -379,6 +379,7 @@ class YouTubePlaybackService : MediaSessionService() {
                             currentStreamMode?.let { failedModes.add(it) }
                         }
                         if (info != null && tryNextStreamMode(info, pos, playImmediately = true)) {
+                            broadcastState()
                             return
                         }
                         // If a transient HTTP error (e.g. 403/416/503 from an early seek or
@@ -817,12 +818,16 @@ class YouTubePlaybackService : MediaSessionService() {
     /** True if the active video has any subtitle/caption tracks available. */
     fun hasAnyCaptions(): Boolean = availableCaptions().isNotEmpty()
 
-    /** Distinct audio tracks for multi-language / dubbed YouTube videos (both DASH & HLS). */
+    /** Distinct audio tracks for multi-language / dubbed YouTube videos (Adaptive, HLS Variant & HLS Master). */
     fun availableAudioTracks(): List<AudioTrackOption> {
         val info = currentStreamInfo ?: return emptyList()
         if (currentStreamMode == StreamMode.HLS_MASTER) {
             val hlsOptions = buildHlsAudioOptions(player?.currentTracks, info.hlsAudioTracks)
             if (hlsOptions.isNotEmpty()) return hlsOptions
+        }
+        if (currentStreamMode == StreamMode.HLS_VARIANT) {
+            val variantOptions = info.availableHlsVariantAudioTracks()
+            if (variantOptions.isNotEmpty()) return variantOptions
         }
         val dash = info.availableAudioTracks()
         if (dash.isNotEmpty()) return dash
@@ -853,6 +858,12 @@ class YouTubePlaybackService : MediaSessionService() {
             options.firstOrNull { it.isOriginal }?.let { return it.label }
             options.firstOrNull()?.let { return it.label }
             return "Original"
+        }
+        if (currentStreamMode == StreamMode.HLS_VARIANT) {
+            val activeVariant = info.pickHlsVariant(selectedHeight, selectedAudioTrackId)
+            return activeVariant?.audioDisplayName?.takeIf { it.isNotBlank() }
+                ?: activeVariant?.audioTrackId?.substringBefore('.')?.uppercase()?.takeIf { it.isNotBlank() }
+                ?: "Original"
         }
         val active = info.bestAudio(selectedAudioTrackId)
         return active?.audioDisplayName?.takeIf { it.isNotBlank() }
@@ -947,7 +958,12 @@ class YouTubePlaybackService : MediaSessionService() {
                 else -> ""
             }
         }
-        return listOf(res, codec, modeLabel).filter { it.isNotBlank() }.joinToString(" · ")
+        val audioTag = currentAudioTrackLabel()
+            .takeIf { it.isNotBlank() && it != "Original" }
+            ?.substringBefore('(')
+            ?.trim()
+            .orEmpty()
+        return listOf(res, codec, modeLabel, audioTag).filter { it.isNotBlank() }.joinToString(" · ")
     }
 
     fun setQuality(height: Int?) {
@@ -1310,6 +1326,7 @@ class YouTubePlaybackService : MediaSessionService() {
         val p = player ?: return false
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(info.userAgent)
+            .setDefaultRequestProperties(mapOf("Accept-Language" to "en-US,en;q=0.9"))
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(12_000)
             .setReadTimeoutMs(15_000)
@@ -1363,9 +1380,9 @@ class YouTubePlaybackService : MediaSessionService() {
         }
 
         // 2) Exact Per-Resolution HLS Variant SECOND (e.g. web_safari 144p-1080p muxed HLS on VPN):
-        // Hands ExoPlayer ONLY the chosen resolution's .m3u8 playlist so it starts in HD
-        // (720p Auto) and switches immediately on tap without getting stuck on 360p ABR!
-        val hlsVariant = info.pickHlsVariant(selectedHeight)
+        // Hands ExoPlayer ONLY the chosen resolution's .m3u8 playlist (in the original/chosen audio
+        // language) so it starts in HD (720p Auto) and switches immediately on tap without ABR!
+        val hlsVariant = info.pickHlsVariant(selectedHeight, selectedAudioTrackId)
         if (StreamMode.HLS_VARIANT !in attemptedModes && hlsVariant != null) {
             attemptedModes.add(StreamMode.HLS_VARIANT)
             currentStreamMode = StreamMode.HLS_VARIANT

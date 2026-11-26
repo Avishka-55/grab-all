@@ -1552,12 +1552,13 @@ object YouTubeInnerTube {
     }
 
     /**
-     * Resolves full 144p-1080p streams using our ~165ms native V8 `base.js` solver:
-     * - Playback ([includeHlsFallback] == true): tries `web_safari` 144p-1080p HLS
-     *   first (no PO token required once `/n/` is solved via V8!), then signed-in
-     *   `TV_SAMSUNG` adaptive HD.
-     * - Download ([includeHlsFallback] == false): tries signed-in `TV_SAMSUNG`
-     *   direct adaptive MP4/M4A.
+     * Resolves full 144p-4K streams using our ~165ms native V8 `base.js` solver:
+     * - When signed in (`authHeaders != null`): tries `TV_SAMSUNG` (`TVHTML5`) FIRST!
+     *   It requires zero PO token, streams unthrottled via 2 MB range chunks, reaches up to
+     *   4K, AND always exposes ALL separate audio tracks (with explicit Original vs AI-dub
+     *   metadata) — completely eliminating VPN pre-merged HLS foreign dubbing!
+     * - Falls back to `WEB_SAFARI` 144p-1080p HLS (essential for live streams & guest mode),
+     *   and `WEB_EMBEDDED_PLAYER` if `WEB_SAFARI` returns dubbed-only or fails for guests.
      */
     private fun resolveViaV8(
         context: Context,
@@ -1575,20 +1576,6 @@ object YouTubeInnerTube {
         var effectiveSts = cfg.signatureTimestamp ?: ready.signatureTimestamp
         var lastReason: String? = null
 
-        if (includeHlsFallback) {
-            val safariRoot = requestWebSafariPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
-            if (safariRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(videoId, safariRoot, WEB_SAFARI_UA, authHeaders = authHeaders)
-                if (parsed.info != null &&
-                    (parsed.info.hlsVariants.isNotEmpty() || !parsed.info.hlsUrl.isNullOrBlank())
-                ) {
-                    return parsed
-                }
-                lastReason = parsed.error
-                Log.d(TAG, "WEB_SAFARI HLS note ($videoId): ${parsed.error}")
-            }
-        }
-
         if (authHeaders != null) {
             var tvRoot = requestTvSamsungPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             val firstStatus = tvRoot?.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
@@ -1602,7 +1589,7 @@ object YouTubeInnerTube {
                 }
             }
             if (tvRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(videoId, tvRoot, TV_SAMSUNG_UA)
+                val parsed = parseDecryptedPlayerRoot(videoId, tvRoot, TV_SAMSUNG_UA, authHeaders = authHeaders)
                 if (parsed.info != null &&
                     parsed.info.videoStreams.isNotEmpty() &&
                     parsed.info.audioStreams.isNotEmpty()
@@ -1611,6 +1598,46 @@ object YouTubeInnerTube {
                 }
                 if (lastReason.isNullOrBlank()) lastReason = parsed.error
                 Log.d(TAG, "TVHTML5 V8 note ($videoId): ${parsed.error}")
+            }
+        }
+
+        if (includeHlsFallback) {
+            var safariFallback: ResolveResult? = null
+            val safariRoot = requestWebSafariPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+            if (safariRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(videoId, safariRoot, WEB_SAFARI_UA, authHeaders = authHeaders)
+                if (parsed.info != null &&
+                    (parsed.info.hlsVariants.isNotEmpty() || !parsed.info.hlsUrl.isNullOrBlank())
+                ) {
+                    val variants = parsed.info.hlsVariants
+                    val onlyDubbedVariants = variants.isNotEmpty() &&
+                        variants.none { it.isOriginalAudio } &&
+                        variants.all { it.isDubbedOrDescriptive }
+                    if (!onlyDubbedVariants) {
+                        return parsed
+                    }
+                    Log.d(TAG, "WEB_SAFARI returned only dubbed HLS variants for $videoId; trying WEB_EMBEDDED_PLAYER")
+                    safariFallback = parsed
+                }
+                if (lastReason.isNullOrBlank()) lastReason = parsed.error
+                Log.d(TAG, "WEB_SAFARI HLS note ($videoId): ${parsed.error}")
+            }
+
+            // Guest-mode / dubbed-HLS safety fallback: WEB_EMBEDDED_PLAYER requires no PO token
+            // for direct HTTPS adaptive video + multi-language audio on embeddable videos.
+            val embeddedRoot = requestWebEmbeddedPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+            if (embeddedRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(videoId, embeddedRoot, WEB_SAFARI_UA, authHeaders = authHeaders)
+                if (parsed.info != null &&
+                    ((parsed.info.videoStreams.isNotEmpty() && parsed.info.audioStreams.isNotEmpty()) ||
+                        parsed.info.hlsVariants.isNotEmpty() ||
+                        !parsed.info.hlsUrl.isNullOrBlank())
+                ) {
+                    return parsed
+                }
+            }
+            if (safariFallback != null) {
+                return safariFallback
             }
         }
 
@@ -1716,6 +1743,52 @@ object YouTubeInnerTube {
         )
     }
 
+    private fun requestWebEmbeddedPlayer(
+        videoId: String,
+        visitorData: String?,
+        signatureTimestamp: Int,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?,
+        cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig()
+    ): JSONObject? {
+        val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
+        val clientObj = JSONObject().apply {
+            put("clientName", "WEB_EMBEDDED_PLAYER")
+            put("clientVersion", cfg.clientVersion)
+            put("userAgent", WEB_SAFARI_UA)
+            put("hl", "en")
+            put("gl", "US")
+            if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
+        }
+        val body = JSONObject().apply {
+            put("context", JSONObject().apply {
+                put("client", clientObj)
+                put("thirdParty", JSONObject().apply {
+                    put("embedUrl", "https://www.youtube.com/")
+                })
+            })
+            put("videoId", videoId)
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("signatureTimestamp", signatureTimestamp)
+                    put("html5Preference", "HTML5_PREF_WANTS")
+                })
+            })
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+        return postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+            body = body,
+            userAgent = WEB_SAFARI_UA,
+            clientNameId = "56",
+            clientVersion = cfg.clientVersion,
+            visitorData = effectiveVisitor,
+            authHeaders = authHeaders,
+            webConfig = null,
+            useAnonymousClient = (authHeaders == null)
+        )
+    }
+
     private data class PendingCipherFormat(
         val obj: JSONObject,
         val isMuxedDefault: Boolean,
@@ -1741,6 +1814,9 @@ object YouTubeInnerTube {
 
         val streamingData = root.optJSONObject("streamingData")
             ?: return ResolveResult(null, "No streaming data returned")
+        val captions = parseInnerTubeCaptions(root)
+        val audioHints = extractOriginalAudioHints(streamingData, captions)
+
         val rawHlsUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
         // Solve `/n/<challenge>/` path segment inside web_safari HLS master manifest
         // via warm V8 solver so all 144p-1080p segments return HTTP 200 (not 403).
@@ -1749,7 +1825,13 @@ object YouTubeInnerTube {
         var hlsVariants: List<StreamFormat> = emptyList()
         var hlsAudioTracks: List<HlsAudioTrack> = emptyList()
         if (solvedHlsUrl != null) {
-            val parsedHls = fetchParsedHlsManifest(solvedHlsUrl, userAgent, authHeaders)
+            val parsedHls = fetchParsedHlsManifest(
+                masterUrl = solvedHlsUrl,
+                userAgent = userAgent,
+                authHeaders = authHeaders,
+                originalLangHint = audioHints.originalLang,
+                langDisplayNames = audioHints.langDisplayNames
+            )
             if (!parsedHls.ok) {
                 Log.w(TAG, "HLS master manifest failed verification ($videoId); skipping broken HLS")
                 effectiveHlsUrl = null
@@ -1778,7 +1860,6 @@ object YouTubeInnerTube {
         val description = details?.optString("shortDescription").orEmpty()
         val thumb = pickThumb(details?.optJSONObject("thumbnail"))
             .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
-        val captions = parseInnerTubeCaptions(root)
 
         return ResolveResult(
             VideoStreamInfo(
@@ -1801,6 +1882,92 @@ object YouTubeInnerTube {
         )
     }
 
+    private data class OriginalAudioHints(
+        val originalLang: String? = null,
+        val defaultLang: String? = null,
+        val langDisplayNames: Map<String, String> = emptyMap()
+    )
+
+    private fun baseLangTag(code: String?): String =
+        code.orEmpty().trim().substringBefore('.').substringBefore('-').substringBefore('_').lowercase()
+
+    private fun langCodeMatches(a: String?, b: String?): Boolean {
+        val ba = baseLangTag(a)
+        val bb = baseLangTag(b)
+        return ba.isNotBlank() && ba == bb
+    }
+
+    /**
+     * Scans ALL `adaptiveFormats` & `formats` entries (INCLUDING SABR entries that have
+     * no `url` or `signatureCipher`!) to determine the video's true original audio language
+     * and human-readable display names — just like `yt-dlp`'s `language_map`.
+     * Falls back to the video's auto-generated ASR caption language (`kind == "asr"`),
+     * which YouTube always transcribes from the creator's original spoken audio track.
+     */
+    private fun extractOriginalAudioHints(
+        streamingData: JSONObject,
+        captions: List<CaptionTrack>
+    ): OriginalAudioHints {
+        var originalLang: String? = null
+        var defaultLang: String? = null
+        val displayNames = LinkedHashMap<String, String>()
+
+        fun scanArray(arr: JSONArray?) {
+            if (arr == null) return
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val mime = obj.optString("mimeType")
+                if (!mime.startsWith("audio/") && !obj.has("audioTrack")) continue
+                val rawUrl = obj.optString("url")
+                val meta = extractInnerTubeAudioMeta(obj, rawUrl)
+                val baseLang = baseLangTag(
+                    meta.id.ifBlank {
+                        obj.optJSONObject("audioTrack")?.optString("languageCode").orEmpty()
+                    }
+                )
+                if (baseLang.isNotBlank()) {
+                    if (meta.displayName.isNotBlank()) {
+                        val existing = displayNames[baseLang]
+                        if (existing == null || (meta.isOriginal && !existing.contains("original", ignoreCase = true))) {
+                            displayNames[baseLang] = meta.displayName
+                        }
+                    }
+                    if (meta.isOriginal && originalLang == null) {
+                        originalLang = baseLang
+                    } else if (meta.isDefault && !meta.isDubbedOrDescriptive && defaultLang == null) {
+                        defaultLang = baseLang
+                    }
+                }
+            }
+        }
+
+        scanArray(streamingData.optJSONArray("adaptiveFormats"))
+        scanArray(streamingData.optJSONArray("formats"))
+
+        if (originalLang == null) {
+            val asrLang = captions.firstOrNull {
+                it.isAuto && it.langCode.isNotBlank() && !it.langCode.equals("und", ignoreCase = true)
+            }?.langCode
+            if (!asrLang.isNullOrBlank()) {
+                originalLang = baseLangTag(asrLang)
+            }
+        }
+        return OriginalAudioHints(
+            originalLang = originalLang ?: defaultLang,
+            defaultLang = defaultLang,
+            langDisplayNames = displayNames
+        )
+    }
+
+    private fun niceLanguageName(langCode: String): String {
+        if (langCode.isBlank()) return ""
+        return try {
+            java.util.Locale.forLanguageTag(langCode).getDisplayName(java.util.Locale.ENGLISH)
+        } catch (_: Exception) {
+            langCode.uppercase()
+        }.ifBlank { langCode.uppercase() }
+    }
+
     private data class ParsedHlsManifest(
         val ok: Boolean,
         val muxedVariants: List<StreamFormat> = emptyList(),
@@ -1810,17 +1977,20 @@ object YouTubeInnerTube {
     /**
      * Fetches and verifies an HLS master manifest (e.g. `web_safari` / `VISIONOS` 144p-1080p).
      *
-     * - For single-audio self-contained manifests: extracts per-resolution muxed
-     *   variant `.m3u8` URLs so ExoPlayer plays the exact chosen resolution.
-     * - For multi-audio manifests (`#EXT-X-MEDIA:TYPE=AUDIO`): extracts EVERY audio
-     *   track's `GROUP-ID`, `NAME`, `LANGUAGE`, `DEFAULT`, and `URI` (`xtags`
-     *   `acont=original` vs `acont=dubbed`) so ExoPlayer can lock onto the video's
-     *   ORIGINAL language track instead of an AI-dubbed or alphabetically-first track!
+     * - For separate-audio manifests (`#EXT-X-MEDIA:TYPE=AUDIO`): extracts EVERY audio
+     *   track and cross-references [originalLangHint] (from `adaptiveFormats` / ASR captions)
+     *   so ExoPlayer locks onto the creator's ORIGINAL track even if YouTube omits `"original"`
+     *   from the HLS manifest or sets `DEFAULT=YES` on a VPN country's dub!
+     * - For pre-merged manifests (`#EXT-X-STREAM-INF` itag 91-96): parses `xtags`, `lang`,
+     *   `acont`, and [originalLangHint] on EVERY variant so multi-language pre-merged HLS
+     *   never picks alphabetical `ar` (Arabic) and exposes all languages in the `🔊` picker!
      */
     private fun fetchParsedHlsManifest(
         masterUrl: String,
         userAgent: String,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null,
+        originalLangHint: String? = null,
+        langDisplayNames: Map<String, String> = emptyMap()
     ): ParsedHlsManifest {
         return try {
             val reqBuilder = Request.Builder()
@@ -1828,10 +1998,9 @@ object YouTubeInnerTube {
                 .header("User-Agent", userAgent)
                 .header("Accept-Language", "en-US,en;q=0.9")
             if (authHeaders != null) {
-                reqBuilder.header("Cookie", authHeaders.cookieHeader)
+                reqBuilder.header("Cookie", sanitizeCookieHeaderForPlayer(authHeaders.cookieHeader))
             }
-            val clientToUse = if (authHeaders != null) client else anonClient
-            clientToUse.newCall(reqBuilder.build()).execute().use { resp ->
+            anonClient.newCall(reqBuilder.build()).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     return ParsedHlsManifest(ok = false)
                 }
@@ -1841,10 +2010,11 @@ object YouTubeInnerTube {
                 }
 
                 // Separate audio groups require the master manifest so audio stays synced.
-                // Parse all #EXT-X-MEDIA:TYPE=AUDIO entries so we know which track is Original
-                // (via URI xtags acont=original vs acont=dubbed / NAME="... original").
-                if (body.contains("#EXT-X-MEDIA:") && body.contains("TYPE=AUDIO")) {
-                    val audioTracks = parseHlsAudioTracks(body)
+                // Parse all #EXT-X-MEDIA:TYPE=AUDIO entries and cross-reference originalLangHint!
+                if (body.contains("#EXT-X-MEDIA:") &&
+                    (body.contains("TYPE=AUDIO") || body.contains("TYPE=\"AUDIO\""))
+                ) {
+                    val audioTracks = parseHlsAudioTracks(body, originalLangHint, langDisplayNames)
                     return ParsedHlsManifest(
                         ok = true,
                         muxedVariants = emptyList(),
@@ -1855,6 +2025,8 @@ object YouTubeInnerTube {
                 val resRegex = Regex("""RESOLUTION=(\d+)x(\d+)""")
                 val bwRegex = Regex("""BANDWIDTH=(\d+)""")
                 val codecsRegex = Regex("""CODECS="([^"]+)"""")
+                val langAttrRegex = Regex("""LANGUAGE="([^"]+)"""")
+                val nameAttrRegex = Regex("""NAME="([^"]+)"""")
                 val itagRegex = Regex("""/itag/(\d+)""")
                 val out = mutableListOf<StreamFormat>()
                 val lines = body.lineSequence().map { it.trim() }.toList()
@@ -1884,6 +2056,57 @@ object YouTubeInnerTube {
                     val bw = bwRegex.find(inf)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                     val codecs = codecsRegex.find(inf)?.groupValues?.get(1).orEmpty()
                     val itag = itagRegex.find(variantUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
+                    // Extract language & original/dub metadata from pre-merged HLS variant URL/tags!
+                    val uriXtags = extractXTagsFromUrl(variantUrl)
+                    val decodedUri = urlDecode(urlDecode(variantUrl)).lowercase()
+                    val acont = uriXtags["acont"].orEmpty().lowercase()
+                    val attrLang = langAttrRegex.find(inf)?.groupValues?.get(1).orEmpty()
+                    val attrName = nameAttrRegex.find(inf)?.groupValues?.get(1).orEmpty()
+                    val resolvedLang = (uriXtags["lang"]?.ifBlank { null } ?: attrLang).trim()
+                    val baseLang = baseLangTag(resolvedLang)
+                    val hasOrigTag = acont == "original" || decodedUri.contains("acont=original")
+                    val hasDubTag = acont.contains("dubbed") ||
+                        acont.contains("descriptive") ||
+                        acont.contains("auto") ||
+                        decodedUri.contains("acont=dubbed") ||
+                        decodedUri.contains("acont=descriptive") ||
+                        decodedUri.contains("acont=auto")
+                    val matchesOrigHint = !originalLangHint.isNullOrBlank() &&
+                        baseLang.isNotBlank() &&
+                        langCodeMatches(baseLang, originalLangHint)
+                    val isOrig = hasOrigTag ||
+                        attrName.contains("original", ignoreCase = true) ||
+                        (matchesOrigHint && !hasDubTag)
+                    val isDub = !isOrig && (
+                        hasDubTag ||
+                            attrName.contains("dubbed", ignoreCase = true) ||
+                            attrName.contains("descriptive", ignoreCase = true) ||
+                            (!originalLangHint.isNullOrBlank() && baseLang.isNotBlank() && !matchesOrigHint)
+                        )
+                    val trackId = if (resolvedLang.isNotBlank()) {
+                        when {
+                            isOrig -> "$baseLang.4"
+                            isDub -> "$baseLang.10"
+                            else -> baseLang
+                        }
+                    } else {
+                        ""
+                    }
+                    val displayName = when {
+                        attrName.isNotBlank() -> attrName
+                        baseLang.isNotBlank() && !langDisplayNames[baseLang].isNullOrBlank() -> langDisplayNames[baseLang]!!
+                        resolvedLang.isNotBlank() -> {
+                            val nice = niceLanguageName(resolvedLang)
+                            when {
+                                isOrig -> "$nice (original)"
+                                acont.contains("dubbed-auto") -> "$nice (auto-dubbed)"
+                                isDub -> "$nice (dubbed)"
+                                else -> nice
+                            }
+                        }
+                        else -> ""
+                    }
                     out.add(
                         StreamFormat(
                             itag = itag,
@@ -1898,7 +2121,12 @@ object YouTubeInnerTube {
                             bitrate = bw,
                             isAudioOnly = false,
                             isVideoOnly = false,
-                            isMuxed = true
+                            isMuxed = true,
+                            audioTrackId = trackId,
+                            audioDisplayName = displayName,
+                            isOriginalAudio = isOrig,
+                            isDefaultAudio = isOrig,
+                            isDubbedOrDescriptive = isDub
                         )
                     )
                 }
@@ -1910,7 +2138,11 @@ object YouTubeInnerTube {
         }
     }
 
-    private fun parseHlsAudioTracks(m3u8Body: String): List<HlsAudioTrack> {
+    private fun parseHlsAudioTracks(
+        m3u8Body: String,
+        originalLangHint: String? = null,
+        langDisplayNames: Map<String, String> = emptyMap()
+    ): List<HlsAudioTrack> {
         val groupRegex = Regex("""GROUP-ID="([^"]+)"""")
         val nameRegex = Regex("""NAME="([^"]+)"""")
         val langRegex = Regex("""LANGUAGE="([^"]+)"""")
@@ -1921,9 +2153,11 @@ object YouTubeInnerTube {
         val out = mutableListOf<HlsAudioTrack>()
         for (rawLine in m3u8Body.lineSequence()) {
             val line = rawLine.trim()
-            if (!line.startsWith("#EXT-X-MEDIA:") || !line.contains("TYPE=AUDIO")) continue
+            if (!line.startsWith("#EXT-X-MEDIA:") ||
+                (!line.contains("TYPE=AUDIO") && !line.contains("TYPE=\"AUDIO\""))
+            ) continue
             val groupId = groupRegex.find(line)?.groupValues?.get(1).orEmpty()
-            val name = nameRegex.find(line)?.groupValues?.get(1).orEmpty()
+            val rawName = nameRegex.find(line)?.groupValues?.get(1).orEmpty()
             val lang = langRegex.find(line)?.groupValues?.get(1).orEmpty()
             val uri = uriRegex.find(line)?.groupValues?.get(1).orEmpty()
             val isDefault = defaultRegex.find(line)?.groupValues?.get(1) == "YES"
@@ -1932,7 +2166,9 @@ object YouTubeInnerTube {
             val decodedUri = urlDecode(urlDecode(uri)).lowercase()
             val uriXtags = extractXTagsFromUrl(uri)
             val acont = uriXtags["acont"].orEmpty().lowercase()
-            val nameLower = name.lowercase()
+            val resolvedLang = lang.ifBlank { uriXtags["lang"].orEmpty() }
+            val baseLang = baseLangTag(resolvedLang)
+            val nameLower = rawName.lowercase()
             val hasOrigTag = acont == "original" || decodedUri.contains("acont=original")
             val hasDubTag = acont.contains("dubbed") ||
                 acont.contains("descriptive") ||
@@ -1940,18 +2176,26 @@ object YouTubeInnerTube {
                 decodedUri.contains("acont=dubbed") ||
                 decodedUri.contains("acont=descriptive") ||
                 decodedUri.contains("acont=auto")
-            val isOrig = hasOrigTag || nameLower.contains("original")
+            val isDescriptive = nameLower.contains("descriptive") || chars.contains("describes-video")
+            val matchesOrigHint = !originalLangHint.isNullOrBlank() &&
+                baseLang.isNotBlank() &&
+                langCodeMatches(baseLang, originalLangHint)
+            val isOrig = hasOrigTag ||
+                nameLower.contains("original") ||
+                (matchesOrigHint && !hasDubTag && !isDescriptive && !nameLower.contains("dubbed"))
             val isDubOrDesc = !isOrig && (
                 hasDubTag ||
                     nameLower.contains("dubbed") ||
-                    nameLower.contains("descriptive") ||
-                    chars.contains("describes-video")
+                    isDescriptive ||
+                    (!originalLangHint.isNullOrBlank() && baseLang.isNotBlank() && !matchesOrigHint)
                 )
-            val resolvedLang = lang.ifBlank { uriXtags["lang"].orEmpty() }
+            val resolvedName = rawName.ifBlank {
+                langDisplayNames[baseLang].orEmpty().ifBlank { niceLanguageName(resolvedLang) }
+            }
             out.add(
                 HlsAudioTrack(
                     groupId = groupId,
-                    name = name,
+                    name = resolvedName,
                     language = resolvedLang,
                     url = uri,
                     isOriginal = isOrig,
@@ -2149,12 +2393,20 @@ object YouTubeInnerTube {
 
         val streamingData = root.optJSONObject("streamingData")
             ?: return ResolveResult(null, "No streaming data returned")
+        val captions = parseInnerTubeCaptions(root)
+        val audioHints = extractOriginalAudioHints(streamingData, captions)
+
         val rawHlsUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
         var effectiveHlsUrl: String? = rawHlsUrl
         var hlsVariants: List<StreamFormat> = emptyList()
         var hlsAudioTracks: List<HlsAudioTrack> = emptyList()
         if (rawHlsUrl != null) {
-            val parsedHls = fetchParsedHlsManifest(rawHlsUrl, userAgent)
+            val parsedHls = fetchParsedHlsManifest(
+                masterUrl = rawHlsUrl,
+                userAgent = userAgent,
+                originalLangHint = audioHints.originalLang,
+                langDisplayNames = audioHints.langDisplayNames
+            )
             if (parsedHls.ok) {
                 hlsVariants = parsedHls.muxedVariants
                 hlsAudioTracks = parsedHls.audioTracks
@@ -2180,7 +2432,6 @@ object YouTubeInnerTube {
         val description = details?.optString("shortDescription").orEmpty()
         val thumb = pickThumb(details?.optJSONObject("thumbnail"))
             .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
-        val captions = parseInnerTubeCaptions(root)
 
         return ResolveResult(
             VideoStreamInfo(
@@ -2531,6 +2782,7 @@ object YouTubeInnerTube {
             val hlsVariants = mutableListOf<StreamFormat>()
             var hlsUrl: String? = null
             var detectedUa = WEB_UA
+            val rootOriginalLang = baseLangTag(root.optString("language")).takeIf { it.isNotBlank() }
 
             for (i in 0 until formats.length()) {
                 val f = formats.optJSONObject(i) ?: continue
@@ -2555,25 +2807,59 @@ object YouTubeInnerTube {
                     } else if (hlsUrl == null && vcodec != "none" && acodec != "none") {
                         hlsUrl = url
                     }
-                    // Keep individual muxed HLS variants (e.g. web_safari itag 91-96)
-                    // so ExoPlayer switches resolutions deterministically instead of ABR.
+                    // Keep individual muxed HLS variants (e.g. web_safari itag 91-96) WITH full
+                    // language & original/dub metadata so pickHlsVariant() always chooses Original
+                    // while the 🔊 Audio button exposes every available language.
                     if (vcodec != "none" && vcodec.isNotBlank() &&
                         acodec != "none" && acodec.isNotBlank() &&
                         height > 0
                     ) {
                         val m3u8Note = f.optString("format_note").orEmpty().lowercase()
                         val m3u8LangPref = f.optInt("language_preference", 0)
+                        val m3u8Xtags = extractXTagsFromUrl(url)
+                        val m3u8Lang = f.optString("language").ifBlank { m3u8Xtags["lang"].orEmpty() }
+                        val m3u8BaseLang = baseLangTag(m3u8Lang)
                         val m3u8DecodedUrl = urlDecode(urlDecode(url)).lowercase()
+                        val m3u8Acont = m3u8Xtags["acont"].orEmpty().lowercase()
+                        val m3u8MatchesRootOrig = !rootOriginalLang.isNullOrBlank() &&
+                            m3u8BaseLang.isNotBlank() &&
+                            langCodeMatches(m3u8BaseLang, rootOriginalLang)
+                        val m3u8HasDubTag = m3u8LangPref < 0 ||
+                            m3u8Note.contains("dubbed") ||
+                            m3u8Note.contains("descriptive") ||
+                            m3u8Acont.contains("dubbed") ||
+                            m3u8Acont.contains("descriptive") ||
+                            m3u8Acont.contains("auto") ||
+                            m3u8DecodedUrl.contains("acont=dubbed") ||
+                            m3u8DecodedUrl.contains("acont=descriptive")
                         val m3u8Orig = m3u8LangPref >= 5 ||
                             m3u8Note.contains("original") ||
-                            m3u8DecodedUrl.contains("acont=original")
+                            m3u8Acont == "original" ||
+                            m3u8DecodedUrl.contains("acont=original") ||
+                            (m3u8MatchesRootOrig && !m3u8HasDubTag)
                         val m3u8Dub = !m3u8Orig && (
-                            m3u8LangPref < 0 ||
-                                m3u8Note.contains("dubbed") ||
-                                m3u8Note.contains("descriptive") ||
-                                m3u8DecodedUrl.contains("acont=dubbed") ||
-                                m3u8DecodedUrl.contains("acont=descriptive")
+                            m3u8HasDubTag ||
+                                (!rootOriginalLang.isNullOrBlank() && m3u8BaseLang.isNotBlank() && !m3u8MatchesRootOrig)
                             )
+                        val m3u8TrackId = if (m3u8BaseLang.isNotBlank()) {
+                            when {
+                                m3u8Orig -> "$m3u8BaseLang.4"
+                                m3u8Dub -> "$m3u8BaseLang.10"
+                                else -> m3u8BaseLang
+                            }
+                        } else {
+                            ""
+                        }
+                        val m3u8DisplayName = if (m3u8Lang.isNotBlank()) {
+                            val nice = niceLanguageName(m3u8Lang)
+                            when {
+                                m3u8Orig -> "$nice (original)"
+                                m3u8Dub -> "$nice (dubbed)"
+                                else -> nice
+                            }
+                        } else {
+                            ""
+                        }
                         val normH = VideoStreamInfo.normalizeHeight(height)
                         hlsVariants.add(
                             StreamFormat(
@@ -2587,7 +2873,10 @@ object YouTubeInnerTube {
                                 isVideoOnly = false,
                                 isMuxed = true,
                                 contentLengthBytes = fileSize,
+                                audioTrackId = m3u8TrackId,
+                                audioDisplayName = m3u8DisplayName,
                                 isOriginalAudio = m3u8Orig,
+                                isDefaultAudio = m3u8Orig || (!m3u8Dub && m3u8Note.contains("default")),
                                 isDubbedOrDescriptive = m3u8Dub
                             )
                         )
@@ -2663,11 +2952,14 @@ object YouTubeInnerTube {
                 return ResolveResult(null, "No playable formats found")
             }
 
-            val filteredHlsVariants = hlsVariants.filter { it.isOriginalAudio }.ifEmpty {
-                hlsVariants.filter { !it.isDubbedOrDescriptive }.ifEmpty { hlsVariants }
-            }
+            val effectiveOriginalLang = rootOriginalLang
+                ?: audioStreams.firstOrNull { it.isOriginalAudio }?.audioTrackId?.let { baseLangTag(it) }?.takeIf { it.isNotBlank() }
             val parsedHlsAudio = if (!hlsUrl.isNullOrBlank()) {
-                fetchParsedHlsManifest(hlsUrl, detectedUa).audioTracks
+                fetchParsedHlsManifest(
+                    masterUrl = hlsUrl,
+                    userAgent = detectedUa,
+                    originalLangHint = effectiveOriginalLang
+                ).audioTracks
             } else {
                 emptyList()
             }
@@ -2684,7 +2976,7 @@ object YouTubeInnerTube {
                     thumbnailUrl = root.optString("thumbnail")
                         .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" },
                     hlsUrl = hlsUrl,
-                    hlsVariants = filteredHlsVariants,
+                    hlsVariants = hlsVariants,
                     hlsAudioTracks = parsedHlsAudio,
                     videoStreams = videoStreams,
                     audioStreams = audioStreams,
@@ -2771,6 +3063,45 @@ object YouTubeInnerTube {
         put("request", JSONObject().apply { put("useSsl", true) })
     }
 
+    /**
+     * Rewrites only the `PREF` cookie inside an outgoing `/youtubei/v1/player`
+     * `Cookie` header to `hl=en&gl=US&tz=UTC` (preserving all auth cookies and
+     * other `PREF` flags, without mutating WebView's stored cookies). Matches
+     * `yt-dlp`'s `_initialize_pref` so a VPN-localized `PREF` cookie never
+     * causes YouTube to bake Arabic or another foreign AI dub into HLS streams.
+     */
+    private fun sanitizeCookieHeaderForPlayer(cookieHeader: String): String {
+        if (cookieHeader.isBlank()) return "PREF=hl=en&gl=US&tz=UTC"
+        val out = mutableListOf<String>()
+        var sawPref = false
+        for (part in cookieHeader.split(';')) {
+            val trimmed = part.trim()
+            if (trimmed.isEmpty()) continue
+            val eq = trimmed.indexOf('=')
+            if (eq > 0 && trimmed.substring(0, eq).trim().equals("PREF", ignoreCase = true)) {
+                sawPref = true
+                val rawVal = trimmed.substring(eq + 1).trim()
+                val prefParams = LinkedHashMap<String, String>()
+                for (kv in rawVal.split('&')) {
+                    val peq = kv.indexOf('=')
+                    if (peq > 0) {
+                        prefParams[kv.substring(0, peq)] = kv.substring(peq + 1)
+                    }
+                }
+                prefParams["hl"] = "en"
+                prefParams["gl"] = "US"
+                prefParams["tz"] = "UTC"
+                out.add("PREF=" + prefParams.entries.joinToString("&") { "${it.key}=${it.value}" })
+            } else {
+                out.add(trimmed)
+            }
+        }
+        if (!sawPref) {
+            out.add("PREF=hl=en&gl=US&tz=UTC")
+        }
+        return out.joinToString("; ")
+    }
+
     private fun postInnerTube(
         url: String,
         body: JSONObject,
@@ -2825,7 +3156,14 @@ object YouTubeInnerTube {
                 // Always attach the complete merged Cookie header (youtube.com +
                 // www.youtube.com + m.youtube.com) and execute via anonClient so
                 // OkHttp's CookieJar never duplicates the header or drops special-char cookies.
-                reqBuilder.header("Cookie", authHeaders.cookieHeader)
+                // On /player requests, normalize PREF to hl=en&gl=US&tz=UTC (just like yt-dlp's
+                // _initialize_pref) so a VPN-localized PREF cookie never triggers Arabic/foreign dubs.
+                val effectiveCookies = if (url.contains("/youtubei/v1/player")) {
+                    sanitizeCookieHeaderForPlayer(authHeaders.cookieHeader)
+                } else {
+                    authHeaders.cookieHeader
+                }
+                reqBuilder.header("Cookie", effectiveCookies)
                 reqBuilder.header("Authorization", authHeaders.authorizationHeader)
                 reqBuilder.header("X-Origin", "https://www.youtube.com")
                 reqBuilder.header("X-Goog-AuthUser", "0")
@@ -2834,6 +3172,8 @@ object YouTubeInnerTube {
                         reqBuilder.header("X-YouTube-Identity-Token", it)
                     }
                 }
+            } else if (url.contains("/youtubei/v1/player")) {
+                reqBuilder.header("Cookie", "PREF=hl=en&gl=US&tz=UTC")
             }
 
             val req = reqBuilder

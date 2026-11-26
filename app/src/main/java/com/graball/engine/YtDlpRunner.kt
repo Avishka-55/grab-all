@@ -166,12 +166,12 @@ class YtDlpRunner(
                 val hasCookies = cookiesFile != null && cookiesFile.exists() && cookiesFile.length() > 0L
                 val attempts: List<List<String>> = when {
                     isYouTube && hasCookies -> listOf(
-                        listOf("--extractor-args", "youtube:player_client=tv_samsung") + extraArgs,
-                        extraArgs
+                        listOf("--extractor-args", "youtube:lang=en;player_client=tv_samsung") + extraArgs,
+                        listOf("--extractor-args", "youtube:lang=en") + extraArgs
                     )
                     isYouTube -> listOf(
-                        listOf("--extractor-args", "youtube:player_client=android_vr,visionos") + extraArgs,
-                        extraArgs
+                        listOf("--extractor-args", "youtube:lang=en;player_client=android_vr,visionos") + extraArgs,
+                        listOf("--extractor-args", "youtube:lang=en") + extraArgs
                     )
                     else -> listOf(extraArgs)
                 }
@@ -313,12 +313,12 @@ class YtDlpRunner(
         val jsTimeoutSec = maxOf(timeoutSec, 60L)
         val fastAttempts: List<Pair<List<String>, Long>> = when {
             isYt && hasCookies -> listOf(
-                listOf("--extractor-args", "youtube:player_client=tv_samsung") to jsTimeoutSec,
-                emptyList<String>() to jsTimeoutSec
+                listOf("--extractor-args", "youtube:lang=en;player_client=tv_samsung") to jsTimeoutSec,
+                listOf("--extractor-args", "youtube:lang=en") to jsTimeoutSec
             )
             isYt -> listOf(
-                listOf("--extractor-args", "youtube:player_client=visionos") to timeoutSec,
-                emptyList<String>() to jsTimeoutSec
+                listOf("--extractor-args", "youtube:lang=en;player_client=visionos") to timeoutSec,
+                listOf("--extractor-args", "youtube:lang=en") to jsTimeoutSec
             )
             else -> listOf(
                 // Fast metadata extraction for Facebook, TikTok, Instagram, X, etc.:

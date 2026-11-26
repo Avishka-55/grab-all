@@ -155,8 +155,51 @@ data class VideoStreamInfo(
 
     /** Distinct audio languages available on this video (empty or size 1 for normal single-audio videos). */
     fun availableAudioTracks(): List<AudioTrackOption> {
+        val fromAdaptive = collectAudioTrackOptions(audioStreams)
+        if (fromAdaptive.size > 1) return fromAdaptive
+        val fromHlsVariants = availableHlsVariantAudioTracks()
+        if (fromHlsVariants.size > 1) return fromHlsVariants
+        if (hlsAudioTracks.size > 1) {
+            val grouped = LinkedHashMap<String, AudioTrackOption>()
+            for (t in hlsAudioTracks) {
+                val lang = t.language.lowercase()
+                val name = t.name.trim().lowercase()
+                val id = when {
+                    lang.isNotBlank() && name.isNotBlank() -> "hls:$lang:$name"
+                    name.isNotBlank() -> "hls:$name"
+                    lang.isNotBlank() -> "hls:$lang"
+                    else -> continue
+                }
+                val label = t.name.ifBlank { t.language.uppercase().ifBlank { "Original" } }
+                val existing = grouped[id]
+                if (existing == null) {
+                    grouped[id] = AudioTrackOption(
+                        id = id,
+                        label = label,
+                        isOriginal = t.isOriginal,
+                        isDefault = t.isDefault
+                    )
+                } else if (t.isOriginal && !existing.isOriginal) {
+                    grouped[id] = existing.copy(isOriginal = true)
+                }
+            }
+            val list = grouped.values.sortedWith(
+                compareByDescending<AudioTrackOption> { it.isOriginal }
+                    .thenByDescending { it.isDefault }
+                    .thenBy { it.label.lowercase() }
+            )
+            if (list.size > 1) return list
+        }
+        return fromAdaptive.ifEmpty { fromHlsVariants }
+    }
+
+    /** Distinct audio languages exposed on pre-merged HLS variants (e.g. web_safari itag 91-96). */
+    fun availableHlsVariantAudioTracks(): List<AudioTrackOption> =
+        collectAudioTrackOptions(hlsVariants)
+
+    private fun collectAudioTrackOptions(streams: List<StreamFormat>): List<AudioTrackOption> {
         val grouped = LinkedHashMap<String, AudioTrackOption>()
-        for (f in audioStreams) {
+        for (f in streams) {
             val id = f.audioTrackId
             if (id.isBlank()) continue
             val label = f.audioDisplayName.ifBlank { id.substringBefore('.').uppercase() }
@@ -226,11 +269,35 @@ data class VideoStreamInfo(
 
     /**
      * Pick an exact per-resolution HLS variant playlist (e.g. `web_safari` muxed
-     * 144p-1080p `.m3u8`). Auto mode defaults to crisp 720p (never 360p).
+     * 144p-1080p `.m3u8`), strictly preferring [preferredAudioTrackId] or the
+     * video's ORIGINAL language track over AI auto-dubs (like alphabetical `ar`).
+     * Auto mode defaults to crisp 720p (never 360p).
      */
-    fun pickHlsVariant(targetHeight: Int?): StreamFormat? {
+    fun pickHlsVariant(targetHeight: Int?, preferredAudioTrackId: String? = null): StreamFormat? {
+        if (hlsVariants.isEmpty()) return null
+        val pool = when {
+            !preferredAudioTrackId.isNullOrBlank() -> {
+                hlsVariants.filter { it.audioTrackId == preferredAudioTrackId }.ifEmpty { hlsVariants }
+            }
+            hlsVariants.any { it.isOriginalAudio } -> hlsVariants.filter { it.isOriginalAudio }
+            hlsVariants.any { it.isDefaultAudio && !it.isDubbedOrDescriptive } ->
+                hlsVariants.filter { it.isDefaultAudio && !it.isDubbedOrDescriptive }
+            hlsVariants.any { !it.isDubbedOrDescriptive } -> {
+                val nonDubbed = hlsVariants.filter { !it.isDubbedOrDescriptive }
+                val enNonDubbed = nonDubbed.filter {
+                    it.audioTrackId.startsWith("en", ignoreCase = true) ||
+                        it.audioDisplayName.contains("english", ignoreCase = true)
+                }
+                if (enNonDubbed.isNotEmpty() && nonDubbed.any { it.audioTrackId.isNotBlank() }) {
+                    enNonDubbed
+                } else {
+                    nonDubbed
+                }
+            }
+            else -> hlsVariants
+        }
         return pickFromCandidates(
-            streams = hlsVariants,
+            streams = pool,
             targetHeight = targetHeight,
             autoMaxHeight = 720
         )
