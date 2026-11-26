@@ -747,6 +747,22 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private val tabSwipe by lazy {
+        NavHelper.TabSwipeHelper(this, isEnabled = { !isNowPlayingOpen && !isLyricsOpen })
+    }
+
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        if (tabSwipe.onDispatchTouchEvent(ev)) {
+            val cancel = android.view.MotionEvent.obtain(ev).apply {
+                action = android.view.MotionEvent.ACTION_CANCEL
+            }
+            super.dispatchTouchEvent(cancel)
+            cancel.recycle()
+            return true
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
         when {

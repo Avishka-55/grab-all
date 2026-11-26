@@ -209,7 +209,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.btnTopPip).setOnClickListener { enterPipOrMinimize() }
         findViewById<TextView>(R.id.btnFullscreen).setOnClickListener { toggleFullscreen() }
         btnTopQuality.setOnClickListener { showQualityPicker() }
-        btnTopCaptions.setOnClickListener { toggleCaptions() }
+        btnTopCaptions.setOnClickListener { showCaptionsPicker() }
         btnTopAspect.setOnClickListener { cycleAspectRatio() }
         // Disable PlayerView's own tap-to-toggle so our GestureDetector is the
         // single source of truth (prevents the double-toggle bug where tapping
@@ -570,6 +570,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
         actionBgAudio.setBackgroundResource(
             if (state.isAudioOnly) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
         )
+        btnTopCaptions.visibility = if (state.hasCaptions) View.VISIBLE else View.GONE
         val ccColor = ContextCompat.getColor(
             this,
             if (state.captionsEnabled) R.color.graball_text else R.color.graball_subtext
@@ -1452,15 +1453,42 @@ class YouTubePlayerActivity : AppCompatActivity() {
         mainHandler.postDelayed(hideHudRunnable, 900L)
     }
 
-    private fun toggleCaptions() {
+    private fun showCaptionsPicker() {
         val svc = YouTubePlaybackService.instance ?: return
-        val next = !YouTubePlaybackService.currentState.captionsEnabled
-        if (next && !svc.hasAnyCaptions()) {
-            showHud("No captions available for this video")
+        val tracks = svc.availableCaptions()
+        if (tracks.isEmpty()) {
+            showHud("No subtitles available for this video")
             return
         }
-        svc.setCaptionsEnabled(next)
-        showHud(if (next) "CC: ON" else "CC: OFF")
+        val state = YouTubePlaybackService.currentState
+        val activeIdx = if (state.captionsEnabled) state.selectedCaptionIndex else -1
+        val labels = mutableListOf(
+            if (activeIdx < 0) "✓ Off" else "Off"
+        )
+        tracks.forEachIndexed { idx, cap ->
+            val mark = if (idx == activeIdx) "✓ " else ""
+            labels.add("$mark${cap.label}")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Subtitles / Captions")
+            .setItems(labels.toTypedArray()) { _, which ->
+                if (which == 0) {
+                    svc.selectCaption(null)
+                    playerView.subtitleView?.setCues(emptyList())
+                    showHud("Subtitles: OFF")
+                } else {
+                    val chosenIdx = which - 1
+                    svc.selectCaption(chosenIdx)
+                    val label = tracks.getOrNull(chosenIdx)?.label ?: "ON"
+                    showHud("CC: $label")
+                }
+            }
+            .setOnDismissListener {
+                if (isFullscreen && !inPipMode) {
+                    applyChromeVisibility()
+                }
+            }
+            .show()
     }
 
     // ---- Quality & Speed Pickers ----

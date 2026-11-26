@@ -13,10 +13,12 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.webkit.CookieManager
 import androidx.annotation.OptIn
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -28,7 +30,9 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
@@ -42,7 +46,9 @@ import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
-import androidx.media3.exoplayer.source.SingleSampleMediaSource
+import androidx.media3.extractor.ExtractorsFactory
+import androidx.media3.extractor.text.DefaultSubtitleParserFactory
+import androidx.media3.extractor.text.SubtitleExtractor
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.MediaStyleNotificationHelper
@@ -67,6 +73,8 @@ data class YouTubePlaybackState(
     val isAudioOnly: Boolean = false,
     val isVideoDisabled: Boolean = false,
     val captionsEnabled: Boolean = false,
+    val hasCaptions: Boolean = false,
+    val selectedCaptionIndex: Int = 0,
     val selectedHeight: Int? = null,
     val activeVideoHeight: Int? = null,
     val playbackSpeed: Float = 1.0f,
@@ -115,6 +123,9 @@ class YouTubePlaybackService : MediaSessionService() {
     private var isAudioOnly = false
     private var isVideoSurfaceVisible = false
     private var captionsEnabled = false
+    private var selectedCaptionIndex = 0
+    private var preferredCaptionLang: String? = null
+    private val subtitleParserFactory = DefaultSubtitleParserFactory()
     private var selectedHeight: Int? = null
     private var activeVideoHeight: Int? = null
     private var preparedVideoHeight: Int? = null
@@ -286,7 +297,11 @@ class YouTubePlaybackService : MediaSessionService() {
                     }
 
                     override fun onTracksChanged(tracks: Tracks) {
-                        if (currentStreamMode == StreamMode.HLS_MASTER && selectedHeight != null) {
+                        val needsHlsCap = currentStreamMode == StreamMode.HLS_MASTER && selectedHeight != null
+                        val needsCaptionBind = captionsEnabled &&
+                            tracks.groups.any { it.type == C.TRACK_TYPE_TEXT } &&
+                            tracks.groups.none { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
+                        if (needsHlsCap || needsCaptionBind) {
                             applyTrackSelection()
                         }
                         refreshActiveVideoHeight(tracks)
@@ -750,18 +765,59 @@ class YouTubePlaybackService : MediaSessionService() {
     }
 
     fun setCaptionsEnabled(enabled: Boolean) {
-        if (captionsEnabled == enabled) return
-        captionsEnabled = enabled
+        if (enabled) {
+            selectCaption(selectedCaptionIndex.coerceAtLeast(0))
+        } else {
+            selectCaption(null)
+        }
+    }
+
+    /** Returns playable subtitle/caption tracks for the current video (empty if unsupported). */
+    fun availableCaptions(): List<CaptionTrack> {
+        if (subtitlesBroken) return emptyList()
+        val infoTracks = currentStreamInfo?.captionTracks.orEmpty()
+        if (infoTracks.isNotEmpty()) {
+            return infoTracks.take(MAX_ATTACHED_CAPTIONS)
+        }
+        val p = player ?: return emptyList()
+        val embedded = mutableListOf<CaptionTrack>()
+        for (group in p.currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_TEXT || group.length <= 0) continue
+            val fmt = group.getTrackFormat(0)
+            val lang = fmt.language?.takeIf { it.isNotBlank() } ?: "und"
+            val label = fmt.label?.takeIf { it.isNotBlank() } ?: lang.uppercase()
+            embedded.add(
+                CaptionTrack(
+                    langCode = lang,
+                    label = label,
+                    url = "",
+                    mimeType = fmt.sampleMimeType ?: MimeTypes.TEXT_VTT,
+                    isAuto = false
+                )
+            )
+        }
+        return embedded
+    }
+
+    /** Select a caption track by index, or pass null to disable captions cleanly. */
+    fun selectCaption(index: Int?) {
+        val tracks = availableCaptions()
+        if (index == null || tracks.isEmpty()) {
+            captionsEnabled = false
+            applyTrackSelection()
+            broadcastState()
+            return
+        }
+        val clamped = index.coerceIn(0, tracks.lastIndex)
+        selectedCaptionIndex = clamped
+        preferredCaptionLang = tracks[clamped].langCode
+        captionsEnabled = true
         applyTrackSelection()
         broadcastState()
     }
 
-    /** True if the active stream has any subtitle/caption track (either HLS-embedded or WebVTT). */
-    fun hasAnyCaptions(): Boolean {
-        if (currentStreamInfo?.captionTracks?.isNotEmpty() == true) return true
-        val p = player ?: return false
-        return p.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
-    }
+    /** True if the active stream has any subtitle/caption track (TTML/WebVTT or HLS-embedded). */
+    fun hasAnyCaptions(): Boolean = availableCaptions().isNotEmpty()
 
     /** Real playable video heights genuinely available in the active working stream mode. */
     fun availableVideoHeights(): List<Int> {
@@ -1134,6 +1190,21 @@ class YouTubePlaybackService : MediaSessionService() {
     }
 
     private fun prepareStream(info: VideoStreamInfo, resumePosMs: Long, playImmediately: Boolean) {
+        // Pick the preferred language index if available on this video.
+        val caps = info.captionTracks.take(MAX_ATTACHED_CAPTIONS)
+        val pref = preferredCaptionLang
+        selectedCaptionIndex = if (!pref.isNullOrBlank() && caps.isNotEmpty()) {
+            caps.indexOfFirst { it.langCode.equals(pref, ignoreCase = true) }
+                .takeIf { it >= 0 }
+                ?: caps.indexOfFirst { it.langCode.startsWith(pref.substringBefore('-'), ignoreCase = true) }
+                    .takeIf { it >= 0 }
+                ?: 0
+        } else {
+            0
+        }
+        if (caps.isEmpty()) {
+            captionsEnabled = false
+        }
         attemptedModes.clear()
         if (!tryNextStreamMode(info, resumePosMs, playImmediately)) {
             lastError = "No playable format available for this video"
@@ -1178,20 +1249,47 @@ class YouTubePlaybackService : MediaSessionService() {
             .setArtworkUri(info.thumbnailUrl.takeIf { it.startsWith("http") }?.let { Uri.parse(it) })
             .build()
 
+        val subtitleHeaders = mutableMapOf<String, String>()
+        runCatching { CookieManager.getInstance().getCookie("https://www.youtube.com") }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { subtitleHeaders["Cookie"] = it }
+        val subtitleHttpFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(info.userAgent)
+            .setDefaultRequestProperties(subtitleHeaders)
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(10_000)
+            .setReadTimeoutMs(12_000)
+
         fun attachSubtitles(baseSource: MediaSource): MediaSource {
-            val tracks = info.captionTracks
+            val tracks = info.captionTracks.take(MAX_ATTACHED_CAPTIONS)
             if (tracks.isEmpty() || subtitlesBroken) return baseSource
-            val subSources = tracks.take(4).mapIndexed { idx, cap ->
-                val subConfig = MediaItem.SubtitleConfiguration.Builder(Uri.parse(cap.vttUrl))
-                    .setMimeType(MimeTypes.TEXT_VTT)
+            // Media3 1.4+ disables legacy TextRenderer decoding by default, so raw
+            // SingleSampleMediaSource triggers ERROR_CODE_FAILED_RUNTIME_CHECK.
+            // Wrap each subtitle track with SubtitleExtractor so cues are transcoded
+            // into application/x-media3-cues during extraction (Media3's native path),
+            // backed by a fail-safe DataSource so broken URLs can never kill playback.
+            val subSources = tracks.mapIndexedNotNull { idx, cap ->
+                if (!cap.url.startsWith("http")) return@mapIndexedNotNull null
+                val mime = cap.mimeType.ifBlank { MimeTypes.APPLICATION_TTML }
+                val format = Format.Builder()
+                    .setId("$SUBTITLE_TRACK_ID_PREFIX$idx")
+                    .setSampleMimeType(mime)
                     .setLanguage(cap.langCode)
                     .setLabel(cap.label)
-                    .setSelectionFlags(if (idx == 0) C.SELECTION_FLAG_DEFAULT else 0)
+                    .setSelectionFlags(if (idx == selectedCaptionIndex) C.SELECTION_FLAG_DEFAULT else 0)
                     .build()
-                SingleSampleMediaSource.Factory(httpFactory)
-                    .setTreatLoadErrorsAsEndOfStream(true)
-                    .createMediaSource(subConfig, C.TIME_UNSET)
+                if (!subtitleParserFactory.supportsFormat(format)) return@mapIndexedNotNull null
+                val safeSubDsFactory = DataSource.Factory {
+                    FailSafeSubtitleDataSource(subtitleHttpFactory.createDataSource(), mime)
+                }
+                val extractorsFactory = ExtractorsFactory {
+                    arrayOf(SubtitleExtractor(subtitleParserFactory.create(format), format))
+                }
+                ProgressiveMediaSource.Factory(safeSubDsFactory, extractorsFactory)
+                    .createMediaSource(MediaItem.fromUri(cap.url))
             }
+            if (subSources.isEmpty()) return baseSource
             val all = arrayOf(baseSource) + subSources.toTypedArray()
             return MergingMediaSource(*all)
         }
@@ -1322,9 +1420,35 @@ class YouTubePlaybackService : MediaSessionService() {
         val chosen = selectedHeight
         val builder = p.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, isEffectivelyAudioOnly())
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !captionsEnabled)
             .setPreferredVideoMimeType(null)
+
+        if (captionsEnabled) {
+            val textGroups = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
+            val wantedId = "$SUBTITLE_TRACK_ID_PREFIX$selectedCaptionIndex"
+            val targetGroup = textGroups.firstOrNull { g ->
+                (0 until g.length).any { i -> g.getTrackFormat(i).id == wantedId }
+            } ?: textGroups.getOrNull(selectedCaptionIndex) ?: textGroups.firstOrNull()
+            if (targetGroup != null) {
+                val trackIdx = (0 until targetGroup.length).firstOrNull { i ->
+                    targetGroup.getTrackFormat(i).id == wantedId
+                } ?: 0
+                val lang = targetGroup.getTrackFormat(trackIdx).language
+                if (!lang.isNullOrBlank()) {
+                    builder.setPreferredTextLanguage(lang)
+                }
+                builder.setOverrideForType(
+                    TrackSelectionOverride(targetGroup.mediaTrackGroup, listOf(trackIdx))
+                )
+            } else {
+                val preferredLang = currentStreamInfo?.captionTracks?.getOrNull(selectedCaptionIndex)?.langCode
+                if (!preferredLang.isNullOrBlank()) {
+                    builder.setPreferredTextLanguage(preferredLang)
+                }
+            }
+        }
 
         if (currentStreamMode == StreamMode.HLS_MASTER) {
             if (chosen != null) {
@@ -1420,6 +1544,8 @@ class YouTubePlaybackService : MediaSessionService() {
             isAudioOnly = isAudioOnly,
             isVideoDisabled = isEffectivelyAudioOnly(),
             captionsEnabled = captionsEnabled,
+            hasCaptions = hasAnyCaptions(),
+            selectedCaptionIndex = selectedCaptionIndex,
             selectedHeight = selectedHeight,
             activeVideoHeight = activeVideoHeight ?: preparedVideoHeight,
             playbackSpeed = playbackSpeed,
@@ -1653,6 +1779,9 @@ class YouTubePlaybackService : MediaSessionService() {
             }
         }
 
+        private const val MAX_ATTACHED_CAPTIONS = 12
+        private const val SUBTITLE_TRACK_ID_PREFIX = "graball_sub_"
+
         @Volatile
         var instance: YouTubePlaybackService? = null
             private set
@@ -1712,6 +1841,100 @@ class YouTubePlaybackService : MediaSessionService() {
                     context.startService(intent)
                 } catch (_: Exception) {
                 }
+            }
+        }
+    }
+
+    /**
+     * Fail-safe subtitle DataSource: buffers the small TTML/WebVTT caption file
+     * (typically 3-40 KB) in [open] and closes the HTTP connection immediately.
+     * Any HTTP error, timeout, empty 0-byte response, or HTML error page falls
+     * back cleanly to a minimal valid empty TTML/WebVTT document so a bad
+     * subtitle URL can NEVER crash or stall video playback.
+     */
+    private class FailSafeSubtitleDataSource(
+        private val upstream: DataSource,
+        private val mimeType: String
+    ) : BaseDataSource(/* isNetwork = */ true) {
+
+        private var payload: ByteArray = ByteArray(0)
+        private var offset: Int = 0
+        private var currentUri: Uri? = null
+        private var opened: Boolean = false
+
+        override fun open(dataSpec: DataSpec): Long {
+            transferInitializing(dataSpec)
+            currentUri = dataSpec.uri
+            offset = 0
+            payload = fetchOrFallback(dataSpec)
+            opened = true
+            transferStarted(dataSpec)
+            return payload.size.toLong()
+        }
+
+        private fun fetchOrFallback(dataSpec: DataSpec): ByteArray {
+            val emptyDoc = if (mimeType == MimeTypes.APPLICATION_TTML) {
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div></div></body></tt>"
+            } else {
+                "WEBVTT\n\n"
+            }.toByteArray(Charsets.UTF_8)
+
+            return try {
+                upstream.open(dataSpec)
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                var total = 0
+                val maxBytes = 2 * 1024 * 1024
+                while (total < maxBytes) {
+                    val n = upstream.read(buf, 0, buf.size)
+                    if (n == C.RESULT_END_OF_INPUT || n <= 0) break
+                    out.write(buf, 0, n)
+                    total += n
+                }
+                val bytes = out.toByteArray()
+                if (bytes.isEmpty()) {
+                    Log.w(TAG, "Empty subtitle response; serving empty track")
+                    emptyDoc
+                } else {
+                    val head = String(bytes, 0, minOf(bytes.size, 128), Charsets.UTF_8).trimStart()
+                    val looksValid = if (mimeType == MimeTypes.APPLICATION_TTML) {
+                        head.startsWith("<?xml") || head.startsWith("<tt")
+                    } else {
+                        head.startsWith("WEBVTT")
+                    }
+                    if (looksValid) bytes else {
+                        Log.w(TAG, "Unexpected subtitle payload (${head.take(40)}); serving empty track")
+                        emptyDoc
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Subtitle fetch failed (${e.message}); serving empty track")
+                emptyDoc
+            } finally {
+                runCatching { upstream.close() }
+            }
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            if (length == 0) return 0
+            val remaining = payload.size - this.offset
+            if (remaining <= 0) return C.RESULT_END_OF_INPUT
+            val count = minOf(length, remaining)
+            System.arraycopy(payload, this.offset, buffer, offset, count)
+            this.offset += count
+            bytesTransferred(count)
+            return count
+        }
+
+        override fun getUri(): Uri? = currentUri
+
+        override fun close() {
+            currentUri = null
+            payload = ByteArray(0)
+            offset = 0
+            if (opened) {
+                opened = false
+                transferEnded()
             }
         }
     }

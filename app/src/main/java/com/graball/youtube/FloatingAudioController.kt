@@ -217,6 +217,7 @@ class FloatingAudioController(
         val bubbleSize = (54 * dp).toInt()
         val thumbSize = (46 * dp).toInt()
         val bubble = FrameLayout(activity).apply {
+            tag = com.graball.NavHelper.FLOATING_AUDIO_TAG
             layoutParams = FrameLayout.LayoutParams(bubbleSize, bubbleSize)
             elevation = 10 * dp
             background = GradientDrawable().apply {
@@ -294,6 +295,7 @@ class FloatingAudioController(
     private fun buildExpandedPill(circleOutline: ViewOutlineProvider): LinearLayout {
         val pillHeight = (48 * dp).toInt()
         val pill = LinearLayout(activity).apply {
+            tag = com.graball.NavHelper.FLOATING_AUDIO_TAG
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = FrameLayout.LayoutParams(

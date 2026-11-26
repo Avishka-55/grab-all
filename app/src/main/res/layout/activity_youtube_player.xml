@@ -128,7 +128,8 @@
                 android:text="CC"
                 android:textColor="@color/graball_subtext"
                 android:textSize="12sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:visibility="gone" />
 
             <TextView
                 android:id="@+id/btnTopQuality"

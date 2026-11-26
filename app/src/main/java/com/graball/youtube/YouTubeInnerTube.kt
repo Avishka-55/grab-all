@@ -2105,24 +2105,47 @@ object YouTubeInnerTube {
             ?.optJSONArray("captionTracks")
             ?: return emptyList()
         val out = mutableListOf<CaptionTrack>()
+        val seen = mutableSetOf<String>()
         for (i in 0 until arr.length()) {
             val c = arr.optJSONObject(i) ?: continue
-            val baseUrl = c.optString("baseUrl")
-            if (!baseUrl.startsWith("http")) continue
-            val vttUrl = if (baseUrl.contains("fmt=")) {
-                baseUrl.replace(Regex("fmt=[^&]+"), "fmt=vtt")
-            } else {
-                "$baseUrl&fmt=vtt"
+            var baseUrl = c.optString("baseUrl").trim()
+            if (baseUrl.startsWith("//")) {
+                baseUrl = "https:$baseUrl"
+            } else if (baseUrl.startsWith("/")) {
+                baseUrl = "https://www.youtube.com$baseUrl"
             }
+            if (!baseUrl.startsWith("http")) continue
+            val cleanBase = baseUrl
+                .replace(Regex("[&?]fmt=[^&]*"), "")
+                .replace(Regex("[&?]tlang=[^&]*"), "")
+            val ttmlUrl = if (cleanBase.contains("?")) "$cleanBase&fmt=ttml" else "$cleanBase?fmt=ttml"
             val lang = c.optString("languageCode").ifBlank { "und" }
-            val label = extractText(c.optJSONObject("name")).ifBlank { lang }
-            val isAuto = c.optString("kind") == "asr"
-            out.add(CaptionTrack(langCode = lang, label = label, vttUrl = vttUrl, isAuto = isAuto))
+            val vssId = c.optString("vssId")
+            val isAuto = c.optString("kind") == "asr" || vssId.startsWith("a.")
+            val rawLabel = extractText(c.optJSONObject("name")).ifBlank { lang }
+            val label = if (isAuto && !rawLabel.contains("auto", ignoreCase = true)) {
+                "$rawLabel (auto)"
+            } else {
+                rawLabel
+            }
+            val dedupeKey = "${lang.lowercase()}|$isAuto"
+            if (seen.add(dedupeKey)) {
+                out.add(
+                    CaptionTrack(
+                        langCode = lang,
+                        label = label,
+                        url = ttmlUrl,
+                        mimeType = "application/ttml+xml",
+                        isAuto = isAuto
+                    )
+                )
+            }
         }
-        // Prefer manual tracks first, then English tracks first
+        // Prefer manual tracks first, then English tracks first, then alphabetical.
         return out.sortedWith(
             compareBy<CaptionTrack> { it.isAuto }
                 .thenByDescending { it.langCode.startsWith("en", ignoreCase = true) }
+                .thenBy { it.label.lowercase() }
         )
     }
 
@@ -2142,6 +2165,8 @@ object YouTubeInnerTube {
             val itag = obj.optInt("itag", 0)
             val height = obj.optInt("height", 0)
             val bitrate = obj.optInt("bitrate", 0)
+            val contentLength = obj.optString("contentLength").toLongOrNull()
+                ?: obj.optLong("contentLength", 0L).coerceAtLeast(0L)
             val qualityLabel = obj.optString("qualityLabel", if (height > 0) "${height}p" else "")
             val isVideo = mime.startsWith("video/")
             val isAudio = mime.startsWith("audio/")
@@ -2154,7 +2179,8 @@ object YouTubeInnerTube {
                 bitrate = bitrate,
                 isAudioOnly = isAudio,
                 isVideoOnly = isVideo && !isMuxedDefault,
-                isMuxed = isMuxedDefault
+                isMuxed = isMuxedDefault,
+                contentLengthBytes = contentLength
             )
             when {
                 isMuxedDefault -> muxedOut.add(fmt)
@@ -2208,6 +2234,8 @@ object YouTubeInnerTube {
                 val ext = f.optString("ext", "")
                 val height = f.optInt("height", 0)
                 val tbr = (f.optDouble("tbr", 0.0) * 1000.0).toInt()
+                val fileSize = f.optLong("filesize", 0L).takeIf { it > 0L }
+                    ?: f.optLong("filesize_approx", 0L).coerceAtLeast(0L)
                 val headers = f.optJSONObject("http_headers")
                 val ua = headers?.optString("User-Agent")
                 if (!ua.isNullOrBlank()) detectedUa = ua
@@ -2236,7 +2264,8 @@ object YouTubeInnerTube {
                                 bitrate = tbr,
                                 isAudioOnly = false,
                                 isVideoOnly = false,
-                                isMuxed = true
+                                isMuxed = true,
+                                contentLengthBytes = fileSize
                             )
                         )
                     }
@@ -2259,7 +2288,8 @@ object YouTubeInnerTube {
                     bitrate = tbr,
                     isAudioOnly = !hasVideo && hasAudio,
                     isVideoOnly = hasVideo && !hasAudio,
-                    isMuxed = hasVideo && hasAudio
+                    isMuxed = hasVideo && hasAudio,
+                    contentLengthBytes = fileSize
                 )
                 when {
                     fmt.isMuxed -> muxedStreams.add(fmt)
@@ -2303,22 +2333,41 @@ object YouTubeInnerTube {
 
     private fun parseYtDlpCaptions(root: JSONObject): List<CaptionTrack> {
         val out = mutableListOf<CaptionTrack>()
+        val seen = mutableSetOf<String>()
         fun collect(obj: JSONObject?, isAuto: Boolean) {
             if (obj == null) return
             val keys = obj.keys()
             while (keys.hasNext()) {
                 val lang = keys.next()
                 val arr = obj.optJSONArray(lang) ?: continue
+                var bestUrl: String? = null
+                var bestMime = "application/ttml+xml"
+                var bestName = lang
                 for (i in 0 until arr.length()) {
                     val fmt = arr.optJSONObject(i) ?: continue
-                    if (fmt.optString("ext") == "vtt") {
-                        val u = fmt.optString("url")
-                        if (u.startsWith("http")) {
-                            val name = fmt.optString("name").ifBlank { lang }
-                            out.add(CaptionTrack(lang, name, u, isAuto))
-                            break
-                        }
+                    val ext = fmt.optString("ext")
+                    val u = fmt.optString("url")
+                    if (!u.startsWith("http")) continue
+                    if (ext == "ttml") {
+                        bestUrl = u
+                        bestMime = "application/ttml+xml"
+                        bestName = fmt.optString("name").ifBlank { lang }
+                        break
+                    } else if (ext == "vtt" && bestUrl == null) {
+                        bestUrl = u
+                        bestMime = "text/vtt"
+                        bestName = fmt.optString("name").ifBlank { lang }
                     }
+                }
+                val finalUrl = bestUrl ?: continue
+                val label = if (isAuto && !bestName.contains("auto", ignoreCase = true)) {
+                    "$bestName (auto)"
+                } else {
+                    bestName
+                }
+                val dedupeKey = "${lang.lowercase()}|$isAuto"
+                if (seen.add(dedupeKey)) {
+                    out.add(CaptionTrack(lang, label, finalUrl, bestMime, isAuto))
                 }
             }
         }
@@ -2327,6 +2376,7 @@ object YouTubeInnerTube {
         return out.sortedWith(
             compareBy<CaptionTrack> { it.isAuto }
                 .thenByDescending { it.langCode.startsWith("en", ignoreCase = true) }
+                .thenBy { it.label.lowercase() }
         )
     }
 

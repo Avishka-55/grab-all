@@ -35,13 +35,23 @@ data class StreamFormat(
     val bitrate: Int,
     val isAudioOnly: Boolean,
     val isVideoOnly: Boolean,
-    val isMuxed: Boolean
-)
+    val isMuxed: Boolean,
+    val contentLengthBytes: Long = 0L
+) {
+    fun estimatedSizeBytes(durationSec: Long): Long {
+        if (contentLengthBytes > 0L) return contentLengthBytes
+        if (bitrate > 0 && durationSec > 0L) {
+            return (bitrate.toLong() * durationSec) / 8L
+        }
+        return 0L
+    }
+}
 
 data class CaptionTrack(
     val langCode: String,
     val label: String,
-    val vttUrl: String,
+    val url: String,
+    val mimeType: String = "application/ttml+xml",
     val isAuto: Boolean = false
 )
 
@@ -81,6 +91,37 @@ data class VideoStreamInfo(
             .filter { it.mimeType.contains("mp4", ignoreCase = true) || it.mimeType.contains("aac", ignoreCase = true) }
             .maxByOrNull { it.bitrate }
         return m4a ?: audioStreams.maxByOrNull { it.bitrate }
+    }
+
+    /** Exact or bitrate-estimated audio file size in bytes (pass [mp3BitrateKbps] for MP3 transcode). */
+    fun estimatedAudioSizeBytes(mp3BitrateKbps: Int? = null): Long {
+        if (mp3BitrateKbps != null && durationSec > 0L) {
+            return (mp3BitrateKbps.toLong() * 1000L * durationSec) / 8L
+        }
+        val audio = bestAudio() ?: return 0L
+        return audio.estimatedSizeBytes(durationSec)
+    }
+
+    /** Exact or bitrate-estimated merged video+audio file size in bytes for [targetHeight]. */
+    fun estimatedVideoSizeBytes(targetHeight: Int): Long {
+        val video = pickVideoStream(targetHeight, forDownload = true)
+        val audio = bestAudio()
+        if (video != null && normalizeHeight(video.height) == targetHeight && audio != null) {
+            val vBytes = video.estimatedSizeBytes(durationSec)
+            val aBytes = audio.estimatedSizeBytes(durationSec)
+            if (vBytes > 0L) return vBytes + aBytes
+        }
+        val hls = pickHlsVariant(targetHeight)
+        if (hls != null && normalizeHeight(hls.height) == targetHeight) {
+            val bytes = hls.estimatedSizeBytes(durationSec)
+            if (bytes > 0L) return bytes
+        }
+        val muxed = pickMuxedStream(targetHeight)
+        if (muxed != null && normalizeHeight(muxed.height) == targetHeight) {
+            val bytes = muxed.estimatedSizeBytes(durationSec)
+            if (bytes > 0L) return bytes
+        }
+        return 0L
     }
 
     /**

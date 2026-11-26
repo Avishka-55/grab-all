@@ -300,4 +300,18 @@ class SettingsActivity : AppCompatActivity() {
         if (!dir.exists()) return 0L
         return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
     }
+
+    private val tabSwipe by lazy { NavHelper.TabSwipeHelper(this) }
+
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        if (tabSwipe.onDispatchTouchEvent(ev)) {
+            val cancel = android.view.MotionEvent.obtain(ev).apply {
+                action = android.view.MotionEvent.ACTION_CANCEL
+            }
+            super.dispatchTouchEvent(cancel)
+            cancel.recycle()
+            return true
+        }
+        return super.dispatchTouchEvent(ev)
+    }
 }
