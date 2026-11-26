@@ -30,6 +30,9 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
@@ -122,6 +125,38 @@ class YouTubePlaybackService : MediaSessionService() {
     private var isForegroundActive = false
     private var loadGeneration = 0
     private var stallRetries = 0
+
+    /** itags that answered 403/416 for the current video; skipped on the next fresh resolve. */
+    private val failedItags = mutableSetOf<Int>()
+    private var failedItagsVideoId: String? = null
+
+    private fun withoutFailedFormats(info: VideoStreamInfo): VideoStreamInfo {
+        if (failedItags.isEmpty() || failedItagsVideoId != info.videoId) return info
+        fun List<StreamFormat>.drop(): List<StreamFormat> =
+            filter { it.itag !in failedItags }.ifEmpty { this }
+        return info.copy(
+            hlsVariants = info.hlsVariants.drop(),
+            videoStreams = info.videoStreams.drop(),
+            audioStreams = info.audioStreams.drop(),
+            muxedStreams = info.muxedStreams.drop()
+        )
+    }
+
+    /**
+     * Expired / IP-bound GoogleVideo URLs (common when a VPN exit changes) answer
+     * with 4xx. ExoPlayer's default policy retries those ~3x with backoff, which
+     * is why failures took so long. Fail 4xx immediately so our fallback modes and
+     * fresh re-resolve kick in within a second.
+     */
+    private val failFastPolicy: LoadErrorHandlingPolicy = object : DefaultLoadErrorHandlingPolicy() {
+        override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+            val ex = loadErrorInfo.exception
+            if (ex is HttpDataSource.InvalidResponseCodeException && ex.responseCode in 400..499) {
+                return C.TIME_UNSET
+            }
+            return super.getRetryDelayMsFor(loadErrorInfo)
+        }
+    }
     private var currentTrackStartedPlaying = false
     private var streamReachedReady = false
     private var pendingSeekPositionMs: Long? = null
@@ -301,6 +336,15 @@ class YouTubePlaybackService : MediaSessionService() {
                             }
                         if (info != null && error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
                             evictStreamFromCache(info)
+                            // Remember the format that was rejected so the fresh
+                            // re-resolve doesn't pick the same dead itag again.
+                            val http = error.cause as? HttpDataSource.InvalidResponseCodeException
+                            if (http != null && (http.responseCode == 403 || http.responseCode == 416)) {
+                                http.dataSpec.uri.getQueryParameter("itag")?.toIntOrNull()?.let {
+                                    failedItagsVideoId = info.videoId
+                                    failedItags.add(it)
+                                }
+                            }
                         }
                         if (info != null && tryNextStreamMode(info, pos, playImmediately = true)) {
                             return
@@ -309,7 +353,7 @@ class YouTubePlaybackService : MediaSessionService() {
                         // expired/rate-limited GoogleVideo range) hits with no fallback mode
                         // left, silently re-resolve a fresh stream once at the target position.
                         if (error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS &&
-                            autoRecoveryAttempts < 1 &&
+                            autoRecoveryAttempts < 2 &&
                             queueIndex in queue.indices
                         ) {
                             autoRecoveryAttempts++
@@ -779,6 +823,8 @@ class YouTubePlaybackService : MediaSessionService() {
         if (resetRecoveryCounter) {
             autoRecoveryAttempts = 0
             stallRetries = 0
+            failedItags.clear()
+            failedItagsVideoId = null
         }
         // Watchdog: if resolving hangs (slow/blocked network tier), silently retry
         // once instead of leaving the user on an endless spinner.
@@ -884,6 +930,8 @@ class YouTubePlaybackService : MediaSessionService() {
         overrideStartPositionMs: Long?
     ) {
         if (gen != loadGeneration) return
+        @Suppress("NAME_SHADOWING")
+        val info = withoutFailedFormats(info)
         currentStreamInfo = info
         val enriched = item.copy(
             title = info.title,
@@ -1070,8 +1118,8 @@ class YouTubePlaybackService : MediaSessionService() {
                 .setUri(audioStream.url)
                 .setMediaMetadata(meta)
                 .build()
-            val vSrc = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(vItem)
-            val aSrc = ProgressiveMediaSource.Factory(dsFactory).createMediaSource(aItem)
+            val vSrc = ProgressiveMediaSource.Factory(dsFactory).setLoadErrorHandlingPolicy(failFastPolicy).createMediaSource(vItem)
+            val aSrc = ProgressiveMediaSource.Factory(dsFactory).setLoadErrorHandlingPolicy(failFastPolicy).createMediaSource(aItem)
             val merged = attachSubtitles(MergingMediaSource(vSrc, aSrc))
             applyTrackSelection()
             p.setMediaSource(merged, resumePosMs)
@@ -1094,7 +1142,7 @@ class YouTubePlaybackService : MediaSessionService() {
                 .setUri(hlsVariant.url)
                 .setMediaMetadata(meta)
                 .build()
-            val src = attachSubtitles(HlsMediaSource.Factory(dsFactory).createMediaSource(item))
+            val src = attachSubtitles(HlsMediaSource.Factory(dsFactory).setLoadErrorHandlingPolicy(failFastPolicy).createMediaSource(item))
             applyTrackSelection()
             p.setMediaSource(src, resumePosMs)
             p.setPlaybackSpeed(playbackSpeed)
@@ -1113,7 +1161,7 @@ class YouTubePlaybackService : MediaSessionService() {
                 .setUri(info.hlsUrl)
                 .setMediaMetadata(meta)
                 .build()
-            val src = attachSubtitles(HlsMediaSource.Factory(dsFactory).createMediaSource(item))
+            val src = attachSubtitles(HlsMediaSource.Factory(dsFactory).setLoadErrorHandlingPolicy(failFastPolicy).createMediaSource(item))
             applyTrackSelection()
             p.setMediaSource(src, resumePosMs)
             p.setPlaybackSpeed(playbackSpeed)
@@ -1133,7 +1181,7 @@ class YouTubePlaybackService : MediaSessionService() {
                 .setUri(muxed.url)
                 .setMediaMetadata(meta)
                 .build()
-            val src = attachSubtitles(ProgressiveMediaSource.Factory(dsFactory).createMediaSource(item))
+            val src = attachSubtitles(ProgressiveMediaSource.Factory(dsFactory).setLoadErrorHandlingPolicy(failFastPolicy).createMediaSource(item))
             applyTrackSelection()
             p.setMediaSource(src, resumePosMs)
             p.setPlaybackSpeed(playbackSpeed)
