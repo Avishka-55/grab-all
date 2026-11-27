@@ -311,6 +311,7 @@ object YouTubeStore {
         put("channel", item.channel)
         put("duration", item.duration)
         put("views", item.views)
+        if (item.publishedTime.isNotBlank()) put("pub", item.publishedTime)
         put("thumb", item.thumbnailUrl)
         put("playlist", item.isPlaylist)
         put("count", item.videoCount)
@@ -329,6 +330,7 @@ object YouTubeStore {
             channel = obj.optString("channel", ""),
             duration = obj.optString("duration", ""),
             views = obj.optString("views", ""),
+            publishedTime = obj.optString("pub", ""),
             thumbnailUrl = obj.optString("thumb", ""),
             isPlaylist = obj.optBoolean("playlist", false),
             videoCount = obj.optString("count", ""),

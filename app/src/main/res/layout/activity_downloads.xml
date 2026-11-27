@@ -5,117 +5,12 @@
     android:layout_height="match_parent"
     android:background="@color/graball_bg">
 
-    <LinearLayout
-        android:id="@+id/bottomNav"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:background="@color/graball_nav"
-        android:orientation="horizontal"
-        android:paddingTop="12dp"
-        android:paddingBottom="12dp"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
-
-        <LinearLayout
-            android:id="@+id/navGrab"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_nav_grab"
-                android:tint="@color/graball_tab_text" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/nav_grab"
-                android:textColor="@color/graball_tab_text"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/navPlayer"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_nav_player"
-                android:tint="@color/graball_tab_text" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/nav_player"
-                android:textColor="@color/graball_tab_text"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/navDownloads"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_nav_downloads"
-                android:tint="@color/graball_orange" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/nav_downloads"
-                android:textColor="@color/graball_orange"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/navSettings"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_nav_settings"
-                android:tint="@color/graball_tab_text" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/nav_settings"
-                android:textColor="@color/graball_tab_text"
-                android:textSize="12sp" />
-        </LinearLayout>
-    </LinearLayout>
-
     <ScrollView
         android:id="@+id/contentScroll"
         android:layout_width="0dp"
         android:layout_height="0dp"
         app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toTopOf="@id/bottomNav"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 

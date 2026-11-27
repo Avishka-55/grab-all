@@ -527,6 +527,8 @@ class YouTubeActivity : AppCompatActivity() {
             )
         }
         finish()
+        @Suppress("DEPRECATION")
+        overridePendingTransition(com.graball.R.anim.page_pop_enter, com.graball.R.anim.page_pop_exit)
         return true
     }
 

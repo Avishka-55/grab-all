@@ -9,8 +9,7 @@ import java.util.WeakHashMap
 
 /**
  * Application entry point that attaches GrabAll's lightweight, zero-idle-CPU
- * [FloatingAudioController] across all non-player screens automatically (for
- * both YouTube audio-only playback and local songs).
+ * [FloatingAudioController] and live download badge across screens automatically.
  */
 class GrabAllApp : Application() {
 
@@ -19,6 +18,7 @@ class GrabAllApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
                 if (activity !is YouTubePlayerActivity) {
@@ -32,11 +32,7 @@ class GrabAllApp : Application() {
                     NavHelper.DownloadBadgeController(activity)
                 }
                 badge.attach()
-                if (isExcludedFromFloatingBubble(activity)) return
-                val controller = floatingControllers.getOrPut(activity) {
-                    FloatingAudioController(activity)
-                }
-                controller.attach()
+                syncFloatingBubble(activity)
             }
 
             override fun onActivityPaused(activity: Activity) {
@@ -57,6 +53,19 @@ class GrabAllApp : Application() {
         })
     }
 
+    private fun syncFloatingBubble(activity: Activity) {
+        val allowed = !isExcludedFromFloatingBubble(activity) &&
+            !(activity is MainActivity && activity.isMusicTabActive())
+        if (!allowed) {
+            floatingControllers[activity]?.detach()
+            return
+        }
+        val controller = floatingControllers.getOrPut(activity) {
+            FloatingAudioController(activity)
+        }
+        controller.attach()
+    }
+
     private fun isExcludedFromFloatingBubble(activity: Activity): Boolean =
         activity is PlayerActivity ||
             activity is YouTubePlayerActivity ||
@@ -64,8 +73,16 @@ class GrabAllApp : Application() {
 
     companion object {
         @Volatile
+        private var instance: GrabAllApp? = null
+
+        @Volatile
         private var otherActivityCount: Int = 0
 
         fun hasOtherAliveActivity(): Boolean = otherActivityCount > 0
+
+        /** Called by [MainActivity] when switching into or out of the Music tab. */
+        fun refreshFloatingBubble(activity: Activity) {
+            instance?.syncFloatingBubble(activity)
+        }
     }
 }

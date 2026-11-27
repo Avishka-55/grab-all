@@ -85,7 +85,7 @@ class YtItemAdapter(
             )
         )
 
-        val metaParts = listOf(item.channel, item.views).filter { it.isNotBlank() }
+        val metaParts = listOf(item.channel, item.views, item.publishedTime).filter { it.isNotBlank() }
         holder.meta.text = metaParts.joinToString(" · ").ifBlank {
             if (item.isPlaylist) "YouTube Playlist" else "YouTube"
         }

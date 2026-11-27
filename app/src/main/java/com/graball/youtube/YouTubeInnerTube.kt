@@ -1857,6 +1857,7 @@ object YouTubeInnerTube {
         val channel = details?.optString("author").orEmpty()
         val durationSec = details?.optString("lengthSeconds")?.toLongOrNull() ?: 0L
         val views = formatViews(details?.optString("viewCount")?.toLongOrNull())
+        val publishDate = extractPlayerPublishDate(root)
         val description = details?.optString("shortDescription").orEmpty()
         val thumb = pickThumb(details?.optJSONObject("thumbnail"))
             .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
@@ -1868,6 +1869,7 @@ object YouTubeInnerTube {
                 channel = channel,
                 durationSec = durationSec,
                 viewCount = views,
+                publishDate = publishDate,
                 description = description,
                 thumbnailUrl = thumb,
                 hlsUrl = effectiveHlsUrl,
@@ -2429,6 +2431,7 @@ object YouTubeInnerTube {
         val channel = details?.optString("author").orEmpty()
         val durationSec = details?.optString("lengthSeconds")?.toLongOrNull() ?: 0L
         val views = formatViews(details?.optString("viewCount")?.toLongOrNull())
+        val publishDate = extractPlayerPublishDate(root)
         val description = details?.optString("shortDescription").orEmpty()
         val thumb = pickThumb(details?.optJSONObject("thumbnail"))
             .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
@@ -2440,6 +2443,7 @@ object YouTubeInnerTube {
                 channel = channel,
                 durationSec = durationSec,
                 viewCount = views,
+                publishDate = publishDate,
                 description = description,
                 thumbnailUrl = thumb,
                 hlsUrl = effectiveHlsUrl,
@@ -2972,6 +2976,7 @@ object YouTubeInnerTube {
                     channel = root.optString("uploader", root.optString("channel", "")),
                     durationSec = root.optLong("duration", 0L),
                     viewCount = formatViews(root.optLong("view_count", -1L).takeIf { it >= 0 }),
+                    publishDate = formatPublishDate(root.optString("upload_date")),
                     description = root.optString("description", ""),
                     thumbnailUrl = root.optString("thumbnail")
                         .ifBlank { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" },
@@ -3493,6 +3498,7 @@ object YouTubeInnerTube {
         }
         val views = extractText(obj.optJSONObject("shortViewCountText"))
             .ifBlank { extractText(obj.optJSONObject("viewCountText")) }
+        val publishedTime = extractText(obj.optJSONObject("publishedTimeText"))
         val thumb = pickThumb(obj.optJSONObject("thumbnail"))
             .ifBlank { "https://i.ytimg.com/vi/$id/hqdefault.jpg" }
         val channelId = extractChannelIdFromRuns(obj.optJSONObject("ownerText"))
@@ -3523,6 +3529,7 @@ object YouTubeInnerTube {
             channel = channel,
             duration = if (isLive) "LIVE" else duration,
             views = views,
+            publishedTime = publishedTime,
             thumbnailUrl = thumb,
             isPlaylist = false,
             isLive = isLive,
@@ -3582,9 +3589,12 @@ object YouTubeInnerTube {
             ?.optJSONObject("text")
             ?.optString("content")
             .orEmpty()
-        val views = metaRows?.optJSONObject(1)
-            ?.optJSONArray("metadataParts")
-            ?.optJSONObject(0)
+        val row1Parts = metaRows?.optJSONObject(1)?.optJSONArray("metadataParts")
+        val views = row1Parts?.optJSONObject(0)
+            ?.optJSONObject("text")
+            ?.optString("content")
+            .orEmpty()
+        val publishedTime = row1Parts?.optJSONObject(1)
             ?.optJSONObject("text")
             ?.optString("content")
             .orEmpty()
@@ -3632,6 +3642,7 @@ object YouTubeInnerTube {
             channel = channel,
             duration = if (!isPlaylist) badgeText else "",
             views = if (!isPlaylist) views else "",
+            publishedTime = if (!isPlaylist) publishedTime else "",
             thumbnailUrl = thumb,
             isPlaylist = isPlaylist,
             videoCount = if (isPlaylist) badgeText.ifBlank { "Playlist" } else "",
@@ -3718,6 +3729,41 @@ object YouTubeInnerTube {
         }
         val last = arr.optJSONObject(arr.length() - 1)?.optString("url").orEmpty()
         return if (last.startsWith("//")) "https:$last" else last
+    }
+
+    private fun extractPlayerPublishDate(root: JSONObject): String {
+        val micro = root.optJSONObject("microformat")?.optJSONObject("playerMicroformatRenderer")
+        val raw = micro?.optString("publishDate").orEmpty()
+            .ifBlank { micro?.optString("uploadDate").orEmpty() }
+        return formatPublishDate(raw)
+    }
+
+    /** Formats YouTube dates (`2025-11-12`, `2025-11-12T...`, or `20251112`) into friendly labels (`Nov 12, 2025` / `2 days ago`). */
+    private fun formatPublishDate(raw: String?): String {
+        val clean = raw?.trim()?.substringBefore('T').orEmpty()
+        if (clean.isBlank()) return ""
+        val cal = try {
+            val parts = if (clean.length == 8 && clean.all(Char::isDigit)) {
+                Triple(clean.substring(0, 4).toInt(), clean.substring(4, 6).toInt(), clean.substring(6, 8).toInt())
+            } else {
+                val segs = clean.split('-')
+                if (segs.size < 3) return ""
+                Triple(segs[0].toInt(), segs[1].toInt(), segs[2].take(2).toInt())
+            }
+            java.util.Calendar.getInstance().apply {
+                set(parts.first, (parts.second - 1).coerceIn(0, 11), parts.third.coerceIn(1, 31), 0, 0, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+        } catch (_: Exception) {
+            return ""
+        }
+        val diffDays = ((System.currentTimeMillis() - cal.timeInMillis) / 86_400_000L)
+        return when {
+            diffDays == 0L -> "Today"
+            diffDays == 1L -> "Yesterday"
+            diffDays in 2L..6L -> "$diffDays days ago"
+            else -> java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.ENGLISH).format(cal.time)
+        }
     }
 
     private fun formatViews(count: Long?): String {

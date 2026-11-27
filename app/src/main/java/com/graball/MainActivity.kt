@@ -2,94 +2,64 @@ package com.graball
 
 import android.Manifest
 import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
+import android.content.res.ColorStateList
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.text.Editable
-import android.text.TextWatcher
 import android.view.View
-import android.view.inputmethod.EditorInfo
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
+import android.view.animation.AccelerateInterpolator
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.Spinner
 import android.widget.TextView
-import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.animation.PathInterpolatorCompat
+import androidx.core.widget.ImageViewCompat
+import androidx.fragment.app.Fragment
 import com.graball.engine.AppUpdateChecker
-import com.graball.engine.DownloadPrefs
-import com.graball.engine.DownloadService
-import com.graball.engine.DownloadProgressBus
-import com.graball.engine.FastYouTubeDownloader
-import com.graball.engine.LinkDetector
-import com.graball.engine.LinkKind
-import com.graball.engine.RuntimePaths
-import com.graball.youtube.DownloadSheetHelper
-import com.graball.youtube.PlaylistPickerDialog
-import com.graball.youtube.YouTubeActivity
-import com.graball.youtube.YouTubePlaybackService
-import com.graball.youtube.YouTubePlayerActivity
-import com.graball.youtube.YtItem
-import java.io.File
 
+/**
+ * Single-Activity shell hosting Grab, Music, Downloads, and Settings as 4 cached
+ * Fragments above ONE rock-solid pinned Material 3 bottom navigation bar.
+ *
+ * Switching tabs runs a crisp Material 3 Fade-Through (subtle zoom + fade) on the
+ * content above the pinned bar plus an animated orange pill & icon tap bounce —
+ * with zero Activity IPC overhead and zero horizontal swipe tab switching.
+ */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var qualitySpinner: Spinner
-    private lateinit var audioOnlyCheck: CheckBox
-    private lateinit var playlistSpinner: Spinner
-    private lateinit var linkInput: EditText
-    private lateinit var clearLinkButton: TextView
-    private lateinit var grabPanel: LinearLayout
-    private lateinit var grabType: TextView
-    private lateinit var grabCloseButton: TextView
-    private lateinit var playlistRow: LinearLayout
-    private lateinit var grabQuickRow: LinearLayout
-    private lateinit var grabWatchButton: TextView
-    private lateinit var grabSecondButton: TextView
-    private lateinit var clipboardBanner: LinearLayout
-    private lateinit var clipboardLabel: TextView
-    private lateinit var clipboardPreview: TextView
-    private lateinit var clipboardActionBtn: TextView
-    private lateinit var clipboardDismissBtn: TextView
-    /** Top tabs (Search is this screen); kept to re-select Search on return. */
-    private lateinit var mainTabs: List<TextView>
-    /** What the open Grab panel holds; video panels force single. */
-    private var grabbedKind: LinkKind = LinkKind.VIDEO
-    private var detectedClipboardUrl: String? = null
-    private var dismissedClipboardUrl: String? = null
-
-    private val hintHandler = Handler(Looper.getMainLooper())
-    private val rotatingHints = listOf(
-        "Search YouTube…",
-        "Paste any video URL…",
-        "Search songs or playlists…"
-    )
-    private var hintIdx = 0
-    private val hintCycler = object : Runnable {
-        override fun run() {
-            if (::linkInput.isInitialized && linkInput.text.isNullOrEmpty() && !linkInput.hasFocus()) {
-                hintIdx = (hintIdx + 1) % rotatingHints.size
-                linkInput.animate().alpha(0.35f).setDuration(140L).withEndAction {
-                    linkInput.hint = rotatingHints[hintIdx]
-                    linkInput.animate().alpha(1f).setDuration(180L).start()
-                }.start()
-            }
-            hintHandler.postDelayed(this, 2800L)
-        }
+    interface TabFragment {
+        fun onTabSelected() {}
+        fun onTabUnselected() {}
+        fun handleBackPressed(): Boolean = false
     }
+
+    private data class NavSlot(
+        val index: Int,
+        val container: LinearLayout,
+        val pill: View,
+        val icon: ImageView,
+        val label: TextView
+    )
+
+    private lateinit var bottomNav: LinearLayout
+    private lateinit var bottomNavDivider: View
+    private lateinit var navSlots: List<NavSlot>
+
+    private var activeTab = TAB_GRAB
+    private var navAnimGeneration = 0
+
+    private val fadeThroughIn = PathInterpolatorCompat.create(0.2f, 0f, 0f, 1f)
+    private val fadeOutInterp = AccelerateInterpolator(1.2f)
+    private val pillExpandInterp = OvershootInterpolator(1.1f)
+    private val pillCollapseInterp = DecelerateInterpolator()
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -97,8 +67,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        // Android 13+ (API 33+) hides foreground download/music
-        // notifications unless POST_NOTIFICATIONS is granted.
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(
                 this, Manifest.permission.POST_NOTIFICATIONS
@@ -106,349 +75,320 @@ class MainActivity : AppCompatActivity() {
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        qualitySpinner = findViewById(R.id.qualitySpinner)
-        qualitySpinner.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            listOf("Best", "1080p", "720p", "480p", "360p")
-        ).apply {
-            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        }
-        audioOnlyCheck = findViewById(R.id.audioOnlyCheck)
-        playlistSpinner = findViewById(R.id.playlistSpinner)
-        playlistSpinner.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            listOf("Single video", "First 20", "First 30", "First 50", "All videos")
-        ).apply {
-            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        }
-        val linkInput = findViewById<EditText>(R.id.linkInput)
-        this.linkInput = linkInput
-        clearLinkButton = findViewById(R.id.clearLinkButton)
-        grabPanel = findViewById(R.id.grabPanel)
-        grabType = findViewById(R.id.grabType)
-        grabCloseButton = findViewById(R.id.grabCloseButton)
-        playlistRow = findViewById(R.id.playlistRow)
-        grabQuickRow = findViewById(R.id.grabQuickRow)
-        grabWatchButton = findViewById(R.id.grabWatchButton)
-        grabSecondButton = findViewById(R.id.grabSecondButton)
-        clipboardBanner = findViewById(R.id.clipboardBanner)
-        clipboardLabel = findViewById(R.id.clipboardLabel)
-        clipboardPreview = findViewById(R.id.clipboardPreview)
-        clipboardActionBtn = findViewById(R.id.clipboardActionBtn)
-        clipboardDismissBtn = findViewById(R.id.clipboardDismissBtn)
 
-        // Subtle orange-accented border on the Clipboard Auto-Detect pill
-        val density = resources.displayMetrics.density
-        clipboardBanner.background = GradientDrawable().apply {
-            cornerRadius = 12f * density
-            setColor(0xFF1F1B18.toInt())
-            setStroke((1f * density).toInt().coerceAtLeast(1), 0x55FF6B35)
-        }
-
-        fun triggerDetectedClipboardLink() {
-            val url = detectedClipboardUrl ?: return
-            dismissedClipboardUrl = url
-            clipboardBanner.visibility = View.GONE
-            val kind = LinkDetector.detect(url)
-            if (kind == LinkKind.UNKNOWN) return
-            openUnifiedDownloadSheet(url, kind, clearInputOnAction = false)
-        }
-        clipboardBanner.setOnClickListener { triggerDetectedClipboardLink() }
-        clipboardActionBtn.setOnClickListener { triggerDetectedClipboardLink() }
-        clipboardDismissBtn.setOnClickListener {
-            dismissedClipboardUrl = detectedClipboardUrl
-            clipboardBanner.visibility = View.GONE
-        }
-
-        fun dismissGrabPanel(clearText: Boolean) {
-            grabPanel.visibility = View.GONE
-            if (clearText && !linkInput.text.isNullOrEmpty()) {
-                linkInput.setText("")
-            }
-        }
-        clearLinkButton.setOnClickListener { dismissGrabPanel(clearText = true) }
-        grabCloseButton.setOnClickListener { dismissGrabPanel(clearText = true) }
-        linkInput.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                val hasText = !s.isNullOrEmpty()
-                clearLinkButton.visibility = if (hasText) View.VISIBLE else View.GONE
-                if (!hasText && grabPanel.visibility == View.VISIBLE) {
-                    grabPanel.visibility = View.GONE
-                }
-            }
-            override fun afterTextChanged(s: Editable?) {}
-        })
-
-        grabWatchButton.setOnClickListener {
-            val url = linkInput.text.toString().trim()
-            if (url.isEmpty()) return@setOnClickListener
-            val plId = FastYouTubeDownloader.extractPlaylistId(url)
-            val vidId = FastYouTubeDownloader.extractVideoId(url)
-            if (grabbedKind == LinkKind.PLAYLIST && !plId.isNullOrBlank()) {
-                startActivity(
-                    Intent(this, YouTubeActivity::class.java)
-                        .putExtra("start_playlist_id", plId)
-                )
-            } else if (!vidId.isNullOrBlank()) {
-                val item = YtItem(
-                    id = vidId,
-                    title = "YouTube Video",
-                    channel = "",
-                    thumbnailUrl = "https://i.ytimg.com/vi/$vidId/hqdefault.jpg"
-                )
-                YouTubePlaybackService.withService(this) { svc ->
-                    svc.playItem(item, audioOnly = false)
-                }
-                startActivity(
-                    Intent(this, YouTubePlayerActivity::class.java).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                        putExtra("restore_video", true)
-                    }
-                )
-            }
-        }
-
-        grabSecondButton.setOnClickListener {
-            val url = linkInput.text.toString().trim()
-            if (url.isEmpty()) return@setOnClickListener
-            if (grabbedKind == LinkKind.PLAYLIST && FastYouTubeDownloader.extractPlaylistId(url) != null) {
-                PlaylistPickerDialog.showForUrl(this, url)
-            } else {
-                val vidId = FastYouTubeDownloader.extractVideoId(url) ?: return@setOnClickListener
-                val item = YtItem(
-                    id = vidId,
-                    title = "YouTube Audio",
-                    channel = "",
-                    thumbnailUrl = "https://i.ytimg.com/vi/$vidId/hqdefault.jpg"
-                )
-                YouTubePlaybackService.withService(this) { svc ->
-                    svc.playItem(item, audioOnly = true)
-                }
-                startActivity(
-                    Intent(this, PlayerActivity::class.java).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                        putExtra("open_now_playing", true)
-                    }
-                )
-            }
-        }
-        // Option 4 chrome: tabs, site cards, bottom nav. Search is
-        // this screen; YouTube opens the in-app browser; More opens
-        // the supported-sites list.
-        mainTabs = listOf(
-            findViewById(R.id.tabSearch),
-            findViewById(R.id.tabYouTube),
-            findViewById(R.id.tabMusic),
-            findViewById(R.id.tabMore)
+        bottomNav = findViewById(R.id.bottomNav)
+        bottomNavDivider = findViewById(R.id.bottomNavDivider)
+        navSlots = listOf(
+            NavSlot(
+                TAB_GRAB,
+                findViewById(R.id.navGrab),
+                findViewById(R.id.navGrabPill),
+                findViewById(R.id.navGrabIcon),
+                findViewById(R.id.navGrabLabel)
+            ),
+            NavSlot(
+                TAB_MUSIC,
+                findViewById(R.id.navPlayer),
+                findViewById(R.id.navPlayerPill),
+                findViewById(R.id.navPlayerIcon),
+                findViewById(R.id.navPlayerLabel)
+            ),
+            NavSlot(
+                TAB_DOWNLOADS,
+                findViewById(R.id.navDownloads),
+                findViewById(R.id.navDownloadsPill),
+                findViewById(R.id.navDownloadsIcon),
+                findViewById(R.id.navDownloadsLabel)
+            ),
+            NavSlot(
+                TAB_SETTINGS,
+                findViewById(R.id.navSettings),
+                findViewById(R.id.navSettingsPill),
+                findViewById(R.id.navSettingsIcon),
+                findViewById(R.id.navSettingsLabel)
+            )
         )
-        selectTab(mainTabs[0])
-        mainTabs[1].setOnClickListener {
-            selectTab(mainTabs[1])
-            startActivity(Intent(this, YouTubeActivity::class.java))
-        }
-        mainTabs[2].setOnClickListener {
-            selectTab(mainTabs[2])
-            startActivity(
-                Intent(this, YouTubeActivity::class.java).putExtra("start_mode", "music")
-            )
-        }
-        mainTabs[3].setOnClickListener {
-            selectTab(mainTabs[3])
-            startActivity(Intent(this, SitesActivity::class.java))
-        }
-        findViewById<LinearLayout>(R.id.siteYoutube).setOnClickListener {
-            startActivity(Intent(this, YouTubeActivity::class.java))
-        }
-        findViewById<LinearLayout>(R.id.siteTiktok).setOnClickListener {
-            startActivity(
-                Intent(this, BrowseActivity::class.java).putExtra(
-                    "start_url", "https://www.tiktok.com"
-                )
-            )
-        }
-        findViewById<LinearLayout>(R.id.siteInstagram).setOnClickListener {
-            startActivity(
-                Intent(this, BrowseActivity::class.java).putExtra(
-                    "start_url", "https://www.instagram.com"
-                )
-            )
-        }
-        findViewById<LinearLayout>(R.id.siteFacebook).setOnClickListener {
-            startActivity(
-                Intent(this, BrowseActivity::class.java).putExtra(
-                    "start_url", "https://www.facebook.com"
-                )
-            )
-        }
-        findViewById<LinearLayout>(R.id.siteWhatsapp).setOnClickListener {
-            startActivity(Intent(this, StatusActivity::class.java))
-        }
-        findViewById<LinearLayout>(R.id.siteMore).setOnClickListener {
-            startActivity(Intent(this, SitesActivity::class.java))
-        }
-        findViewById<LinearLayout>(R.id.navDownloads).setOnClickListener {
-            NavHelper.switchTab(this, DownloadsActivity::class.java)
-        }
-        findViewById<LinearLayout>(R.id.navPlayer).setOnClickListener {
-            NavHelper.switchTab(this, PlayerActivity::class.java)
-        }
-        findViewById<LinearLayout>(R.id.navSettings).setOnClickListener {
-            NavHelper.switchTab(this, SettingsActivity::class.java)
-        }
-        fun handleSmartGrabOrSearch() {
-            var input = linkInput.text.toString().trim()
-            if (input.isEmpty()) {
-                // Empty box + a link on the clipboard: Grab pulls it
-                // in first, so the button is one tap, not two.
-                val clip = (getSystemService(Context.CLIPBOARD_SERVICE)
-                    as? ClipboardManager)?.primaryClip
-                    ?.getItemAt(0)?.coerceToText(this)?.toString() ?: ""
-                val found = Regex("https?://\\S+").find(clip)?.value
-                    ?.trimEnd('.', ',', ';', '!', '?', ')', ']')
-                if (found != null) {
-                    input = found
-                    linkInput.setText(input)
-                }
-            }
-            if (input.isEmpty()) {
-                Toast.makeText(this, "Type a search or paste a video link", Toast.LENGTH_SHORT).show()
-                return
-            }
-            val kind = LinkDetector.detect(input)
-            if (kind != LinkKind.UNKNOWN) {
-                dismissedClipboardUrl = input
-                clipboardBanner.visibility = View.GONE
-                openUnifiedDownloadSheet(input, kind, clearInputOnAction = true)
-            } else {
-                // Keywords detected -> jump directly into YouTube search!
-                grabPanel.visibility = android.view.View.GONE
-                startActivity(
-                    Intent(this, YouTubeActivity::class.java)
-                        .putExtra("start_query", input)
-                )
+
+        navSlots.forEach { slot ->
+            slot.container.setOnClickListener {
+                selectBottomTab(slot.index, animate = true)
             }
         }
-        findViewById<Button>(R.id.grabButton).setOnClickListener {
-            handleSmartGrabOrSearch()
-        }
-        linkInput.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_SEARCH ||
-                actionId == EditorInfo.IME_ACTION_GO ||
-                actionId == EditorInfo.IME_ACTION_DONE
-            ) {
-                handleSmartGrabOrSearch()
-                true
-            } else {
-                false
-            }
-        }
-        findViewById<Button>(R.id.downloadButton).setOnClickListener {
-            val url = linkInput.text.toString().trim()
-            if (url.isEmpty()) {
-                Toast.makeText(this, "Paste a video link first", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            // The panel decides the mode: a video panel is always
-            // single, whatever the (hidden) playlist spinner holds.
-            val playlistMode = if (grabbedKind == LinkKind.PLAYLIST) {
-                when (playlistSpinner.selectedItemPosition) {
-                    1 -> "20"
-                    2 -> "30"
-                    3 -> "50"
-                    4 -> "all"
-                    else -> "single"
-                }
-            } else {
-                "single"
-            }
-            if (playlistMode == "single" && url.contains("playlist?list=")) {
-                Toast.makeText(
-                    this,
-                    "That's a playlist — pick how many videos above",
-                    Toast.LENGTH_SHORT
-                ).show()
-                return@setOnClickListener
-            }
-            // A STABLE staging subdir per URL (not per tap): a re-tap
-            // after a network failure must land in the same dir, so
-            // yt-dlp finds the kept .part file and resumes.
-            val staging = RuntimePaths.stagingDirFor(this, url)
-            if (!staging.exists()) {
-                staging.mkdirs()
-            }
-            // Playlist downloads share one folder, so index the file
-            // names — same-title videos would otherwise overwrite.
-            // v0.7.5: a playlist lands in its own folder named after
-            // it (Downloads/GrabAll/<Playlist Title>), via the
-            // %(playlist_title)s template dir; singles stay flat.
-            val fileName = if (playlistMode == "single") {
-                "%(title)s.%(ext)s"
-            } else {
-                "%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s"
-            }
-            val template = File(staging, fileName).absolutePath
-            val maxHeight = when (qualitySpinner.selectedItemPosition) {
-                1 -> 1080
-                2 -> 720
-                3 -> 480
-                4 -> 360
-                else -> null
-            }
-            DownloadProgressBus.modes[url] = buildString {
-                if (audioOnlyCheck.isChecked) {
-                    append("Audio only")
-                } else {
-                    append(
-                        when (qualitySpinner.selectedItemPosition) {
-                            1 -> "1080p"
-                            2 -> "720p"
-                            3 -> "480p"
-                            4 -> "360p"
-                            else -> "Best"
-                        }
-                    )
-                }
-                when (playlistMode) {
-                    "20" -> append(" · First 20")
-                    "30" -> append(" · First 30")
-                    "50" -> append(" · First 50")
-                    "all" -> append(" · All videos")
-                }
-            }
-            // Remember these choices for the next panel — but a
-            // video download must not overwrite the playlist choice
-            // (see DownloadPrefs).
-            val saved = DownloadPrefs.load(this)
-            DownloadPrefs.save(
-                this,
-                DownloadPrefs.Choices(
-                    qualitySpinner.selectedItemPosition,
-                    audioOnlyCheck.isChecked,
-                    if (grabbedKind == LinkKind.PLAYLIST) {
-                        playlistSpinner.selectedItemPosition
-                    } else {
-                        saved.playlistPos
-                    }
-                )
-            )
-            DownloadService.startDownload(
-                this, url, template,
-                audioOnlyCheck.isChecked, maxHeight, playlistMode
-            )
-            // No row here anymore: the row is born on the Downloads
-            // screen, from the first progress update for this URL.
-            grabPanel.visibility = View.GONE
-            linkInput.setText("")
-            Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
-        }
-        handleShareIntent(intent)
+
+        val initialTab = savedInstanceState?.getInt(STATE_ACTIVE_TAB, TAB_GRAB)
+            ?: resolveTabFromIntent(intent)
+        activeTab = initialTab
+        ensureTabFragment(initialTab, showImmediately = true)
+        renderBottomNavState(initialTab, animate = false)
+        GrabAllApp.refreshFloatingBubble(this)
+
+        handleIncomingIntent(intent, isInitialCreate = true)
         maybeCheckAppUpdate()
     }
 
-    /** Silent periodic (every 6h) check against GrabAll's public Android release mirror. */
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt(STATE_ACTIVE_TAB, activeTab)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent, isInitialCreate = false)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && activeTab == TAB_GRAB) {
+            (findTabFragment(TAB_GRAB) as? GrabFragment)?.onHostWindowFocusGained()
+        }
+    }
+
+    fun isMusicTabActive(): Boolean = activeTab == TAB_MUSIC
+
+    /** Show or hide the pinned bottom bar (used when Music Now Playing / Lyrics goes full-screen). */
+    fun setBottomNavVisible(visible: Boolean) {
+        if (!::bottomNav.isInitialized) return
+        val vis = if (visible) View.VISIBLE else View.GONE
+        bottomNav.visibility = vis
+        bottomNavDivider.visibility = vis
+    }
+
+    /** Switch straight to the Music tab and deliver an audio/folder/Now-Playing intent. */
+    fun openMusicWithIntent(musicIntent: Intent) {
+        selectBottomTab(TAB_MUSIC, animate = true)
+        (findTabFragment(TAB_MUSIC) as? MusicFragment)?.handleMusicIntent(musicIntent)
+    }
+
+    /** Switch to one of the 4 bottom-nav tabs with Material 3 Fade-Through + pill bounce. */
+    fun selectBottomTab(targetTab: Int, animate: Boolean = true) {
+        if (targetTab !in TAB_GRAB..TAB_SETTINGS) return
+        if (targetTab == activeTab && findTabFragment(targetTab)?.isVisible == true) {
+            // Subtle tap feedback if tapping already-active tab
+            if (animate) animateIconBounce(navSlots[targetTab].icon)
+            return
+        }
+
+        val prevTab = activeTab
+        val oldFrag = findTabFragment(prevTab)
+        val newFrag = ensureTabFragment(targetTab, showImmediately = false)
+        activeTab = targetTab
+        setBottomNavVisible(true)
+        renderBottomNavState(targetTab, animate = animate)
+        GrabAllApp.refreshFloatingBubble(this)
+
+        val gen = ++navAnimGeneration
+        (oldFrag as? TabFragment)?.onTabUnselected()
+
+        val tx = supportFragmentManager.beginTransaction()
+        if (newFrag.isHidden) tx.show(newFrag)
+        if (!animate && oldFrag != null && oldFrag !== newFrag && !oldFrag.isHidden) {
+            tx.hide(oldFrag)
+        }
+        tx.commitNowAllowingStateLoss()
+
+        if (!animate || oldFrag == null || oldFrag === newFrag) {
+            newFrag.view?.let { v ->
+                v.animate().cancel()
+                v.alpha = 1f
+                v.scaleX = 1f
+                v.scaleY = 1f
+                v.translationY = 0f
+            }
+            (newFrag as? TabFragment)?.onTabSelected()
+            return
+        }
+
+        val dp = resources.displayMetrics.density
+        // Fade out outgoing tab quickly (90 ms) then hide cleanly
+        oldFrag.view?.let { oldView ->
+            oldView.animate().cancel()
+            oldView.animate()
+                .alpha(0f)
+                .setDuration(90L)
+                .setInterpolator(fadeOutInterp)
+                .withEndAction {
+                    if (isFinishing || isDestroyed) return@withEndAction
+                    if (activeTab != prevTab && oldFrag.isAdded && !oldFrag.isHidden) {
+                        supportFragmentManager.beginTransaction()
+                            .hide(oldFrag)
+                            .commitNowAllowingStateLoss()
+                    }
+                    oldView.alpha = 1f
+                }
+                .start()
+        }
+
+        // Material 3 Fade-Through enter on incoming tab: subtle 96.5% -> 100% zoom + 6dp rise + fade
+        newFrag.view?.let { newView ->
+            newView.animate().cancel()
+            newView.alpha = 0f
+            newView.scaleX = 0.965f
+            newView.scaleY = 0.965f
+            newView.translationY = 6f * dp
+            newView.bringToFront()
+            newView.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .translationY(0f)
+                .setDuration(175L)
+                .setInterpolator(fadeThroughIn)
+                .withEndAction {
+                    if (gen != navAnimGeneration) return@withEndAction
+                    newView.alpha = 1f
+                    newView.scaleX = 1f
+                    newView.scaleY = 1f
+                    newView.translationY = 0f
+                }
+                .start()
+        }
+
+        (newFrag as? TabFragment)?.onTabSelected()
+    }
+
+    private fun renderBottomNavState(selectedIndex: Int, animate: Boolean) {
+        val orange = ContextCompat.getColor(this, R.color.graball_orange)
+        val muted = ContextCompat.getColor(this, R.color.graball_tab_text)
+        navSlots.forEach { slot ->
+            val selected = slot.index == selectedIndex
+            ImageViewCompat.setImageTintList(
+                slot.icon,
+                ColorStateList.valueOf(if (selected) orange else muted)
+            )
+            slot.label.setTextColor(if (selected) orange else muted)
+            slot.label.setTypeface(null, if (selected) Typeface.BOLD else Typeface.NORMAL)
+
+            slot.pill.animate().cancel()
+            if (selected) {
+                if (animate) {
+                    slot.pill.scaleX = 0.45f
+                    slot.pill.alpha = 0f
+                    slot.pill.animate()
+                        .scaleX(1f)
+                        .alpha(1f)
+                        .setDuration(200L)
+                        .setInterpolator(pillExpandInterp)
+                        .start()
+                    animateIconBounce(slot.icon)
+                } else {
+                    slot.pill.scaleX = 1f
+                    slot.pill.alpha = 1f
+                }
+            } else {
+                if (animate && slot.pill.alpha > 0f) {
+                    slot.pill.animate()
+                        .scaleX(0.6f)
+                        .alpha(0f)
+                        .setDuration(110L)
+                        .setInterpolator(pillCollapseInterp)
+                        .start()
+                } else {
+                    slot.pill.scaleX = 1f
+                    slot.pill.alpha = 0f
+                }
+            }
+        }
+    }
+
+    private fun animateIconBounce(icon: ImageView) {
+        icon.animate().cancel()
+        icon.scaleX = 0.88f
+        icon.scaleY = 0.88f
+        icon.animate()
+            .scaleX(1.06f)
+            .scaleY(1.06f)
+            .setDuration(105L)
+            .withEndAction {
+                icon.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(90L)
+                    .start()
+            }
+            .start()
+    }
+
+    private fun tabTag(tabIndex: Int): String = "tab_$tabIndex"
+
+    private fun findTabFragment(tabIndex: Int): Fragment? =
+        supportFragmentManager.findFragmentByTag(tabTag(tabIndex))
+
+    private fun ensureTabFragment(tabIndex: Int, showImmediately: Boolean): Fragment {
+        findTabFragment(tabIndex)?.let { existing ->
+            if (showImmediately && existing.isHidden) {
+                supportFragmentManager.beginTransaction()
+                    .show(existing)
+                    .commitNowAllowingStateLoss()
+            }
+            return existing
+        }
+        val created: Fragment = when (tabIndex) {
+            TAB_MUSIC -> MusicFragment()
+            TAB_DOWNLOADS -> DownloadsFragment()
+            TAB_SETTINGS -> SettingsFragment()
+            else -> GrabFragment()
+        }
+        val tx = supportFragmentManager.beginTransaction()
+            .add(R.id.tabContainer, created, tabTag(tabIndex))
+        if (!showImmediately) {
+            tx.hide(created)
+        }
+        tx.commitNowAllowingStateLoss()
+        return created
+    }
+
+    private fun resolveTabFromIntent(intent: Intent?): Int {
+        if (intent == null) return TAB_GRAB
+        if (intent.action == Intent.ACTION_SEND) return TAB_GRAB
+        if (intent.action == Intent.ACTION_VIEW && intent.data != null) return TAB_MUSIC
+        if (intent.getBooleanExtra("open_now_playing", false) ||
+            !intent.getStringExtra(PlayerActivity.EXTRA_OPEN_FOLDER_PATH).isNullOrBlank() ||
+            !intent.getStringExtra(PlayerActivity.EXTRA_OPEN_FOLDER_NAME).isNullOrBlank()
+        ) {
+            return TAB_MUSIC
+        }
+        return intent.getIntExtra(EXTRA_TAB, TAB_GRAB).coerceIn(TAB_GRAB, TAB_SETTINGS)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?, isInitialCreate: Boolean) {
+        if (intent == null) return
+        val hasExplicitTab = intent.hasExtra(EXTRA_TAB)
+        val isShare = intent.action == Intent.ACTION_SEND
+        val isMusicPayload = (intent.action == Intent.ACTION_VIEW && intent.data != null) ||
+            intent.getBooleanExtra("open_now_playing", false) ||
+            !intent.getStringExtra(PlayerActivity.EXTRA_OPEN_FOLDER_PATH).isNullOrBlank() ||
+            !intent.getStringExtra(PlayerActivity.EXTRA_OPEN_FOLDER_NAME).isNullOrBlank()
+
+        if (isShare) {
+            selectBottomTab(TAB_GRAB, animate = !isInitialCreate)
+            (findTabFragment(TAB_GRAB) as? GrabFragment)?.handleShareIntent(intent)
+            return
+        }
+        if (isMusicPayload) {
+            selectBottomTab(TAB_MUSIC, animate = !isInitialCreate)
+            (findTabFragment(TAB_MUSIC) as? MusicFragment)?.handleMusicIntent(intent)
+            return
+        }
+        if (hasExplicitTab) {
+            val target = intent.getIntExtra(EXTRA_TAB, TAB_GRAB).coerceIn(TAB_GRAB, TAB_SETTINGS)
+            selectBottomTab(target, animate = !isInitialCreate)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        val current = findTabFragment(activeTab) as? TabFragment
+        if (current?.handleBackPressed() == true) {
+            return
+        }
+        if (activeTab != TAB_GRAB) {
+            selectBottomTab(TAB_GRAB, animate = true)
+            return
+        }
+        super.onBackPressed()
+    }
+
     private fun maybeCheckAppUpdate() {
         if (!AppUpdateChecker.shouldAutoCheck(this)) return
         Thread {
@@ -480,209 +420,19 @@ class MainActivity : AppCompatActivity() {
         }.apply { isDaemon = true }.start()
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleShareIntent(intent)
-    }
+    companion object {
+        const val TAB_GRAB = 0
+        const val TAB_MUSIC = 1
+        const val TAB_DOWNLOADS = 2
+        const val TAB_SETTINGS = 3
+        const val EXTRA_TAB = "graball_tab"
+        private const val STATE_ACTIVE_TAB = "state_active_tab"
 
-    /**
-     * Show the Grab panel for a link: the header says what was
-     * detected (video or playlist, plus a short preview), the
-     * playlist count only appears for playlists, and the spinners
-     * open on the user's last-used choices.
-     */
-    private fun showGrabPanel(url: String, kind: LinkKind) {
-        grabbedKind = kind
-        grabType.text = (if (kind == LinkKind.PLAYLIST) "Playlist" else "Video") +
-            " · " + LinkDetector.preview(url)
-        playlistRow.visibility = if (kind == LinkKind.PLAYLIST) {
-            android.view.View.VISIBLE
-        } else {
-            android.view.View.GONE
-        }
-        val isYt = FastYouTubeDownloader.isYouTubeUrl(url)
-        val hasYtPlaylist = isYt && FastYouTubeDownloader.extractPlaylistId(url) != null
-        val hasYtVideo = isYt && FastYouTubeDownloader.extractVideoId(url) != null
-        if (kind == LinkKind.PLAYLIST && hasYtPlaylist) {
-            grabQuickRow.visibility = android.view.View.VISIBLE
-            grabWatchButton.text = "▶ Watch Playlist"
-            grabSecondButton.text = "☑ Select Items"
-        } else if (hasYtVideo) {
-            grabQuickRow.visibility = android.view.View.VISIBLE
-            grabWatchButton.text = "▶ Watch Video"
-            grabSecondButton.text = "🎧 Listen Audio"
-        } else {
-            grabQuickRow.visibility = android.view.View.GONE
-        }
-        val prefs = DownloadPrefs.load(this)
-        qualitySpinner.setSelection(prefs.qualityPos)
-        audioOnlyCheck.isChecked = prefs.audioOnly
-        if (kind == LinkKind.PLAYLIST) {
-            playlistSpinner.setSelection(prefs.playlistPos)
-        }
-        grabPanel.visibility = android.view.View.VISIBLE
-    }
-
-    /**
-     * Route ANY supported video or playlist URL (YouTube, Facebook, TikTok,
-     * Instagram, X, Reddit, Vimeo, etc.) straight into GrabAll's modern
-     * Download Bottom Sheet with real resolutions and file sizes.
-     */
-    private fun openUnifiedDownloadSheet(
-        url: String,
-        kind: LinkKind,
-        clearInputOnAction: Boolean
-    ) {
-        grabPanel.visibility = View.GONE
-        DownloadSheetHelper.showForUrl(
-            context = this,
-            url = url,
-            kind = kind
-        ) {
-            if (clearInputOnAction && !linkInput.text.isNullOrEmpty()) {
-                linkInput.setText("")
+        fun createTabIntent(context: Context, tabIndex: Int): Intent {
+            return Intent(context, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra(EXTRA_TAB, tabIndex.coerceIn(TAB_GRAB, TAB_SETTINGS))
             }
         }
     }
-
-    /**
-     * Shared links land here from YouTube, Facebook, TikTok, Instagram, Chrome, etc.
-     * (ACTION_SEND, text/plain). Opens directly in the modern Download Bottom Sheet.
-     */
-    private fun handleShareIntent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) {
-            return
-        }
-        val shared = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
-        val url = Regex("https?://\\S+").find(shared)?.value
-            ?.trimEnd('.', ',', ';', '!', '?', ')', ']') ?: return
-        dismissedClipboardUrl = url
-        clipboardBanner.visibility = View.GONE
-        val kind = LinkDetector.detect(url)
-        if (kind == LinkKind.UNKNOWN) {
-            linkInput.setText(url)
-            return
-        }
-        linkInput.post {
-            if (!isFinishing && !isDestroyed) {
-                openUnifiedDownloadSheet(url, kind, clearInputOnAction = false)
-            }
-        }
-    }
-
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            checkClipboardForLink()
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        // Back from the browser: this screen is Search again, so the
-        // tab highlight returns with it.
-        if (::mainTabs.isInitialized) {
-            selectTab(mainTabs[0])
-        }
-        hintHandler.removeCallbacks(hintCycler)
-        hintHandler.postDelayed(hintCycler, 2800L)
-        if (hasWindowFocus()) {
-            checkClipboardForLink()
-        }
-    }
-
-    /**
-     * Inspect clipboard for a supported video/playlist URL and display a
-     * dismissible one-tap pill below the search bar (requires window focus on Android 10+).
-     */
-    private fun checkClipboardForLink() {
-        if (isFinishing || isDestroyed || !::clipboardBanner.isInitialized) return
-        if (grabPanel.visibility == View.VISIBLE) {
-            clipboardBanner.visibility = View.GONE
-            return
-        }
-        val clipText = try {
-            (getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager)
-                ?.primaryClip
-                ?.takeIf { it.itemCount > 0 }
-                ?.getItemAt(0)
-                ?.coerceToText(this)
-                ?.toString()
-                .orEmpty()
-        } catch (_: Exception) {
-            ""
-        }
-        val url = Regex("https?://\\S+").find(clipText)?.value
-            ?.trimEnd('.', ',', ';', '!', '?', ')', ']')
-        if (url.isNullOrBlank()) {
-            detectedClipboardUrl = null
-            clipboardBanner.visibility = View.GONE
-            return
-        }
-        val kind = LinkDetector.detect(url)
-        val currentInput = linkInput.text?.toString()?.trim().orEmpty()
-        if (kind == LinkKind.UNKNOWN || url == dismissedClipboardUrl || url == currentInput) {
-            clipboardBanner.visibility = View.GONE
-            return
-        }
-        detectedClipboardUrl = url
-        val lowerUrl = url.lowercase()
-        val isYt = FastYouTubeDownloader.isYouTubeUrl(url)
-        clipboardLabel.text = when {
-            isYt && kind == LinkKind.PLAYLIST -> "📋 YouTube playlist on clipboard"
-            isYt -> "📋 YouTube link on clipboard"
-            lowerUrl.contains("facebook.com") || lowerUrl.contains("fb.watch") -> "📋 Facebook link on clipboard"
-            lowerUrl.contains("tiktok.com") -> "📋 TikTok link on clipboard"
-            lowerUrl.contains("instagram.com") -> "📋 Instagram link on clipboard"
-            lowerUrl.contains("x.com") || lowerUrl.contains("twitter.com") -> "📋 X link on clipboard"
-            kind == LinkKind.PLAYLIST -> "📋 Playlist link on clipboard"
-            else -> "📋 Video link on clipboard"
-        }
-        clipboardPreview.text = LinkDetector.preview(url)
-        clipboardActionBtn.text = if (isYt) "Grab / Watch" else "Download"
-        clipboardBanner.visibility = View.VISIBLE
-    }
-
-    private val tabSwipe by lazy { NavHelper.TabSwipeHelper(this) }
-
-    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
-        if (tabSwipe.onDispatchTouchEvent(ev)) {
-            val cancel = android.view.MotionEvent.obtain(ev).apply {
-                action = android.view.MotionEvent.ACTION_CANCEL
-            }
-            super.dispatchTouchEvent(cancel)
-            cancel.recycle()
-            return true
-        }
-        return super.dispatchTouchEvent(ev)
-    }
-
-    @Suppress("DEPRECATION")
-    override fun onBackPressed() {
-        if (::grabPanel.isInitialized && grabPanel.visibility == View.VISIBLE) {
-            grabPanel.visibility = View.GONE
-            linkInput.setText("")
-            return
-        }
-        super.onBackPressed()
-    }
-
-    override fun onPause() {
-        hintHandler.removeCallbacks(hintCycler)
-        super.onPause()
-    }
-
-    /** Add a queue row for [url], or refresh it if one already exists. */
-    /** Highlight one top tab; the rest go dim. */
-    private fun selectTab(selected: TextView) {
-        mainTabs.forEach {
-            it.setBackgroundResource(android.R.color.transparent)
-            it.setTextColor(ContextCompat.getColor(this, R.color.graball_tab_text))
-            it.setTypeface(null, android.graphics.Typeface.NORMAL)
-        }
-        selected.setBackgroundResource(R.drawable.tab_selected)
-        selected.setTextColor(Color.BLACK)
-        selected.setTypeface(null, android.graphics.Typeface.BOLD)
-    }
-
 }

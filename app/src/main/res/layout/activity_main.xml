@@ -1,669 +1,215 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Option 4 (bold colorful) main screen: gradient header, tabs,
-     search bar, Quick Grab Sites grid, bottom nav. All
-     pre-redesign control IDs are preserved (linkInput, grabButton,
-     grabPanel, grabType, qualitySpinner, audioOnlyCheck, playlistRow,
-     playlistSpinner, downloadButton) so MainActivity's logic is
-     untouched. The old queue ScrollView is gone: the whole content
-     scrolls in contentScroll instead. The queue itself moved to the
-     Downloads screen in v0.6.0.
-     The Browse/Import buttons lived here until v0.5.9: Browse
-     duplicated the YouTube site card, and cookies import moved to
-     the Settings screen. -->
+<!-- Single-Activity shell hosting Grab, Music, Downloads & Settings as cached
+     Fragments above ONE rock-solid pinned Material 3 bottom navigation bar. -->
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/graball_bg">
 
-    <!-- Gradient header (option 4's orange-pink banner). -->
-    <LinearLayout
-        android:id="@+id/header"
+    <FrameLayout
+        android:id="@+id/tabContainer"
         android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:background="@drawable/header_gradient"
-        android:orientation="vertical"
-        android:padding="24dp"
+        android:layout_height="0dp"
         app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@id/bottomNavDivider"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
+        app:layout_constraintEnd_toEndOf="parent" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/app_name"
-            android:textColor="@color/graball_text"
-            android:textSize="32sp"
-            android:textStyle="bold" />
-    </LinearLayout>
+    <View
+        android:id="@+id/bottomNavDivider"
+        android:layout_width="0dp"
+        android:layout_height="1dp"
+        android:background="#1AFFFFFF"
+        app:layout_constraintBottom_toTopOf="@id/bottomNav"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Bottom nav: Grab is this screen; Downloads holds the
-         queue since v0.6.0; Settings is a real screen. -->
     <LinearLayout
         android:id="@+id/bottomNav"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:background="@color/graball_nav"
+        android:clipChildren="false"
+        android:clipToPadding="false"
         android:orientation="horizontal"
-        android:paddingTop="12dp"
-        android:paddingBottom="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="10dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
+        <!-- Grab Tab -->
         <LinearLayout
             android:id="@+id/navGrab"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clipChildren="false"
             android:gravity="center"
             android:orientation="vertical">
 
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_nav_grab"
-                android:tint="@color/graball_orange" />
+            <FrameLayout
+                android:layout_width="56dp"
+                android:layout_height="30dp"
+                android:clipChildren="false">
+
+                <View
+                    android:id="@+id/navGrabPill"
+                    android:layout_width="56dp"
+                    android:layout_height="30dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/nav_pill_active" />
+
+                <ImageView
+                    android:id="@+id/navGrabIcon"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_nav_grab"
+                    android:tint="@color/graball_orange" />
+            </FrameLayout>
 
             <TextView
+                android:id="@+id/navGrabLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
+                android:layout_marginTop="3dp"
                 android:text="@string/nav_grab"
                 android:textColor="@color/graball_orange"
-                android:textSize="12sp" />
+                android:textSize="11.5sp"
+                android:textStyle="bold" />
         </LinearLayout>
 
+        <!-- Music Tab -->
         <LinearLayout
             android:id="@+id/navPlayer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clipChildren="false"
             android:gravity="center"
             android:orientation="vertical">
 
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_nav_player"
-                android:tint="@color/graball_tab_text" />
+            <FrameLayout
+                android:layout_width="56dp"
+                android:layout_height="30dp"
+                android:clipChildren="false">
+
+                <View
+                    android:id="@+id/navPlayerPill"
+                    android:layout_width="56dp"
+                    android:layout_height="30dp"
+                    android:layout_gravity="center"
+                    android:alpha="0"
+                    android:background="@drawable/nav_pill_active" />
+
+                <ImageView
+                    android:id="@+id/navPlayerIcon"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_nav_player"
+                    android:tint="@color/graball_tab_text" />
+            </FrameLayout>
 
             <TextView
+                android:id="@+id/navPlayerLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
+                android:layout_marginTop="3dp"
                 android:text="@string/nav_player"
                 android:textColor="@color/graball_tab_text"
-                android:textSize="12sp" />
+                android:textSize="11.5sp" />
         </LinearLayout>
 
+        <!-- Downloads Tab -->
         <LinearLayout
             android:id="@+id/navDownloads"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clipChildren="false"
             android:gravity="center"
             android:orientation="vertical">
 
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_nav_downloads"
-                android:tint="@color/graball_tab_text" />
+            <FrameLayout
+                android:layout_width="56dp"
+                android:layout_height="30dp"
+                android:clipChildren="false">
+
+                <View
+                    android:id="@+id/navDownloadsPill"
+                    android:layout_width="56dp"
+                    android:layout_height="30dp"
+                    android:layout_gravity="center"
+                    android:alpha="0"
+                    android:background="@drawable/nav_pill_active" />
+
+                <ImageView
+                    android:id="@+id/navDownloadsIcon"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_nav_downloads"
+                    android:tint="@color/graball_tab_text" />
+            </FrameLayout>
 
             <TextView
+                android:id="@+id/navDownloadsLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
+                android:layout_marginTop="3dp"
                 android:text="@string/nav_downloads"
                 android:textColor="@color/graball_tab_text"
-                android:textSize="12sp" />
+                android:textSize="11.5sp" />
         </LinearLayout>
 
-
+        <!-- Settings Tab -->
         <LinearLayout
             android:id="@+id/navSettings"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clipChildren="false"
             android:gravity="center"
             android:orientation="vertical">
 
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_nav_settings"
-                android:tint="@color/graball_tab_text" />
+            <FrameLayout
+                android:layout_width="56dp"
+                android:layout_height="30dp"
+                android:clipChildren="false">
+
+                <View
+                    android:id="@+id/navSettingsPill"
+                    android:layout_width="56dp"
+                    android:layout_height="30dp"
+                    android:layout_gravity="center"
+                    android:alpha="0"
+                    android:background="@drawable/nav_pill_active" />
+
+                <ImageView
+                    android:id="@+id/navSettingsIcon"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_nav_settings"
+                    android:tint="@color/graball_tab_text" />
+            </FrameLayout>
 
             <TextView
+                android:id="@+id/navSettingsLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
+                android:layout_marginTop="3dp"
                 android:text="@string/nav_settings"
                 android:textColor="@color/graball_tab_text"
-                android:textSize="12sp" />
+                android:textSize="11.5sp" />
         </LinearLayout>
     </LinearLayout>
-
-    <ScrollView
-        android:id="@+id/contentScroll"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        app:layout_constraintTop_toBottomOf="@id/header"
-        app:layout_constraintBottom_toTopOf="@id/bottomNav"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
-            android:paddingTop="16dp"
-            android:paddingBottom="16dp">
-
-            <!-- Tabs: Search is this screen; YouTube opens the
-                 in-app browser; Music and More are coming soon. -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:id="@+id/tabSearch"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:background="@drawable/tab_selected"
-                    android:gravity="center"
-                    android:paddingTop="12dp"
-                    android:paddingBottom="12dp"
-                    android:text="@string/tab_search"
-                    android:textColor="#000000"
-                    android:textSize="15sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/tabYouTube"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:gravity="center"
-                    android:paddingTop="12dp"
-                    android:paddingBottom="12dp"
-                    android:text="@string/tab_youtube"
-                    android:textColor="@color/graball_tab_text"
-                    android:textSize="15sp" />
-
-                <TextView
-                    android:id="@+id/tabMusic"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:gravity="center"
-                    android:paddingTop="12dp"
-                    android:paddingBottom="12dp"
-                    android:text="@string/tab_music"
-                    android:textColor="@color/graball_tab_text"
-                    android:textSize="15sp" />
-
-                <TextView
-                    android:id="@+id/tabMore"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:gravity="center"
-                    android:paddingTop="12dp"
-                    android:paddingBottom="12dp"
-                    android:text="@string/tab_more"
-                    android:textColor="@color/graball_tab_text"
-                    android:textSize="15sp" />
-            </LinearLayout>
-
-            <!-- Link + Grab: the panel below only appears after Grab,
-                 with options that fit what the link actually is
-                 (video vs list). -->
-            <LinearLayout
-                android:id="@+id/linkRow"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:background="@drawable/input_bg"
-                android:orientation="horizontal"
-                android:paddingStart="16dp"
-                android:paddingTop="8dp"
-                android:paddingEnd="8dp"
-                android:paddingBottom="8dp">
-
-                <EditText
-                    android:id="@+id/linkInput"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_gravity="center_vertical"
-                    android:layout_weight="1"
-                    android:background="@null"
-                    android:ellipsize="end"
-                    android:hint="Search YouTube…"
-                    android:imeOptions="actionSearch"
-                    android:inputType="text"
-                    android:maxLines="1"
-                    android:paddingEnd="4dp"
-                    android:singleLine="true"
-                    android:textColor="@color/graball_text"
-                    android:textColorHint="@color/graball_tab_text"
-                    android:textSize="13sp" />
-
-                <TextView
-                    android:id="@+id/clearLinkButton"
-                    android:layout_width="32dp"
-                    android:layout_height="32dp"
-                    android:layout_gravity="center_vertical"
-                    android:layout_marginEnd="6dp"
-                    android:gravity="center"
-                    android:text="✕"
-                    android:textColor="@color/graball_tab_text"
-                    android:textSize="15sp"
-                    android:textStyle="bold"
-                    android:visibility="gone" />
-
-                <Button
-                    android:id="@+id/grabButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:background="@drawable/btn_orange"
-                    android:text="@string/grab"
-                    android:textColor="@color/graball_text"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <!-- Clipboard Auto-Detect Pill: appears automatically when a
-                 supported video/playlist link is copied from another app. -->
-            <LinearLayout
-                android:id="@+id/clipboardBanner"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:background="@drawable/card_bg"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingStart="12dp"
-                android:paddingTop="9dp"
-                android:paddingEnd="8dp"
-                android:paddingBottom="9dp"
-                android:visibility="gone">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical"
-                    android:paddingEnd="8dp">
-
-                    <TextView
-                        android:id="@+id/clipboardLabel"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:ellipsize="end"
-                        android:maxLines="1"
-                        android:text="📋 YouTube link detected"
-                        android:textColor="@color/graball_orange"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/clipboardPreview"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:ellipsize="end"
-                        android:maxLines="1"
-                        android:textColor="@color/graball_subtext"
-                        android:textSize="11.5sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:id="@+id/clipboardActionBtn"
-                    android:layout_width="wrap_content"
-                    android:layout_height="30dp"
-                    android:background="@drawable/yt_chip_selected"
-                    android:gravity="center"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="Grab"
-                    android:textColor="#FFFFFF"
-                    android:textSize="11.5sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/clipboardDismissBtn"
-                    android:layout_width="30dp"
-                    android:layout_height="30dp"
-                    android:layout_marginStart="4dp"
-                    android:gravity="center"
-                    android:text="✕"
-                    android:textColor="@color/graball_subtext"
-                    android:textSize="13sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/grabPanel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:background="@drawable/card_bg"
-                android:orientation="vertical"
-                android:padding="16dp"
-                android:visibility="gone">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:id="@+id/grabType"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:ellipsize="end"
-                        android:maxLines="1"
-                        android:textColor="@color/graball_text"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/grabCloseButton"
-                        android:layout_width="30dp"
-                        android:layout_height="30dp"
-                        android:layout_marginStart="8dp"
-                        android:background="@drawable/yt_chip_bg"
-                        android:gravity="center"
-                        android:text="✕"
-                        android:textColor="@color/graball_subtext"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:id="@+id/optionsRow"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:orientation="horizontal">
-
-                    <Spinner
-                        android:id="@+id/qualitySpinner"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1" />
-
-                    <CheckBox
-                        android:id="@+id/audioOnlyCheck"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/audio_only"
-                        android:textColor="@color/graball_text" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:id="@+id/playlistRow"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:orientation="horizontal">
-
-                    <Spinner
-                        android:id="@+id/playlistSpinner"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1" />
-                </LinearLayout>
-
-                <!-- YouTube Quick Actions: Watch Playlist / Select Items (or Watch Video / Listen Audio) -->
-                <LinearLayout
-                    android:id="@+id/grabQuickRow"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:orientation="horizontal"
-                    android:visibility="gone">
-
-                    <TextView
-                        android:id="@+id/grabWatchButton"
-                        android:layout_width="0dp"
-                        android:layout_height="38dp"
-                        android:layout_marginEnd="8dp"
-                        android:layout_weight="1"
-                        android:background="@drawable/yt_chip_bg"
-                        android:gravity="center"
-                        android:text="▶ Watch Playlist"
-                        android:textColor="@color/graball_text"
-                        android:textSize="12.5sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/grabSecondButton"
-                        android:layout_width="0dp"
-                        android:layout_height="38dp"
-                        android:layout_weight="1"
-                        android:background="@drawable/yt_chip_bg"
-                        android:gravity="center"
-                        android:text="☑ Select Items"
-                        android:textColor="@color/graball_orange"
-                        android:textSize="12.5sp"
-                        android:textStyle="bold" />
-                </LinearLayout>
-
-                <Button
-                    android:id="@+id/downloadButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="16dp"
-                    android:background="@drawable/btn_orange"
-                    android:text="@string/download"
-                    android:textColor="@color/graball_text"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <!-- Quick Grab Sites: a tap opens that site in the
-                 in-app browser. YouTube downloads from the browser;
-                 TikTok, Instagram and Facebook open for browsing
-                 (their downloads are not proven yet). WhatsApp opens
-                 the status saver, which is real since v0.6.2. -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
-                android:text="@string/quick_sites"
-                android:textColor="@color/graball_text"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:orientation="horizontal">
-
-                <LinearLayout
-                    android:id="@+id/siteYoutube"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_margin="4dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/site_card_bg"
-                    android:gravity="center"
-                    android:orientation="vertical"
-                    android:paddingTop="16dp"
-                    android:paddingBottom="16dp">
-
-                    <ImageView
-                        android:layout_width="40dp"
-                        android:layout_height="40dp"
-                        android:src="@drawable/ic_site_youtube" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="YouTube"
-                        android:textColor="@color/graball_text"
-                        android:textSize="14sp"
-                        android:lines="2"
-                        android:gravity="center" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:id="@+id/siteTiktok"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_margin="4dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/site_card_bg"
-                    android:gravity="center"
-                    android:orientation="vertical"
-                    android:paddingTop="16dp"
-                    android:paddingBottom="16dp">
-
-                    <ImageView
-                        android:layout_width="40dp"
-                        android:layout_height="40dp"
-                        android:src="@drawable/ic_site_tiktok" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="TikTok"
-                        android:textColor="@color/graball_text"
-                        android:textSize="14sp"
-                        android:lines="2"
-                        android:gravity="center" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:id="@+id/siteInstagram"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_margin="4dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/site_card_bg"
-                    android:gravity="center"
-                    android:orientation="vertical"
-                    android:paddingTop="16dp"
-                    android:paddingBottom="16dp">
-
-                    <ImageView
-                        android:layout_width="40dp"
-                        android:layout_height="40dp"
-                        android:src="@drawable/ic_site_instagram" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="Instagram"
-                        android:textColor="@color/graball_text"
-                        android:textSize="14sp"
-                        android:lines="2"
-                        android:gravity="center" />
-                </LinearLayout>
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:orientation="horizontal">
-
-                <LinearLayout
-                    android:id="@+id/siteFacebook"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_margin="4dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/site_card_bg"
-                    android:gravity="center"
-                    android:orientation="vertical"
-                    android:paddingTop="16dp"
-                    android:paddingBottom="16dp">
-
-                    <ImageView
-                        android:layout_width="40dp"
-                        android:layout_height="40dp"
-                        android:src="@drawable/ic_site_facebook" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="Facebook"
-                        android:textColor="@color/graball_text"
-                        android:textSize="14sp"
-                        android:lines="2"
-                        android:gravity="center" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:id="@+id/siteWhatsapp"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_margin="4dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/site_card_bg"
-                    android:gravity="center"
-                    android:orientation="vertical"
-                    android:paddingTop="16dp"
-                    android:paddingBottom="16dp">
-
-                    <ImageView
-                        android:layout_width="40dp"
-                        android:layout_height="40dp"
-                        android:src="@drawable/ic_site_whatsapp" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="WhatsApp Status"
-                        android:textColor="@color/graball_text"
-                        android:textSize="14sp"
-                        android:lines="2"
-                        android:gravity="center" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:id="@+id/siteMore"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_margin="4dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/site_card_bg"
-                    android:gravity="center"
-                    android:orientation="vertical"
-                    android:paddingTop="16dp"
-                    android:paddingBottom="16dp">
-
-                    <ImageView
-                        android:layout_width="40dp"
-                        android:layout_height="40dp"
-                        android:src="@android:drawable/ic_menu_add"
-                        android:tint="@color/graball_text" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="@string/tab_more"
-                        android:textColor="@color/graball_text"
-                        android:textSize="14sp"
-                        android:lines="2"
-                        android:gravity="center" />
-                </LinearLayout>
-            </LinearLayout>
-        </LinearLayout>
-    </ScrollView>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

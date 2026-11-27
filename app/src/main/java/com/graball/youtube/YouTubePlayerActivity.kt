@@ -630,7 +630,10 @@ class YouTubePlayerActivity : AppCompatActivity() {
             ?: info?.channel?.takeIf { it.isNotBlank() }
             ?: item?.channel.orEmpty()
         val viewsLabel = info?.viewCount?.takeIf { it.isNotBlank() } ?: item?.views.orEmpty()
-        videoMeta.text = listOf(viewsLabel, channelLabel)
+        val dateLabel = info?.publishDate?.takeIf { it.isNotBlank() }
+            ?: item?.publishedTime?.takeIf { it.isNotBlank() }
+            .orEmpty()
+        videoMeta.text = listOf(viewsLabel, dateLabel, channelLabel)
             .filter { it.isNotBlank() }
             .joinToString(" · ")
         if (channelLabel.isNotBlank()) {

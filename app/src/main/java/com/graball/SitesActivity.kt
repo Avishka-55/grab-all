@@ -52,10 +52,18 @@ class SitesActivity : AppCompatActivity() {
                     Intent(this, BrowseActivity::class.java).putExtra("start_url", url)
                 )
             }
+            @Suppress("DEPRECATION")
+            overridePendingTransition(R.anim.page_enter, R.anim.page_exit)
         }
         val more = TOTAL_EXTRACTORS - sites.size
         findViewById<TextView>(R.id.sitesMore).text = getString(
             R.string.sites_more, more, TOTAL_EXTRACTORS
         )
+    }
+
+    override fun finish() {
+        super.finish()
+        @Suppress("DEPRECATION")
+        overridePendingTransition(R.anim.page_pop_enter, R.anim.page_pop_exit)
     }
 }
