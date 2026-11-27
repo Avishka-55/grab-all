@@ -2825,6 +2825,13 @@ object YouTubeInnerTube {
         )
         val (raw, err) = runner.extractInfoJson("https://www.youtube.com/watch?v=$videoId")
         if (raw == null) {
+            if (err.contains("CANNOT LINK EXECUTABLE", ignoreCase = true)) {
+                Log.w(TAG, "yt-dlp fallback linker error: $err")
+                return ResolveResult(
+                    null,
+                    "Fallback video engine couldn't start on this device. Try signing in to YouTube or tap Retry."
+                )
+            }
             return ResolveResult(null, err.ifBlank { "yt-dlp failed to extract video" })
         }
         return try {

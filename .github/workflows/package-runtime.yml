@@ -431,7 +431,7 @@ jobs:
           CC="$NDK_BIN/armv7a-linux-androideabi21-clang" \
             AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
             CFLAGS="-I$PWD/../deps-install/openssl/include -I$PWD/../deps-install/libffi/include -I$PWD/../deps-install/xz/include" \
-            LDFLAGS="-L$PWD/../deps-install/openssl/lib -L$PWD/../deps-install/openssl/lib64 -L$PWD/../deps-install/libffi/lib -L$PWD/../deps-install/xz/lib" \
+            LDFLAGS="-L$PWD/../deps-install/openssl/lib -L$PWD/../deps-install/openssl/lib64 -L$PWD/../deps-install/libffi/lib -L$PWD/../deps-install/xz/lib -Wl,-rpath,\$ORIGIN -Wl,--enable-new-dtags" \
             ../cpython-target/configure \
             --host=armv7a-linux-androideabi \
             --build=x86_64-linux-gnu \
@@ -607,7 +607,7 @@ jobs:
           CC="$NDK_BIN/aarch64-linux-android21-clang" \
             AR="$NDK_BIN/llvm-ar" RANLIB="$NDK_BIN/llvm-ranlib" \
             CFLAGS="-I$PWD/../deps-install-64/openssl/include -I$PWD/../deps-install-64/libffi/include -I$PWD/../deps-install-64/xz/include" \
-            LDFLAGS="-L$PWD/../deps-install-64/openssl/lib -L$PWD/../deps-install-64/openssl/lib64 -L$PWD/../deps-install-64/libffi/lib -L$PWD/../deps-install-64/xz/lib -Wl,-z,max-page-size=16384" \
+            LDFLAGS="-L$PWD/../deps-install-64/openssl/lib -L$PWD/../deps-install-64/openssl/lib64 -L$PWD/../deps-install-64/libffi/lib -L$PWD/../deps-install-64/xz/lib -Wl,-z,max-page-size=16384 -Wl,-rpath,\$ORIGIN -Wl,--enable-new-dtags" \
             ../cpython-target/configure \
             --host=aarch64-linux-android \
             --build=x86_64-linux-gnu \
