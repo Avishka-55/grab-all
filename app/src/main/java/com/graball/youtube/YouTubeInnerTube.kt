@@ -741,6 +741,56 @@ object YouTubeInnerTube {
         fetchSignedInHomePage(context, continuationToken = null).items
 
     /**
+     * Fetches the signed-in Google / YouTube account's profile photo URL via
+     * `/youtubei/v1/account/account_menu` (lightweight ~3KB JSON). Returns null
+     * when signed out or unavailable.
+     */
+    fun fetchSignedInAccountAvatar(context: Context): String? {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context) ?: return null
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val body = JSONObject().apply {
+            put("context", webContext(cfg))
+            put("deviceTheme", "DEVICE_THEME_SUPPORTED")
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/account/account_menu?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders,
+            webConfig = cfg,
+            callTimeoutMs = 6_000L
+        ) ?: return null
+        return findAccountPhotoUrl(root)
+    }
+
+    private fun findAccountPhotoUrl(node: Any?): String? {
+        when (node) {
+            is JSONObject -> {
+                if (node.has("accountPhoto")) {
+                    val u = pickThumb(node.optJSONObject("accountPhoto"))
+                    if (u.startsWith("http")) return u
+                }
+                if (node.has("topbarMenuButtonRenderer")) {
+                    val btn = node.optJSONObject("topbarMenuButtonRenderer")
+                    val u = pickThumb(btn?.optJSONObject("avatar"))
+                    if (u.startsWith("http")) return u
+                }
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    if (k in AD_KEYS) continue
+                    findAccountPhotoUrl(node.opt(k))?.let { return it }
+                }
+            }
+            is JSONArray -> {
+                for (i in 0 until node.length()) {
+                    findAccountPhotoUrl(node.opt(i))?.let { return it }
+                }
+            }
+        }
+        return null
+    }
+
+    /**
      * Paginated "For You" feed:
      * - When signed in to YouTube (and not in Music filter), loads the user's
      *   real authenticated YouTube Home feed (`FEwhat_to_watch`) with a live

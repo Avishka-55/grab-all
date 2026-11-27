@@ -20,7 +20,26 @@ object YouTubeStore {
     private const val KEY_BG_AUDIO_SCREEN_OFF = "bg_audio_screen_off"
     private const val KEY_DEFAULT_HEIGHT = "default_height" // 0 = Auto
     private const val KEY_SPEED = "playback_speed"
-    private const val KEY_CAPTION_TEXT_SIZE = "caption_text_size" // 0 = Small, 1 = Medium, 2 = Large
+    private const val KEY_CAPTION_TEXT_SIZE = "caption_text_size"
+    private const val KEY_ACCOUNT_AVATAR_URL = "account_avatar_url"
+    private const val KEY_ACCOUNT_AVATAR_KEY = "account_avatar_key"
+
+    fun getCachedAccountAvatar(context: Context, accountKey: String): String? {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs.getString(KEY_ACCOUNT_AVATAR_KEY, null) != accountKey) return null
+        return prefs.getString(KEY_ACCOUNT_AVATAR_URL, null)?.takeIf { it.startsWith("http") }
+    }
+
+    fun saveCachedAccountAvatar(context: Context, accountKey: String, avatarUrl: String?) {
+        val editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        if (avatarUrl.isNullOrBlank()) {
+            editor.remove(KEY_ACCOUNT_AVATAR_URL).remove(KEY_ACCOUNT_AVATAR_KEY)
+        } else {
+            editor.putString(KEY_ACCOUNT_AVATAR_KEY, accountKey)
+                .putString(KEY_ACCOUNT_AVATAR_URL, avatarUrl)
+        }
+        editor.apply()
+    } // 0 = Small, 1 = Medium, 2 = Large
     private const val MAX_HISTORY = 100
     private const val MAX_BOOKMARKS = 200
     private const val MAX_SEARCHES = 15

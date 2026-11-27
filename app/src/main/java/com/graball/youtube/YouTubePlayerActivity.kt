@@ -140,6 +140,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private var isScreenLocked = false
     private var isHolding2x = false
     private var inPipMode = false
+    private var exitingPipForAudioOnly = false
     private var isControllerVisible = false
     private var explicitBgAudioRequested = false
     private var normalPlayerHeightPx = 0
@@ -195,6 +196,21 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private val pipReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
+                ACTION_PIP_AUDIO_ONLY -> {
+                    exitingPipForAudioOnly = true
+                    explicitBgAudioRequested = true
+                    YouTubePlaybackService.instance?.setAudioOnlyMode(true)
+                    Toast.makeText(
+                        this@YouTubePlayerActivity,
+                        "🎧 Continuing in Audio Only mode",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        finishAndRemoveTask()
+                    } else {
+                        finish()
+                    }
+                }
                 ACTION_PIP_PLAY_PAUSE -> YouTubePlaybackService.instance?.togglePlayPause()
                 ACTION_PIP_NEXT -> YouTubePlaybackService.instance?.playNext()
             }
@@ -521,9 +537,10 @@ class YouTubePlayerActivity : AppCompatActivity() {
         if (wasInPip && !isInPictureInPictureMode &&
             !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
         ) {
-            if (activeInstance === this) {
+            if (!exitingPipForAudioOnly && activeInstance === this) {
                 YouTubePlaybackService.instance?.stopPlayback()
             }
+            exitingPipForAudioOnly = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 finishAndRemoveTask()
             } else {
@@ -1240,18 +1257,28 @@ class YouTubePlayerActivity : AppCompatActivity() {
         } else {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
+        val audioOnlyIntent = PendingIntent.getBroadcast(
+            this, 3, Intent(ACTION_PIP_AUDIO_ONLY).setPackage(packageName), flags
+        )
         val playPauseIntent = PendingIntent.getBroadcast(
             this, 1, Intent(ACTION_PIP_PLAY_PAUSE).setPackage(packageName), flags
         )
         val nextIntent = PendingIntent.getBroadcast(
             this, 2, Intent(ACTION_PIP_NEXT).setPackage(packageName), flags
         )
+        val audioOnlyIcon = Icon.createWithResource(this, R.drawable.ic_pip_audio)
         val playPauseIcon = Icon.createWithResource(
             this,
             if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
         )
         val nextIcon = Icon.createWithResource(this, android.R.drawable.ic_media_next)
         val actions = listOf(
+            RemoteAction(
+                audioOnlyIcon,
+                "Audio Only",
+                "Switch to background audio only",
+                audioOnlyIntent
+            ),
             RemoteAction(
                 playPauseIcon,
                 if (isPlaying) "Pause" else "Play",
@@ -2072,6 +2099,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
     private fun registerPipReceiver() {
         val filter = IntentFilter().apply {
+            addAction(ACTION_PIP_AUDIO_ONLY)
             addAction(ACTION_PIP_PLAY_PAUSE)
             addAction(ACTION_PIP_NEXT)
         }
@@ -2084,6 +2112,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val ACTION_PIP_AUDIO_ONLY = "com.graball.youtube.PIP_AUDIO_ONLY"
         private const val ACTION_PIP_PLAY_PAUSE = "com.graball.youtube.PIP_PLAY_PAUSE"
         private const val ACTION_PIP_NEXT = "com.graball.youtube.PIP_NEXT"
 

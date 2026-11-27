@@ -77,17 +77,22 @@
                 android:textStyle="bold" />
         </LinearLayout>
 
-        <TextView
+        <FrameLayout
             android:id="@+id/ytAccountBtn"
             android:layout_width="38dp"
             android:layout_height="38dp"
             android:layout_marginStart="8dp"
             android:background="@drawable/yt_chip_bg"
-            android:gravity="center"
-            android:text="👤"
-            android:textColor="@color/graball_text"
-            android:textSize="15sp"
-            android:textStyle="bold" />
+            android:padding="2dp">
+
+            <ImageView
+                android:id="@+id/ytAccountAvatar"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:contentDescription="Account"
+                android:scaleType="centerCrop"
+                android:src="@drawable/ic_account_circle" />
+        </FrameLayout>
     </LinearLayout>
 
     <!-- Live Search Autocomplete Dropdown (shown while typing) -->
@@ -313,7 +318,7 @@
             android:orientation="horizontal" />
     </HorizontalScrollView>
 
-    <!-- Playlist Header Banner (visible when browsing inside a playlist) -->
+    <!-- Playlist Header Banner (visible when browsing or loading a playlist) -->
     <LinearLayout
         android:id="@+id/ytPlaylistBanner"
         android:layout_width="match_parent"
@@ -326,23 +331,48 @@
         android:padding="12dp"
         android:visibility="gone">
 
-        <TextView
-            android:id="@+id/ytPlaylistTitle"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="2"
-            android:textColor="@color/graball_text"
-            android:textSize="15sp"
-            android:textStyle="bold" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <TextView
-            android:id="@+id/ytPlaylistMeta"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:textColor="@color/graball_subtext"
-            android:textSize="12sp" />
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:paddingEnd="8dp">
+
+                <TextView
+                    android:id="@+id/ytPlaylistTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="2"
+                    android:textColor="@color/graball_text"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/ytPlaylistMeta"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:textColor="@color/graball_subtext"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/ytPlaylistClose"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:background="@drawable/yt_chip_bg"
+                android:gravity="center"
+                android:text="✕"
+                android:textColor="@color/graball_subtext"
+                android:textSize="13sp" />
+        </LinearLayout>
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -353,84 +383,71 @@
             <TextView
                 android:id="@+id/ytPlaylistPlayAll"
                 android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_marginEnd="6dp"
+                android:layout_height="38dp"
+                android:layout_marginEnd="8dp"
                 android:layout_weight="1"
                 android:background="@drawable/yt_chip_bg"
                 android:gravity="center"
                 android:text="▶ Play All"
                 android:textColor="@color/graball_text"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/ytPlaylistSelect"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_marginEnd="6dp"
-                android:layout_weight="1"
-                android:background="@drawable/yt_chip_bg"
-                android:gravity="center"
-                android:text="☑ Select"
-                android:textColor="@color/graball_orange"
-                android:textSize="12sp"
+                android:textSize="13sp"
                 android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/ytPlaylistDownload"
                 android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_marginEnd="6dp"
+                android:layout_height="38dp"
                 android:layout_weight="1"
                 android:background="@drawable/yt_chip_selected"
                 android:gravity="center"
-                android:text="⬇ All"
+                android:text="⬇ Download"
                 android:textColor="@color/graball_text"
-                android:textSize="12sp"
+                android:textSize="13sp"
                 android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/ytPlaylistClose"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
-                android:background="@drawable/yt_chip_bg"
-                android:gravity="center"
-                android:text="✕"
-                android:textColor="@color/graball_subtext"
-                android:textSize="14sp" />
         </LinearLayout>
     </LinearLayout>
 
-    <!-- Subtle Pull-to-Refresh / Background Refresh Status Pill -->
-    <TextView
-        android:id="@+id/ytRefreshBanner"
+    <!-- Whisper-thin background sync line (shown silently while cached feed refreshes) -->
+    <ProgressBar
+        android:id="@+id/ytSyncProgress"
+        style="?android:attr/progressBarStyleHorizontal"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:background="#1E2036"
-        android:gravity="center"
-        android:paddingTop="5dp"
-        android:paddingBottom="5dp"
-        android:text="Refreshing recommendations…"
-        android:textColor="@color/graball_orange"
-        android:textSize="11.5sp"
-        android:textStyle="bold"
+        android:layout_height="2dp"
+        android:indeterminate="true"
+        android:indeterminateTint="@color/graball_orange"
         android:visibility="gone" />
 
-    <!-- Main List Area -->
+    <!-- Main List Area with Native Material SwipeRefreshLayout + Skeleton Loader -->
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
 
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/ytList"
+        <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+            android:id="@+id/ytSwipeRefresh"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/ytList"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipToPadding="false"
+                android:paddingStart="12dp"
+                android:paddingTop="8dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="12dp" />
+        </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+
+        <LinearLayout
+            android:id="@+id/ytSkeletonList"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:clipToPadding="false"
+            android:orientation="vertical"
             android:paddingStart="12dp"
-            android:paddingTop="8dp"
+            android:paddingTop="10dp"
             android:paddingEnd="12dp"
-            android:paddingBottom="12dp" />
+            android:visibility="gone" />
 
         <ProgressBar
             android:id="@+id/ytLoading"

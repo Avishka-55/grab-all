@@ -1,7 +1,12 @@
 package com.graball.youtube
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.app.AlertDialog
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.Outline
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -9,9 +14,11 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewOutlineProvider
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -22,6 +29,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import com.graball.BrowseActivity
 import com.graball.LoginActivity
 import com.graball.R
@@ -52,7 +60,8 @@ class YouTubeActivity : AppCompatActivity() {
 
     private lateinit var searchInput: EditText
     private lateinit var searchClear: TextView
-    private lateinit var accountBtn: TextView
+    private lateinit var accountBtn: FrameLayout
+    private lateinit var accountAvatar: ImageView
     private lateinit var suggestionsBox: LinearLayout
     private lateinit var recentRow: HorizontalScrollView
     private lateinit var recentContainer: LinearLayout
@@ -61,13 +70,21 @@ class YouTubeActivity : AppCompatActivity() {
     private lateinit var chipWatchLater: TextView
     private lateinit var topicRow: HorizontalScrollView
     private lateinit var topicContainer: LinearLayout
-    private lateinit var refreshBanner: TextView
+    private lateinit var syncProgress: ProgressBar
+    private lateinit var swipeRefresh: SwipeRefreshLayout
+    private lateinit var skeletonList: LinearLayout
     private lateinit var playlistBanner: LinearLayout
     private lateinit var playlistTitle: TextView
     private lateinit var playlistMeta: TextView
+    private lateinit var playlistPlayAllBtn: TextView
+    private lateinit var playlistDownloadBtn: TextView
     private lateinit var recycler: RecyclerView
     private lateinit var loading: ProgressBar
     private lateinit var emptyView: TextView
+    private var skeletonPulseAnim: ObjectAnimator? = null
+    private var loadedAvatarUrl: String? = null
+    private var isFetchingAccountAvatar = false
+    private var isOpeningPlaylist = false
 
     // Mini-player views
     private lateinit var miniBar: LinearLayout
@@ -119,6 +136,13 @@ class YouTubeActivity : AppCompatActivity() {
         searchInput = findViewById(R.id.ytSearchInput)
         searchClear = findViewById(R.id.ytSearchClear)
         accountBtn = findViewById(R.id.ytAccountBtn)
+        accountAvatar = findViewById(R.id.ytAccountAvatar)
+        accountAvatar.outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) {
+                outline.setOval(0, 0, view.width, view.height)
+            }
+        }
+        accountAvatar.clipToOutline = true
         suggestionsBox = findViewById(R.id.ytSuggestionsBox)
         recentRow = findViewById(R.id.ytRecentRow)
         recentContainer = findViewById(R.id.ytRecentContainer)
@@ -127,13 +151,19 @@ class YouTubeActivity : AppCompatActivity() {
         chipWatchLater = findViewById(R.id.chipWatchLater)
         topicRow = findViewById(R.id.ytTopicRow)
         topicContainer = findViewById(R.id.ytTopicContainer)
-        refreshBanner = findViewById(R.id.ytRefreshBanner)
+        syncProgress = findViewById(R.id.ytSyncProgress)
+        swipeRefresh = findViewById(R.id.ytSwipeRefresh)
+        skeletonList = findViewById(R.id.ytSkeletonList)
         playlistBanner = findViewById(R.id.ytPlaylistBanner)
         playlistTitle = findViewById(R.id.ytPlaylistTitle)
         playlistMeta = findViewById(R.id.ytPlaylistMeta)
+        playlistPlayAllBtn = findViewById(R.id.ytPlaylistPlayAll)
+        playlistDownloadBtn = findViewById(R.id.ytPlaylistDownload)
         recycler = findViewById(R.id.ytList)
         loading = findViewById(R.id.ytLoading)
         emptyView = findViewById(R.id.ytEmpty)
+        ThumbnailLoader.init(this)
+        buildSkeletonRows()
 
         miniBar = findViewById(R.id.miniPlayerBar)
         miniThumb = findViewById(R.id.miniThumb)
@@ -256,7 +286,7 @@ class YouTubeActivity : AppCompatActivity() {
             loadSignedInSpecialFeed(SignedInFeedMode.WATCH_LATER)
         }
 
-        findViewById<TextView>(R.id.ytPlaylistPlayAll).setOnClickListener {
+        playlistPlayAllBtn.setOnClickListener {
             val pl = openPlaylist ?: return@setOnClickListener
             if (pl.items.isNotEmpty()) {
                 YouTubePlaybackService.withService(this) { svc ->
@@ -265,20 +295,9 @@ class YouTubeActivity : AppCompatActivity() {
                 openPlayerScreen()
             }
         }
-        findViewById<TextView>(R.id.ytPlaylistSelect).setOnClickListener {
+        playlistDownloadBtn.setOnClickListener {
             val pl = openPlaylist ?: return@setOnClickListener
-            PlaylistPickerDialog.show(this, pl)
-        }
-        findViewById<TextView>(R.id.ytPlaylistDownload).setOnClickListener {
-            val pl = openPlaylist ?: return@setOnClickListener
-            val plItem = YtItem(
-                id = pl.playlistId,
-                title = pl.title,
-                channel = pl.channel,
-                isPlaylist = true,
-                videoCount = "${pl.items.size} videos"
-            )
-            DownloadSheetHelper.show(this, plItem)
+            PlaylistPickerDialog.show(this, pl, initialSelectMode = false)
         }
         findViewById<TextView>(R.id.ytPlaylistClose).setOnClickListener {
             closePlaylistView()
@@ -452,10 +471,37 @@ class YouTubeActivity : AppCompatActivity() {
 
     private fun refreshAccountButton() {
         val signedIn = isSignedInToYouTube()
-        accountBtn.text = if (signedIn) "✓" else "👤"
-        accountBtn.setBackgroundResource(
-            if (signedIn) R.drawable.yt_chip_selected else R.drawable.yt_chip_bg
-        )
+        if (!signedIn) {
+            loadedAvatarUrl = null
+            accountBtn.setBackgroundResource(R.drawable.yt_chip_bg)
+            accountAvatar.setImageResource(R.drawable.ic_account_circle)
+            return
+        }
+        accountBtn.setBackgroundResource(R.drawable.yt_avatar_ring)
+        val fp = currentAccountFingerprint()
+        val cachedUrl = YouTubeStore.getCachedAccountAvatar(this, fp)
+        if (!cachedUrl.isNullOrBlank()) {
+            if (loadedAvatarUrl != cachedUrl) {
+                loadedAvatarUrl = cachedUrl
+                ThumbnailLoader.load(cachedUrl, accountAvatar, targetWidthPx = 128)
+            }
+            return
+        }
+        accountAvatar.setImageResource(R.drawable.ic_account_circle)
+        if (isFetchingAccountAvatar) return
+        isFetchingAccountAvatar = true
+        suggestIo.execute {
+            val url = YouTubeInnerTube.fetchSignedInAccountAvatar(applicationContext)
+            runOnUiThread {
+                isFetchingAccountAvatar = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (!url.isNullOrBlank() && currentAccountFingerprint() == fp) {
+                    YouTubeStore.saveCachedAccountAvatar(applicationContext, fp, url)
+                    loadedAvatarUrl = url
+                    ThumbnailLoader.load(url, accountAvatar, targetWidthPx = 128)
+                }
+            }
+        }
     }
 
     private fun onAccountButtonTapped() {
@@ -492,6 +538,8 @@ class YouTubeActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         suggestRunnable?.let { mainHandler.removeCallbacks(it) }
+        skeletonPulseAnim?.cancel()
+        skeletonPulseAnim = null
         io.shutdownNow()
         suggestIo.shutdownNow()
         super.onDestroy()
@@ -505,7 +553,7 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun handleBackNavigation(): Boolean {
-        if (openPlaylist != null) {
+        if (openPlaylist != null || isOpeningPlaylist) {
             closePlaylistView()
             return true
         }
@@ -534,8 +582,11 @@ class YouTubeActivity : AppCompatActivity() {
 
     private fun selectTab(tab: Tab) {
         currentTab = tab
+        isOpeningPlaylist = false
         openPlaylist = null
+        setPlaylistSkeletonVisible(false)
         playlistBanner.visibility = View.GONE
+        updateSwipeRefreshEnabled()
         tabViews.forEach { (t, view) ->
             val selected = t == tab
             view.setBackgroundResource(
@@ -579,61 +630,119 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun setupPullToRefresh() {
-        val thresholdPx = 68f * resources.displayMetrics.density
-        var pullStartY = -1f
-        var pullReady = false
+        swipeRefresh.setProgressBackgroundColorSchemeColor(Color.parseColor("#22243A"))
+        swipeRefresh.setColorSchemeColors(
+            ContextCompat.getColor(this, R.color.graball_orange),
+            Color.parseColor("#FF9E75")
+        )
+        swipeRefresh.setOnRefreshListener {
+            refreshCurrentExploreFeed()
+        }
         recycler.setOnTouchListener { _, event ->
             if (event.actionMasked == MotionEvent.ACTION_DOWN && searchInput.hasFocus()) {
                 searchInput.clearFocus()
                 hideKeyboard()
                 recentRow.visibility = View.GONE
             }
-            val canRefresh = currentTab == Tab.EXPLORE && openPlaylist == null
-            if (!canRefresh) {
-                pullStartY = -1f
-                pullReady = false
-                return@setOnTouchListener false
-            }
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    if (!recycler.canScrollVertically(-1)) {
-                        pullStartY = event.y
-                    } else {
-                        pullStartY = -1f
-                    }
-                    pullReady = false
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    if (pullStartY < 0f && !recycler.canScrollVertically(-1)) {
-                        pullStartY = event.y
-                    }
-                    if (pullStartY >= 0f && !recycler.canScrollVertically(-1)) {
-                        val dy = event.y - pullStartY
-                        if (dy > thresholdPx) {
-                            pullReady = true
-                            refreshBanner.text = "↑ Release to refresh feed"
-                            refreshBanner.visibility = View.VISIBLE
-                        } else if (dy > thresholdPx * 0.35f) {
-                            pullReady = false
-                            refreshBanner.text = "↓ Pull to refresh"
-                            refreshBanner.visibility = View.VISIBLE
-                        }
-                    }
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val trigger = pullReady && event.actionMasked == MotionEvent.ACTION_UP
-                    pullStartY = -1f
-                    pullReady = false
-                    if (trigger) {
-                        refreshCurrentExploreFeed()
-                    } else if (refreshBanner.text.toString().contains("Pull") ||
-                        refreshBanner.text.toString().contains("Release")
-                    ) {
-                        refreshBanner.visibility = View.GONE
-                    }
-                }
-            }
             false
+        }
+    }
+
+    private fun updateSwipeRefreshEnabled() {
+        if (!::swipeRefresh.isInitialized) return
+        val enabled = (currentTab == Tab.EXPLORE || currentTab == Tab.BOOKMARKS) &&
+            openPlaylist == null &&
+            !isOpeningPlaylist
+        swipeRefresh.isEnabled = enabled
+        if (!enabled && swipeRefresh.isRefreshing) {
+            swipeRefresh.isRefreshing = false
+        }
+    }
+
+    private fun buildSkeletonRows() {
+        val dp = resources.displayMetrics.density
+        fun d(v: Int) = (v * dp).toInt()
+        skeletonList.removeAllViews()
+        repeat(6) {
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(d(10), d(10), d(10), d(10))
+                setBackgroundResource(R.drawable.card_bg)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = d(10) }
+            }
+            val thumb = View(this).apply {
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#24263B"))
+                    cornerRadius = 8 * dp
+                }
+                layoutParams = LinearLayout.LayoutParams(d(120), d(68)).apply {
+                    marginEnd = d(12)
+                }
+            }
+            val textCol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val line1 = View(this).apply {
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#2A2D45"))
+                    cornerRadius = 5 * dp
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    d(13)
+                ).apply { topMargin = d(4) }
+            }
+            val line2 = View(this).apply {
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#24263B"))
+                    cornerRadius = 5 * dp
+                }
+                layoutParams = LinearLayout.LayoutParams(d(150), d(11)).apply {
+                    topMargin = d(8)
+                }
+            }
+            val line3 = View(this).apply {
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#1E2034"))
+                    cornerRadius = 4 * dp
+                }
+                layoutParams = LinearLayout.LayoutParams(d(100), d(9)).apply {
+                    topMargin = d(8)
+                }
+            }
+            textCol.addView(line1)
+            textCol.addView(line2)
+            textCol.addView(line3)
+            card.addView(thumb)
+            card.addView(textCol)
+            skeletonList.addView(card)
+        }
+    }
+
+    private fun setPlaylistSkeletonVisible(visible: Boolean) {
+        if (!::skeletonList.isInitialized) return
+        if (visible) {
+            recycler.visibility = View.INVISIBLE
+            loading.visibility = View.GONE
+            emptyView.visibility = View.GONE
+            skeletonList.visibility = View.VISIBLE
+            skeletonPulseAnim?.cancel()
+            skeletonPulseAnim = ObjectAnimator.ofFloat(skeletonList, View.ALPHA, 0.42f, 0.92f).apply {
+                duration = 700L
+                repeatMode = ValueAnimator.REVERSE
+                repeatCount = ValueAnimator.INFINITE
+                start()
+            }
+        } else {
+            skeletonPulseAnim?.cancel()
+            skeletonPulseAnim = null
+            skeletonList.alpha = 1f
+            skeletonList.visibility = View.GONE
+            recycler.visibility = View.VISIBLE
         }
     }
 
@@ -984,16 +1093,18 @@ class YouTubeActivity : AppCompatActivity() {
         exploreContinuation = null
         isLoadingMoreExplore = false
         playlistBanner.visibility = View.GONE
-        refreshBanner.visibility = View.GONE
+        syncProgress.visibility = View.GONE
+        updateSwipeRefreshEnabled()
         updateFilterChipStyles()
         syncCardStyleForCurrentView()
-        setLoading(true)
+        setLoading(!swipeRefresh.isRefreshing)
         val filter = currentFilter
         io.execute {
             val page = YouTubeInnerTube.searchPaged(query, filter, continuationToken = null)
             runOnUiThread {
                 if (gen != requestGen || isFinishing) return@runOnUiThread
                 setLoading(false)
+                swipeRefresh.isRefreshing = false
                 lastExploreItems = page.items.toMutableList()
                 exploreContinuation = page.continuationToken
                 showItems(page.items, "No results for \"$query\"")
@@ -1011,15 +1122,17 @@ class YouTubeActivity : AppCompatActivity() {
             pagingMode = PagingMode.NONE
             exploreContinuation = null
             isLoadingMoreExplore = false
-            refreshBanner.visibility = View.GONE
+            syncProgress.visibility = View.GONE
+            updateSwipeRefreshEnabled()
             updateTopicChipsVisibility()
             syncCardStyleForCurrentView()
-            setLoading(true)
+            setLoading(!swipeRefresh.isRefreshing)
             io.execute {
                 val results = YouTubeInnerTube.explorePlaylists()
                 runOnUiThread {
                     if (gen != requestGen || isFinishing) return@runOnUiThread
                     setLoading(false)
+                    swipeRefresh.isRefreshing = false
                     lastExploreItems = results.toMutableList()
                     if (currentTab == Tab.EXPLORE && openPlaylist == null) {
                         showItems(results, "Search above to find any YouTube playlist")
@@ -1069,18 +1182,18 @@ class YouTubeActivity : AppCompatActivity() {
             }
         }
 
+        updateSwipeRefreshEnabled()
         if (showedCache) {
             setLoading(false)
-            refreshBanner.text = "Refreshing recommendations…"
-            refreshBanner.visibility = View.VISIBLE
+            syncProgress.visibility = View.VISIBLE
         } else {
-            refreshBanner.visibility = if (forceNetworkRefresh) {
-                refreshBanner.text = "Refreshing recommendations…"
-                View.VISIBLE
+            syncProgress.visibility = View.GONE
+            if (forceNetworkRefresh && lastExploreItems.isNotEmpty()) {
+                swipeRefresh.isRefreshing = true
+                setLoading(false)
             } else {
-                View.GONE
+                setLoading(true)
             }
-            setLoading(!forceNetworkRefresh || lastExploreItems.isEmpty())
         }
 
         val knownMusicToken = homeTopicChips.firstOrNull {
@@ -1150,7 +1263,8 @@ class YouTubeActivity : AppCompatActivity() {
             runOnUiThread {
                 if (gen != requestGen || isFinishing) return@runOnUiThread
                 setLoading(false)
-                refreshBanner.visibility = View.GONE
+                syncProgress.visibility = View.GONE
+                swipeRefresh.isRefreshing = false
                 if (page.items.isNotEmpty() || !showedCache) {
                     lastExploreItems = page.items.toMutableList()
                     exploreContinuation = page.continuationToken
@@ -1180,14 +1294,15 @@ class YouTubeActivity : AppCompatActivity() {
         pagingMode = PagingMode.HOME
         exploreContinuation = null
         isLoadingMoreExplore = false
-        refreshBanner.visibility = View.GONE
+        syncProgress.visibility = View.GONE
         syncCardStyleForCurrentView()
-        setLoading(true)
+        setLoading(!swipeRefresh.isRefreshing)
         io.execute {
             val page = YouTubeInnerTube.fetchSignedInHomePage(applicationContext, continuationToken = token)
             runOnUiThread {
                 if (gen != requestGen || isFinishing) return@runOnUiThread
                 setLoading(false)
+                swipeRefresh.isRefreshing = false
                 lastExploreItems = page.items.toMutableList()
                 exploreContinuation = page.continuationToken
                 if (currentTab == Tab.EXPLORE && openPlaylist == null) {
@@ -1201,7 +1316,8 @@ class YouTubeActivity : AppCompatActivity() {
         val gen = ++requestGen
         openPlaylist = null
         playlistBanner.visibility = View.GONE
-        refreshBanner.visibility = View.GONE
+        syncProgress.visibility = View.GONE
+        updateSwipeRefreshEnabled()
         pagingMode = when (mode) {
             SignedInFeedMode.SUBSCRIPTIONS -> PagingMode.SUBSCRIPTIONS
             SignedInFeedMode.WATCH_LATER -> PagingMode.WATCH_LATER
@@ -1210,7 +1326,7 @@ class YouTubeActivity : AppCompatActivity() {
         exploreContinuation = null
         isLoadingMoreExplore = false
         syncCardStyleForCurrentView()
-        setLoading(true)
+        setLoading(!swipeRefresh.isRefreshing)
         io.execute {
             val page = when (mode) {
                 SignedInFeedMode.SUBSCRIPTIONS -> YouTubeInnerTube.fetchSubscriptionsPage(applicationContext)
@@ -1220,6 +1336,7 @@ class YouTubeActivity : AppCompatActivity() {
             runOnUiThread {
                 if (gen != requestGen || isFinishing) return@runOnUiThread
                 setLoading(false)
+                swipeRefresh.isRefreshing = false
                 lastExploreItems = page.items.toMutableList()
                 exploreContinuation = page.continuationToken
                 val emptyMsg = when (mode) {
@@ -1312,34 +1429,60 @@ class YouTubeActivity : AppCompatActivity() {
 
     private fun openPlaylistItems(playlistItem: YtItem) {
         val gen = ++requestGen
-        setLoading(true)
+        isOpeningPlaylist = true
+        openPlaylist = null
+        filterRow.visibility = View.GONE
+        topicRow.visibility = View.GONE
+        syncProgress.visibility = View.GONE
+        swipeRefresh.isRefreshing = false
+        updateSwipeRefreshEnabled()
+
+        // Instant optimistic open: show Playlist Header immediately + pulsing skeleton cards
+        playlistBanner.visibility = View.VISIBLE
+        playlistTitle.text = playlistItem.title.ifBlank { "Playlist" }
+        playlistMeta.text = listOf(playlistItem.channel, playlistItem.videoCount.ifBlank { "Loading tracks…" })
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+        playlistPlayAllBtn.isEnabled = false
+        playlistDownloadBtn.isEnabled = false
+        playlistPlayAllBtn.alpha = 0.45f
+        playlistDownloadBtn.alpha = 0.45f
+        setPlaylistSkeletonVisible(true)
+
         io.execute {
             val details = YouTubeInnerTube.fetchPlaylist(playlistItem.id)
             runOnUiThread {
                 if (gen != requestGen || isFinishing) return@runOnUiThread
-                setLoading(false)
+                isOpeningPlaylist = false
+                setPlaylistSkeletonVisible(false)
                 if (details == null || details.items.isEmpty()) {
                     Toast.makeText(this, "Couldn't load playlist", Toast.LENGTH_SHORT).show()
+                    closePlaylistView()
                     return@runOnUiThread
                 }
                 openPlaylist = details
-                filterRow.visibility = View.GONE
-                topicRow.visibility = View.GONE
-                refreshBanner.visibility = View.GONE
                 syncCardStyleForCurrentView()
                 playlistBanner.visibility = View.VISIBLE
                 playlistTitle.text = details.title
                 playlistMeta.text = listOf(details.channel, "${details.items.size} videos")
                     .filter { it.isNotBlank() }
                     .joinToString(" · ")
+                playlistPlayAllBtn.isEnabled = true
+                playlistDownloadBtn.isEnabled = true
+                playlistPlayAllBtn.alpha = 1f
+                playlistDownloadBtn.alpha = 1f
                 showItems(details.items, "Playlist is empty")
             }
         }
     }
 
     private fun closePlaylistView() {
+        ++requestGen
+        isOpeningPlaylist = false
         openPlaylist = null
+        setPlaylistSkeletonVisible(false)
         playlistBanner.visibility = View.GONE
+        updateSwipeRefreshEnabled()
         if (currentTab == Tab.EXPLORE) {
             updateFilterRowVisibility()
             updateTopicChipsVisibility()
@@ -1425,7 +1568,11 @@ class YouTubeActivity : AppCompatActivity() {
 
     private fun setLoading(busy: Boolean) {
         loading.visibility = if (busy) View.VISIBLE else View.GONE
-        if (busy) emptyView.visibility = View.GONE
+        if (busy) {
+            emptyView.visibility = View.GONE
+        } else if (::swipeRefresh.isInitialized && swipeRefresh.isRefreshing) {
+            swipeRefresh.isRefreshing = false
+        }
     }
 
     private fun updateMiniPlayer(state: YouTubePlaybackState) {
