@@ -1,6 +1,9 @@
 package com.graball.engine
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.Build
 import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -10,6 +13,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipFile
 
 /**
@@ -17,12 +21,11 @@ import java.util.zip.ZipFile
  * - Stable:  yt-dlp/yt-dlp
  * - Nightly: yt-dlp/yt-dlp-nightly-builds
  *
- * Downloads the official ~3 MB pure-Python zipapp (which includes yt_dlp +
- * yt_dlp_ejs and zero native .so files, so it works identically on 32-bit,
- * 64-bit, Android 5-16, and targetSdk 34+ W^X). Verifies ZIP integrity AND
- * live-runs `python yt-dlp.tmp --version` before swapping it in atomically.
- * Falls back to bundled Python/OpenSSL 3.2 + certifi on old Android 5-6
- * devices if the system TLS stack fails.
+ * Includes:
+ * - Zero-rate-limit `/releases/latest` redirect fallback when GitHub API returns 403.
+ * - Safe background auto-update (default ON): Wi-Fi only, Stable channel only,
+ *   once every 7 days, and only when no downloads are active.
+ * - ZIP integrity + live `python yt-dlp.tmp --version` verification before atomic swap.
  */
 object YtDlpUpdater {
 
@@ -30,9 +33,15 @@ object YtDlpUpdater {
     private const val PREFS = "graball_ytdlp_updater"
     private const val KEY_CHANNEL = "channel"
     private const val KEY_INSTALLED_VER = "installed_version"
+    private const val KEY_AUTO_UPDATE = "auto_update_wifi"
+    private const val KEY_LAST_AUTO_CHECK = "last_auto_check_ms"
+
+    private const val AUTO_CHECK_INTERVAL_MS = 7L * 24L * 60L * 60L * 1000L // 7 days
 
     const val CHANNEL_STABLE = "stable"
     const val CHANNEL_NIGHTLY = "nightly"
+
+    private val updateInFlight = AtomicBoolean(false)
 
     data class UpdateResult(
         val ok: Boolean,
@@ -57,6 +66,16 @@ object YtDlpUpdater {
             .apply()
     }
 
+    fun isAutoUpdateEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AUTO_UPDATE, true)
+
+    fun setAutoUpdateEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_AUTO_UPDATE, enabled)
+            .apply()
+    }
+
     fun isUsingOverride(context: Context): Boolean {
         val f = RuntimePaths.updatedYtDlpScript(context)
         return f.isFile && f.length() > 100_000L
@@ -68,6 +87,52 @@ object YtDlpUpdater {
             prefs.getString(KEY_INSTALLED_VER, null)?.takeIf { it.isNotBlank() }?.let { return it }
         }
         return "2026.10.26 (bundled)"
+    }
+
+    /**
+     * Silent background auto-update with strict guardrails:
+     * - Enabled in Settings (default ON)
+     * - Unmetered Wi-Fi connection only
+     * - At most once every 7 days
+     * - Only when no downloads are currently active
+     * - Always uses Stable channel so Nightly regressions never surprise the user
+     *
+     * Call off the main thread.
+     */
+    fun maybeAutoUpdateInBackground(context: Context) {
+        if (!isAutoUpdateEnabled(context)) return
+        if (DownloadProgressBus.activeCount() > 0) return
+        if (!isOnWifi(context)) return
+
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val last = prefs.getLong(KEY_LAST_AUTO_CHECK, 0L)
+        if (System.currentTimeMillis() - last < AUTO_CHECK_INTERVAL_MS) return
+
+        // Mark checked before network work so retries wait until next cycle
+        prefs.edit().putLong(KEY_LAST_AUTO_CHECK, System.currentTimeMillis()).apply()
+
+        val res = checkAndUpdate(context, forceChannel = CHANNEL_STABLE)
+        Log.i(TAG, "Background yt-dlp auto-check finished: ${res.message}")
+    }
+
+    private fun isOnWifi(context: Context): Boolean {
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val net = cm.activeNetwork ?: return false
+                val caps = cm.getNetworkCapabilities(net) ?: return false
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            } else {
+                @Suppress("DEPRECATION")
+                val info = cm.activeNetworkInfo
+                @Suppress("DEPRECATION")
+                info != null && info.isConnected && info.type == ConnectivityManager.TYPE_WIFI
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /** Query the active yt-dlp's live `--version`. Call off main thread. */
@@ -106,12 +171,28 @@ object YtDlpUpdater {
      */
     fun checkAndUpdate(
         context: Context,
+        forceChannel: String? = null,
         onStatus: ((String) -> Unit)? = null
+    ): UpdateResult {
+        if (!updateInFlight.compareAndSet(false, true)) {
+            return UpdateResult(false, false, getCachedVersion(context), "Update already in progress")
+        }
+        return try {
+            checkAndUpdateInternal(context, forceChannel, onStatus)
+        } finally {
+            updateInFlight.set(false)
+        }
+    }
+
+    private fun checkAndUpdateInternal(
+        context: Context,
+        forceChannel: String?,
+        onStatus: ((String) -> Unit)?
     ): UpdateResult {
         if (!RuntimeExtractor.extractIfNeeded(context, DownloadService.RUNTIME_VERSION)) {
             return UpdateResult(false, false, "", RuntimeExtractor.lastError ?: "Runtime setup failed")
         }
-        val channel = getChannel(context)
+        val channel = forceChannel ?: getChannel(context)
         val repo = if (channel == CHANNEL_NIGHTLY) {
             "yt-dlp/yt-dlp-nightly-builds"
         } else {
@@ -119,40 +200,20 @@ object YtDlpUpdater {
         }
         onStatus?.invoke("Checking $repo…")
 
-        val apiUrl = "https://api.github.com/repos/$repo/releases/latest"
-        val releaseJsonStr = fetchText(context, apiUrl)
+        val resolved = resolveLatestRelease(context, repo)
             ?: return UpdateResult(false, false, "", "Could not reach GitHub — check internet connection")
 
-        val release = try {
-            JSONObject(releaseJsonStr)
-        } catch (e: Exception) {
-            return UpdateResult(false, false, "", "Invalid GitHub response")
-        }
-
-        val latestTag = release.optString("tag_name").trim()
-        if (latestTag.isBlank()) {
-            return UpdateResult(false, false, "", "No release tag found")
-        }
+        val latestTag = resolved.first
+        val downloadUrl = resolved.second
 
         val currentVersion = probeInstalledVersion(context)?.trim().orEmpty()
         if (currentVersion.isNotBlank() && normalizeVersion(currentVersion) == normalizeVersion(latestTag)) {
             return UpdateResult(true, false, currentVersion, "Already up to date ($currentVersion)")
         }
 
-        // Find the pure-Python `yt-dlp` zipapp asset
-        val assets = release.optJSONArray("assets")
-        var downloadUrl: String? = null
-        if (assets != null) {
-            for (i in 0 until assets.length()) {
-                val a = assets.optJSONObject(i) ?: continue
-                if (a.optString("name") == "yt-dlp") {
-                    downloadUrl = a.optString("browser_download_url")
-                    break
-                }
-            }
-        }
-        if (downloadUrl.isNullOrBlank()) {
-            downloadUrl = "https://github.com/$repo/releases/download/$latestTag/yt-dlp"
+        // Bail before touching active binary if a download started mid-check
+        if (forceChannel != null && DownloadProgressBus.activeCount() > 0) {
+            return UpdateResult(false, false, currentVersion, "Skipped while download is active")
         }
 
         onStatus?.invoke("Downloading yt-dlp $latestTag…")
@@ -192,6 +253,11 @@ object YtDlpUpdater {
             return UpdateResult(false, false, currentVersion, "Verification failed — keeping current version")
         }
 
+        if (forceChannel != null && DownloadProgressBus.activeCount() > 0) {
+            tmp.delete()
+            return UpdateResult(false, false, currentVersion, "Deferred swap while download is active")
+        }
+
         if (target.exists()) target.delete()
         if (!tmp.renameTo(target)) {
             tmp.copyTo(target, overwrite = true)
@@ -208,6 +274,64 @@ object YtDlpUpdater {
             version = verifiedVersion,
             message = "Updated yt-dlp to $verifiedVersion ✓"
         )
+    }
+
+    /**
+     * Resolves `(latestTag, downloadUrl)` via GitHub's zero-rate-limit `/releases/latest`
+     * redirect first, falling back to the JSON API (with Python TLS fallback for Android 5-6).
+     */
+    private fun resolveLatestRelease(context: Context, repo: String): Pair<String, String>? {
+        // 1. Fast zero-rate-limit redirect probe
+        try {
+            val req = Request.Builder()
+                .url("https://github.com/$repo/releases/latest")
+                .header("User-Agent", "GrabAll-Android")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val finalUrl = resp.request.url.toString()
+                    val idx = finalUrl.indexOf("/releases/tag/")
+                    if (idx >= 0) {
+                        val tag = finalUrl.substring(idx + "/releases/tag/".length)
+                            .substringBefore('?')
+                            .substringBefore('#')
+                            .trim()
+                        if (tag.isNotBlank()) {
+                            return tag to "https://github.com/$repo/releases/download/$tag/yt-dlp"
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Redirect probe failed, trying GitHub API: ${e.message}")
+        }
+
+        // 2. Fallback to GitHub Releases API (with Python TLS fallback for old Android)
+        val apiUrl = "https://api.github.com/repos/$repo/releases/latest"
+        val releaseJsonStr = fetchText(context, apiUrl) ?: return null
+        val release = try {
+            JSONObject(releaseJsonStr)
+        } catch (_: Exception) {
+            return null
+        }
+        val latestTag = release.optString("tag_name").trim()
+        if (latestTag.isBlank()) return null
+
+        var downloadUrl: String? = null
+        val assets = release.optJSONArray("assets")
+        if (assets != null) {
+            for (i in 0 until assets.length()) {
+                val a = assets.optJSONObject(i) ?: continue
+                if (a.optString("name") == "yt-dlp") {
+                    downloadUrl = a.optString("browser_download_url")
+                    break
+                }
+            }
+        }
+        if (downloadUrl.isNullOrBlank()) {
+            downloadUrl = "https://github.com/$repo/releases/download/$latestTag/yt-dlp"
+        }
+        return latestTag to downloadUrl
     }
 
     private fun isValidYtDlpZipapp(file: File): Boolean {
@@ -238,7 +362,6 @@ object YtDlpUpdater {
         } catch (e: Exception) {
             Log.w(TAG, "OkHttp fetch failed, trying Python TLS fallback: ${e.message}")
         }
-        // Fallback for old Android 5-6 devices with expired system TLS certs
         return fetchViaPython(context, url, destFile = null)
     }
 

@@ -1,15 +1,15 @@
 package com.graball
 
 import android.Manifest
-import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Typeface
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
@@ -24,6 +24,7 @@ import androidx.core.view.animation.PathInterpolatorCompat
 import androidx.core.widget.ImageViewCompat
 import androidx.fragment.app.Fragment
 import com.graball.engine.AppUpdateChecker
+import com.graball.engine.YtDlpUpdater
 
 /**
  * Single-Activity shell hosting Grab, Music, Downloads, and Settings as 4 cached
@@ -51,6 +52,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var bottomNav: LinearLayout
     private lateinit var bottomNavDivider: View
+    private lateinit var navSettingsDot: View
     private lateinit var navSlots: List<NavSlot>
 
     private var activeTab = TAB_GRAB
@@ -78,6 +80,7 @@ class MainActivity : AppCompatActivity() {
 
         bottomNav = findViewById(R.id.bottomNav)
         bottomNavDivider = findViewById(R.id.bottomNavDivider)
+        navSettingsDot = findViewById(R.id.navSettingsDot)
         navSlots = listOf(
             NavSlot(
                 TAB_GRAB,
@@ -123,7 +126,9 @@ class MainActivity : AppCompatActivity() {
         GrabAllApp.refreshFloatingBubble(this)
 
         handleIncomingIntent(intent, isInitialCreate = true)
+        refreshSettingsUpdateDot()
         maybeCheckAppUpdate()
+        scheduleBackgroundYtDlpAutoUpdate()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -374,6 +379,15 @@ class MainActivity : AppCompatActivity() {
             val target = intent.getIntExtra(EXTRA_TAB, TAB_GRAB).coerceIn(TAB_GRAB, TAB_SETTINGS)
             selectBottomTab(target, animate = !isInitialCreate)
         }
+        if (intent.getBooleanExtra(EXTRA_OPEN_UPDATE, false)) {
+            intent.removeExtra(EXTRA_OPEN_UPDATE)
+            selectBottomTab(TAB_SETTINGS, animate = !isInitialCreate)
+            Handler(Looper.getMainLooper()).post {
+                if (!isFinishing && !isDestroyed) {
+                    (findTabFragment(TAB_SETTINGS) as? SettingsFragment)?.openAvailableUpdateSheet()
+                }
+            }
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -389,35 +403,34 @@ class MainActivity : AppCompatActivity() {
         super.onBackPressed()
     }
 
+    fun refreshSettingsUpdateDot() {
+        if (!::navSettingsDot.isInitialized) return
+        val hasUpdate = AppUpdateChecker.hasCachedUpdate(this)
+        navSettingsDot.visibility = if (hasUpdate) View.VISIBLE else View.GONE
+    }
+
     private fun maybeCheckAppUpdate() {
         if (!AppUpdateChecker.shouldAutoCheck(this)) return
         Thread {
             val release = AppUpdateChecker.check(applicationContext, markChecked = true)
             if (release != null && release.isNewer) {
-                runOnUiThread {
-                    if (isFinishing || isDestroyed) return@runOnUiThread
-                    val sizeStr = if (release.sizeBytes > 0) {
-                        String.format(" (%.1f MB)", release.sizeBytes / (1024.0 * 1024.0))
-                    } else {
-                        ""
-                    }
-                    AlertDialog.Builder(this)
-                        .setTitle("GrabAll v${release.version} Available")
-                        .setMessage(
-                            "A newer Android version of GrabAll is ready$sizeStr.\n" +
-                                "Current: v${release.currentVersion} → New: v${release.version}"
-                        )
-                        .setPositiveButton("Download APK") { _, _ ->
-                            try {
-                                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(release.apkUrl)))
-                            } catch (_: Exception) {
-                            }
-                        }
-                        .setNegativeButton("Later", null)
-                        .show()
-                }
+                AppUpdateChecker.notifyOnceIfEligible(applicationContext, release)
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                refreshSettingsUpdateDot()
+                (findTabFragment(TAB_SETTINGS) as? SettingsFragment)?.refreshUpdateRow()
             }
         }.apply { isDaemon = true }.start()
+    }
+
+    private fun scheduleBackgroundYtDlpAutoUpdate() {
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            Thread {
+                YtDlpUpdater.maybeAutoUpdateInBackground(applicationContext)
+            }.apply { isDaemon = true }.start()
+        }, 3500L)
     }
 
     companion object {
@@ -426,12 +439,21 @@ class MainActivity : AppCompatActivity() {
         const val TAB_DOWNLOADS = 2
         const val TAB_SETTINGS = 3
         const val EXTRA_TAB = "graball_tab"
+        const val EXTRA_OPEN_UPDATE = "graball_open_update"
         private const val STATE_ACTIVE_TAB = "state_active_tab"
 
         fun createTabIntent(context: Context, tabIndex: Int): Intent {
             return Intent(context, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 putExtra(EXTRA_TAB, tabIndex.coerceIn(TAB_GRAB, TAB_SETTINGS))
+            }
+        }
+
+        fun createUpdateIntent(context: Context): Intent {
+            return Intent(context, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra(EXTRA_TAB, TAB_SETTINGS)
+                putExtra(EXTRA_OPEN_UPDATE, true)
             }
         }
     }

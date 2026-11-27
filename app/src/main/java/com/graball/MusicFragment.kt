@@ -4,14 +4,18 @@ import android.Manifest
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.media.audiofx.AudioEffect
 import android.os.Build
@@ -24,12 +28,16 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.net.Uri
 import android.text.Editable
+import android.text.TextUtils
 import android.text.TextWatcher
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
+import android.view.Window
+import android.view.WindowManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -39,6 +47,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.widget.SwitchCompat
 import androidx.fragment.app.Fragment
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -489,7 +498,6 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
             Toast.makeText(requireContext(), label, Toast.LENGTH_SHORT).show()
         }
         findViewById<TextView>(R.id.npBtnLyrics).setOnClickListener { openLyricsSheet() }
-        findViewById<TextView>(R.id.npBtnEq).setOnClickListener { openSystemEqualizer() }
         npBtnSleep = findViewById(R.id.npBtnSleep)
         npBtnSleep.setOnClickListener { SleepTimerManager.showPickerDialog(requireContext()) }
         npBtnAddPlaylist.setOnClickListener {
@@ -1597,55 +1605,239 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
         }
     }
 
-    // ---- Up Next Queue Dialog (Local + YouTube) ----
+    // ---- Custom Dark Up Next Queue Bottom Sheet (Local + YouTube) ----
+
+    private data class QueueRowItem(
+        val title: String,
+        val subtitle: String,
+        val isCurrent: Boolean
+    )
 
     private fun showQueueDialog() {
+        val ctx = context ?: return
         when (resolveActiveSource()) {
             ActiveSource.LOCAL -> {
                 val svc = service ?: return
                 val list = svc.currentPlaylist()
                 if (list.isEmpty()) {
-                    Toast.makeText(requireContext(), "Queue is empty", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, "Queue is empty", Toast.LENGTH_SHORT).show()
                     return
                 }
                 val curIdx = svc.currentIndex()
-                val labels = list.mapIndexed { idx, file ->
-                    val prefix = if (idx == curIdx) "▶ " else "${idx + 1}. "
-                    "$prefix${file.nameWithoutExtension}"
-                }.toTypedArray()
-                AlertDialog.Builder(requireContext())
-                    .setTitle("Up Next (${list.size})")
-                    .setItems(labels) { _, which ->
-                        svc.playAtIndex(which)
-                        updatePlayerUi()
+                val rows = list.mapIndexed { idx, file ->
+                    val meta = tracksByPath[file.absolutePath]
+                    val sub = buildString {
+                        if (idx == curIdx) append("Now playing")
+                        else append(meta?.folderName ?: file.parentFile?.name ?: "Local Audio")
+                        val dur = meta?.durationMs ?: 0L
+                        if (dur > 0L) append(" · ${formatTime(dur.toInt())}")
                     }
-                    .setNegativeButton("Close", null)
-                    .show()
+                    QueueRowItem(
+                        title = file.nameWithoutExtension,
+                        subtitle = sub,
+                        isCurrent = idx == curIdx
+                    )
+                }
+                showStyledQueueSheet(
+                    ctx = ctx,
+                    heading = "Up Next",
+                    rows = rows,
+                    currentIndex = curIdx
+                ) { which ->
+                    svc.playAtIndex(which)
+                    updatePlayerUi()
+                }
             }
             ActiveSource.YOUTUBE -> {
                 val ytState = YouTubePlaybackService.currentState
                 val q = ytState.queue
                 if (q.isEmpty()) {
-                    Toast.makeText(requireContext(), "YouTube queue is empty", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, "YouTube queue is empty", Toast.LENGTH_SHORT).show()
                     return
                 }
                 val curIdx = ytState.queueIndex
-                val labels = q.mapIndexed { idx, item ->
-                    val prefix = if (idx == curIdx) "▶ " else "${idx + 1}. "
-                    "$prefix${item.title}"
-                }.toTypedArray()
-                AlertDialog.Builder(requireContext())
-                    .setTitle("YouTube Queue (${q.size})")
-                    .setItems(labels) { _, which ->
-                        YouTubePlaybackService.instance?.playQueue(q, which, audioOnly = ytState.isAudioOnly)
+                val rows = q.mapIndexed { idx, item ->
+                    val sub = buildString {
+                        if (idx == curIdx) append("Now playing")
+                        else if (item.channel.isNotBlank()) append(item.channel)
+                        else append("YouTube")
+                        if (item.duration.isNotBlank()) append(" · ${item.duration}")
                     }
-                    .setNegativeButton("Close", null)
-                    .show()
+                    QueueRowItem(
+                        title = item.title,
+                        subtitle = sub,
+                        isCurrent = idx == curIdx
+                    )
+                }
+                showStyledQueueSheet(
+                    ctx = ctx,
+                    heading = "YouTube Queue",
+                    rows = rows,
+                    currentIndex = curIdx
+                ) { which ->
+                    YouTubePlaybackService.instance?.playQueue(q, which, audioOnly = ytState.isAudioOnly)
+                }
             }
             ActiveSource.NONE -> {
-                Toast.makeText(requireContext(), "Nothing in queue", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, "Nothing in queue", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    private fun showStyledQueueSheet(
+        ctx: Context,
+        heading: String,
+        rows: List<QueueRowItem>,
+        currentIndex: Int,
+        onPick: (Int) -> Unit
+    ) {
+        val dp = ctx.resources.displayMetrics.density
+        fun d(v: Int) = (v * dp).toInt()
+        val orange = ContextCompat.getColor(ctx, R.color.graball_orange)
+
+        val dialog = createMusicBottomSheet(ctx)
+        val root = createMusicSheetContainer(ctx, dp)
+
+        // Header
+        val header = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = d(12) }
+        }
+        val titleWrap = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        titleWrap.addView(TextView(ctx).apply {
+            text = heading
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+        })
+        titleWrap.addView(TextView(ctx).apply {
+            text = "${rows.size} tracks"
+            textSize = 11.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(orange)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#2B1E1B"))
+                cornerRadius = 10 * dp
+            }
+            setPadding(d(9), d(3), d(9), d(3))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = d(8) }
+        })
+        header.addView(titleWrap)
+        header.addView(buildSheetCloseButton(ctx, dp) { dialog.dismiss() })
+        root.addView(header)
+
+        // Queue RecyclerView
+        val maxListHeight = (ctx.resources.displayMetrics.heightPixels * 0.56f).toInt()
+        val rv = RecyclerView(ctx).apply {
+            layoutManager = LinearLayoutManager(ctx)
+            overScrollMode = View.OVER_SCROLL_NEVER
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                minOf(maxListHeight, d(rows.size * 58 + 12))
+            )
+        }
+        rv.adapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+            override fun getItemCount(): Int = rows.size
+
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+                val row = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(d(12), d(9), d(12), d(9))
+                    layoutParams = RecyclerView.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = d(6) }
+                }
+                val indexBadge = TextView(ctx).apply {
+                    id = View.generateViewId()
+                    gravity = Gravity.CENTER
+                    textSize = 12f
+                    setTypeface(null, Typeface.BOLD)
+                    layoutParams = LinearLayout.LayoutParams(d(28), d(28)).apply {
+                        marginEnd = d(10)
+                    }
+                }
+                val col = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                val titleView = TextView(ctx).apply {
+                    id = View.generateViewId()
+                    textSize = 13.5f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                }
+                val subView = TextView(ctx).apply {
+                    id = View.generateViewId()
+                    textSize = 11.5f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                }
+                col.addView(titleView)
+                col.addView(subView)
+                row.addView(indexBadge)
+                row.addView(col)
+                row.tag = Triple(indexBadge, titleView, subView)
+                return object : RecyclerView.ViewHolder(row) {}
+            }
+
+            override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+                val item = rows[position]
+                val row = holder.itemView as LinearLayout
+                val views = row.tag as Triple<*, *, *>
+                val badge = views.first as TextView
+                val titleView = views.second as TextView
+                val subView = views.third as TextView
+
+                row.background = GradientDrawable().apply {
+                    cornerRadius = 12 * dp
+                    if (item.isCurrent) {
+                        setColor(Color.parseColor("#2B1E1B"))
+                        setStroke(d(1), Color.parseColor("#66FF6B35"))
+                    } else {
+                        setColor(Color.parseColor("#202236"))
+                    }
+                }
+                badge.text = if (item.isCurrent) "▶" else "${position + 1}"
+                badge.setTextColor(if (item.isCurrent) Color.WHITE else Color.parseColor("#9DA2BD"))
+                badge.background = GradientDrawable().apply {
+                    cornerRadius = 14 * dp
+                    setColor(if (item.isCurrent) orange else Color.parseColor("#292C44"))
+                }
+                titleView.text = item.title
+                titleView.setTextColor(if (item.isCurrent) Color.WHITE else Color.parseColor("#E6E8F4"))
+                titleView.setTypeface(null, if (item.isCurrent) Typeface.BOLD else Typeface.NORMAL)
+
+                subView.text = item.subtitle
+                subView.setTextColor(if (item.isCurrent) orange else Color.parseColor("#8F95B2"))
+
+                row.setOnClickListener {
+                    dialog.dismiss()
+                    onPick(position)
+                }
+            }
+        }
+        if (currentIndex in rows.indices) {
+            (rv.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(
+                (currentIndex - 1).coerceAtLeast(0),
+                d(8)
+            )
+        }
+        root.addView(rv)
+        dialog.setContentView(root)
+        dialog.show()
     }
 
     private fun audioReadPermission(): String {
@@ -2123,26 +2315,235 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
     }
 
     private fun showManageFoldersDialog() {
+        val ctx = context ?: return
         if (allFolders.isEmpty()) {
-            Toast.makeText(requireContext(), "No audio folders found yet", Toast.LENGTH_SHORT).show()
+            Toast.makeText(ctx, "No audio folders found yet", Toast.LENGTH_SHORT).show()
             return
         }
-        val labels = allFolders.map { f ->
-            val tag = buildString {
-                if (f.isSdCard) append("SD · ")
-                append("${f.tracks.size} files")
-                if (f.isAutoExcluded) append(" · Recording/System")
-            }
-            "${f.name}\n($tag)"
-        }.toTypedArray()
-        val checked = BooleanArray(allFolders.size) { i -> isFolderVisible(allFolders[i]) }
+        val dp = ctx.resources.displayMetrics.density
+        fun d(v: Int) = (v * dp).toInt()
+        val orange = ContextCompat.getColor(ctx, R.color.graball_orange)
 
-        AlertDialog.Builder(requireContext())
-            .setTitle("Choose Music Folders")
-            .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
-                checked[which] = isChecked
+        val checked = BooleanArray(allFolders.size) { i -> isFolderVisible(allFolders[i]) }
+        val dialog = createMusicBottomSheet(ctx)
+        val root = createMusicSheetContainer(ctx, dp)
+
+        // Header
+        val header = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = d(10) }
+        }
+        val titleCol = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        titleCol.addView(TextView(ctx).apply {
+            text = "Music Folders"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+        })
+        val summaryView = TextView(ctx).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#9DA2BD"))
+        }
+        titleCol.addView(summaryView)
+        header.addView(titleCol)
+        header.addView(buildSheetCloseButton(ctx, dp) { dialog.dismiss() })
+        root.addView(header)
+
+        fun refreshSummary() {
+            val selectedFolders = checked.count { it }
+            val selectedSongs = allFolders.indices.sumOf { i -> if (checked[i]) allFolders[i].tracks.size else 0 }
+            summaryView.text = "$selectedFolders of ${allFolders.size} folders · $selectedSongs songs"
+        }
+        refreshSummary()
+
+        // Quick preset chips: Music Only | Select All
+        val presetRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = d(10) }
+        }
+        val maxListHeight = (ctx.resources.displayMetrics.heightPixels * 0.48f).toInt()
+        val rv = RecyclerView(ctx).apply {
+            layoutManager = LinearLayoutManager(ctx)
+            overScrollMode = View.OVER_SCROLL_NEVER
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                minOf(maxListHeight, d(allFolders.size * 60 + 10))
+            ).apply { bottomMargin = d(12) }
+        }
+
+        val folderAdapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+            override fun getItemCount(): Int = allFolders.size
+
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+                val row = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(d(12), d(10), d(10), d(10))
+                    layoutParams = RecyclerView.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = d(6) }
+                }
+                val iconBox = TextView(ctx).apply {
+                    text = "📁"
+                    textSize = 15f
+                    gravity = Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(d(36), d(36)).apply {
+                        marginEnd = d(10)
+                    }
+                }
+                val textCol = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = d(8)
+                    }
+                }
+                val nameTv = TextView(ctx).apply {
+                    textSize = 14f
+                    setTypeface(null, Typeface.BOLD)
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                }
+                val metaTv = TextView(ctx).apply {
+                    textSize = 11.5f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                }
+                textCol.addView(nameTv)
+                textCol.addView(metaTv)
+
+                val sw = SwitchCompat(ctx).apply {
+                    styleMusicSwitch(ctx, this)
+                    isClickable = false
+                    isFocusable = false
+                }
+                row.addView(iconBox)
+                row.addView(textCol)
+                row.addView(sw)
+                row.tag = arrayOf<Any>(iconBox, nameTv, metaTv, sw)
+                return object : RecyclerView.ViewHolder(row) {}
             }
-            .setPositiveButton("Save") { _, _ ->
+
+            override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+                val f = allFolders[position]
+                val isOn = checked[position]
+                val row = holder.itemView as LinearLayout
+                @Suppress("UNCHECKED_CAST")
+                val parts = row.tag as Array<Any>
+                val iconBox = parts[0] as TextView
+                val nameTv = parts[1] as TextView
+                val metaTv = parts[2] as TextView
+                val sw = parts[3] as SwitchCompat
+
+                row.background = GradientDrawable().apply {
+                    cornerRadius = 12 * dp
+                    setColor(if (isOn) Color.parseColor("#24263D") else Color.parseColor("#1D1F32"))
+                    if (isOn) setStroke(d(1), Color.parseColor("#44FF6B35"))
+                }
+                iconBox.background = GradientDrawable().apply {
+                    cornerRadius = 10 * dp
+                    setColor(if (isOn) Color.parseColor("#33FF6B35") else Color.parseColor("#26283E"))
+                }
+                nameTv.text = f.name
+                nameTv.setTextColor(if (isOn) Color.WHITE else Color.parseColor("#9DA2BD"))
+
+                metaTv.text = buildString {
+                    if (f.isSdCard) append("SD · ")
+                    append("${f.tracks.size} ${if (f.tracks.size == 1) "file" else "files"}")
+                    if (f.isAutoExcluded) append(" · Recording/System")
+                }
+                metaTv.setTextColor(if (isOn) Color.parseColor("#B5B9D0") else Color.parseColor("#737894"))
+                sw.isChecked = isOn
+
+                row.setOnClickListener {
+                    val idx = holder.bindingAdapterPosition
+                    if (idx == RecyclerView.NO_POSITION) return@setOnClickListener
+                    checked[idx] = !checked[idx]
+                    notifyItemChanged(idx)
+                    refreshSummary()
+                }
+            }
+        }
+        rv.adapter = folderAdapter
+
+        fun makePresetChip(label: String, onClick: () -> Unit): TextView = TextView(ctx).apply {
+            text = label
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#E6E8F4"))
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#25273E"))
+                cornerRadius = 16 * dp
+            }
+            setPadding(d(12), d(6), d(12), d(6))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = d(8) }
+            setOnClickListener { onClick() }
+        }
+
+        presetRow.addView(makePresetChip("🎵 Music Only") {
+            allFolders.forEachIndexed { i, f -> checked[i] = !f.isAutoExcluded }
+            folderAdapter.notifyDataSetChanged()
+            refreshSummary()
+        })
+        presetRow.addView(makePresetChip("☑ Select All") {
+            for (i in checked.indices) checked[i] = true
+            folderAdapter.notifyDataSetChanged()
+            refreshSummary()
+        })
+        root.addView(presetRow)
+        root.addView(rv)
+
+        // Bottom Actions
+        val btnRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        btnRow.addView(TextView(ctx).apply {
+            text = "Cancel"
+            textSize = 13.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#B0B4CC"))
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#25273E"))
+                cornerRadius = 12 * dp
+            }
+            setPadding(d(18), 0, d(18), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                d(44)
+            ).apply { marginEnd = d(8) }
+            setOnClickListener { dialog.dismiss() }
+        })
+        btnRow.addView(TextView(ctx).apply {
+            text = "Save Folders"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(orange)
+                cornerRadius = 12 * dp
+            }
+            layoutParams = LinearLayout.LayoutParams(0, d(44), 1f)
+            setOnClickListener {
                 val included = mutableSetOf<String>()
                 val hidden = mutableSetOf<String>()
                 allFolders.forEachIndexed { idx, f ->
@@ -2156,31 +2557,150 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
                     .putStringSet(KEY_INCLUDED_FOLDERS, included)
                     .putStringSet(KEY_HIDDEN_FOLDERS, hidden)
                     .apply()
+                dialog.dismiss()
                 renderCurrentView()
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+        })
+        root.addView(btnRow)
+
+        dialog.setContentView(root)
+        dialog.show()
     }
 
-    // ---- Sorting ----
+    // ---- Sorting (Custom Dark Bottom Sheet) ----
 
     private fun showSortDialog() {
+        val ctx = context ?: return
+        val dp = ctx.resources.displayMetrics.density
+        fun d(v: Int) = (v * dp).toInt()
+        val orange = ContextCompat.getColor(ctx, R.color.graball_orange)
         val modes = SortMode.values()
-        val labels = modes.map { it.label }.toTypedArray()
-        val currentIdx = modes.indexOf(sortMode).coerceAtLeast(0)
-        AlertDialog.Builder(requireContext())
-            .setTitle("Sort Music By")
-            .setSingleChoiceItems(labels, currentIdx) { dialog, which ->
-                sortMode = modes[which]
+
+        val dialog = createMusicBottomSheet(ctx)
+        val root = createMusicSheetContainer(ctx, dp)
+
+        val header = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = d(12) }
+        }
+        header.addView(TextView(ctx).apply {
+            text = "Sort Music By"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        header.addView(buildSheetCloseButton(ctx, dp) { dialog.dismiss() })
+        root.addView(header)
+
+        modes.forEach { mode ->
+            val selected = mode == sortMode
+            val row = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(d(14), d(12), d(14), d(12))
+                background = GradientDrawable().apply {
+                    cornerRadius = 12 * dp
+                    setColor(if (selected) Color.parseColor("#2B1E1B") else Color.parseColor("#202236"))
+                    if (selected) setStroke(d(1), Color.parseColor("#66FF6B35"))
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = d(6) }
+            }
+            row.addView(TextView(ctx).apply {
+                text = mode.label
+                textSize = 14f
+                setTypeface(null, if (selected) Typeface.BOLD else Typeface.NORMAL)
+                setTextColor(if (selected) Color.WHITE else Color.parseColor("#D0D4E6"))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            if (selected) {
+                row.addView(TextView(ctx).apply {
+                    text = "✓"
+                    textSize = 14f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(orange)
+                })
+            }
+            row.setOnClickListener {
+                sortMode = mode
                 btnSortMusic.text = "↕ ${sortMode.shortLabel}"
                 getSharedPreferences(MUSIC_PREFS, Context.MODE_PRIVATE).edit()
                     .putString(KEY_SORT_MODE, sortMode.key)
                     .apply()
-                renderCurrentView()
                 dialog.dismiss()
+                renderCurrentView()
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+            root.addView(row)
+        }
+
+        dialog.setContentView(root)
+        dialog.show()
+    }
+
+    private fun createMusicBottomSheet(ctx: Context): Dialog {
+        return Dialog(ctx).apply {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+            window?.apply {
+                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                setGravity(Gravity.BOTTOM)
+                setLayout(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT
+                )
+            }
+        }
+    }
+
+    private fun createMusicSheetContainer(ctx: Context, dp: Float): LinearLayout {
+        fun d(v: Int) = (v * dp).toInt()
+        return LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#18192B"))
+                cornerRadii = floatArrayOf(22 * dp, 22 * dp, 22 * dp, 22 * dp, 0f, 0f, 0f, 0f)
+            }
+            setPadding(d(16), d(10), d(16), d(18))
+            addView(View(ctx).apply {
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#3A3D58"))
+                    cornerRadius = 3 * dp
+                }
+                layoutParams = LinearLayout.LayoutParams(d(38), d(4)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    bottomMargin = d(12)
+                }
+            })
+        }
+    }
+
+    private fun buildSheetCloseButton(ctx: Context, dp: Float, onClick: () -> Unit): TextView {
+        fun d(v: Int) = (v * dp).toInt()
+        return TextView(ctx).apply {
+            text = "✕"
+            textSize = 15f
+            setTextColor(Color.parseColor("#B0B4CC"))
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#24263B"))
+                cornerRadius = 16 * dp
+            }
+            layoutParams = LinearLayout.LayoutParams(d(32), d(32))
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun styleMusicSwitch(ctx: Context, sw: SwitchCompat) {
+        val orange = ContextCompat.getColor(ctx, R.color.graball_orange)
+        val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+        sw.thumbTintList = ColorStateList(states, intArrayOf(Color.WHITE, Color.parseColor("#B5B9D0")))
+        sw.trackTintList = ColorStateList(states, intArrayOf(orange, Color.parseColor("#353852")))
     }
 
     private fun sortTracks(tracks: List<AudioTrack>): List<AudioTrack> {

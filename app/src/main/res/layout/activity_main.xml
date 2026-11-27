@@ -199,6 +199,16 @@
                     android:layout_gravity="center"
                     android:src="@drawable/ic_nav_settings"
                     android:tint="@color/graball_tab_text" />
+
+                <View
+                    android:id="@+id/navSettingsDot"
+                    android:layout_width="9dp"
+                    android:layout_height="9dp"
+                    android:layout_gravity="top|end"
+                    android:layout_marginTop="2dp"
+                    android:layout_marginEnd="13dp"
+                    android:background="@drawable/settings_update_dot"
+                    android:visibility="gone" />
             </FrameLayout>
 
             <TextView
