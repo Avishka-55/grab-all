@@ -9,8 +9,12 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import com.graball.engine.DownloadProgressBus
+import com.graball.engine.RuntimePaths
 import com.graball.youtube.FloatingAudioController
 import com.graball.youtube.ThumbnailLoader
 import com.graball.youtube.YouTubeJsSolver
@@ -42,6 +46,7 @@ class GrabAllApp : Application() {
         super.onCreate()
         instance = this
         registerNetworkResetCallback()
+        scheduleIdleCacheHousekeeping()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
                 if (activity !is YouTubePlayerActivity) {
@@ -126,6 +131,59 @@ class GrabAllApp : Application() {
         }
     }
 
+    private fun scheduleIdleCacheHousekeeping() {
+        Handler(Looper.getMainLooper()).postDelayed({
+            netCleanupExecutor.execute {
+                try {
+                    val now = System.currentTimeMillis()
+                    // 1) Remove abandoned download staging dirs older than 7 days (only when idle).
+                    if (DownloadProgressBus.activeCount() == 0) {
+                        val stagingRoot = RuntimePaths.stagingDir(applicationContext)
+                        val stagingCutoff = now - 7L * 24L * 60L * 60L * 1000L
+                        stagingRoot.listFiles()?.forEach { child ->
+                            if (latestModifiedMs(child) < stagingCutoff) {
+                                child.deleteRecursively()
+                            }
+                        }
+                    }
+                    // 2) Prune old yt-dlp player JS cache entries older than 14 days.
+                    val ytDlpCache = RuntimePaths.ytDlpCacheDir(applicationContext)
+                    val ytCacheCutoff = now - 14L * 24L * 60L * 60L * 1000L
+                    pruneOldFiles(ytDlpCache, ytCacheCutoff)
+
+                    // 3) Evict expired (>6h old) YouTube stream chunks from ExoPlayer's SimpleCache.
+                    YouTubePlaybackService.pruneExpiredMediaCache(applicationContext)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Idle cache housekeeping error: ${e.message}")
+                }
+            }
+        }, 6_000L)
+    }
+
+    private fun latestModifiedMs(file: java.io.File): Long {
+        if (!file.isDirectory) return file.lastModified()
+        var latest = file.lastModified()
+        file.listFiles()?.forEach { child ->
+            val m = latestModifiedMs(child)
+            if (m > latest) latest = m
+        }
+        return latest
+    }
+
+    private fun pruneOldFiles(dir: java.io.File, cutoffMs: Long) {
+        if (!dir.isDirectory) return
+        dir.listFiles()?.forEach { child ->
+            if (child.isDirectory) {
+                pruneOldFiles(child, cutoffMs)
+                if (child.listFiles()?.isEmpty() == true) {
+                    child.delete()
+                }
+            } else if (child.lastModified() in 1L until cutoffMs) {
+                child.delete()
+            }
+        }
+    }
+
     private fun evictStaleNetworkState(reason: String) {
         val now = SystemClock.elapsedRealtime()
         if (now - lastEvictAtMs < EVICT_DEBOUNCE_MS) return
@@ -179,6 +237,8 @@ class GrabAllApp : Application() {
             private set
 
         fun hasOtherAliveActivity(): Boolean = otherActivityCount > 0
+
+        fun appContextOrNull(): Context? = instance?.applicationContext
 
         /** Called by [MainActivity] when switching into or out of the Music tab. */
         fun refreshFloatingBubble(activity: Activity) {

@@ -18,6 +18,7 @@ object YouTubeStore {
     private const val PREFS = "graball_yt_prefs"
     private const val KEY_SPONSORBLOCK = "sponsorblock_enabled"
     private const val KEY_BG_AUDIO_SCREEN_OFF = "bg_audio_screen_off"
+    private const val KEY_AUDIO_PREBUFFER = "audio_prebuffer_enabled"
     private const val KEY_DEFAULT_HEIGHT = "default_height" // 0 = Auto
     private const val KEY_SPEED = "playback_speed"
     private const val KEY_CAPTION_TEXT_SIZE = "caption_text_size"
@@ -77,6 +78,16 @@ object YouTubeStore {
     fun setScreenOffAudioOnly(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_BG_AUDIO_SCREEN_OFF, enabled)
+            .apply()
+    }
+
+    fun isAudioPrebufferEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AUDIO_PREBUFFER, true)
+
+    fun setAudioPrebufferEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_AUDIO_PREBUFFER, enabled)
             .apply()
     }
 

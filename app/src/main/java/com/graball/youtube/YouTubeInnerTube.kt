@@ -931,14 +931,42 @@ object YouTubeInnerTube {
         return search("popular music playlist", SearchFilter.PLAYLISTS)
     }
 
-    fun fetchPlaylist(playlistId: String, maxItems: Int = 500): PlaylistDetails? {
+    fun fetchPlaylist(
+        playlistId: String,
+        maxItems: Int = 500,
+        context: Context? = null
+    ): PlaylistDetails? {
         val cleanId = playlistId.removePrefix("VL")
         val browseId = "VL$cleanId"
+        val effectiveCtx = context ?: com.graball.GrabAllApp.appContextOrNull()
+        val authHeaders = effectiveCtx?.let { WebViewCookieSync.buildYouTubeAuthHeaders(it) }
+        val cfg = if (authHeaders != null) YouTubeSessionConfig.ensureWebConfig() else null
+
         val body = JSONObject().apply {
-            put("context", webContext())
+            put("context", if (cfg != null) webContext(cfg) else webContext())
             put("browseId", browseId)
         }
-        val root = postInnerTube("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false", body)
+        var activeAuth = authHeaders
+        var activeCfg = cfg
+        var root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+            body = body,
+            authHeaders = activeAuth,
+            webConfig = activeCfg
+        )
+        // Safety fallback: if signed-in browse returned nothing, retry anonymous for public playlists.
+        if (root == null && activeAuth != null) {
+            activeAuth = null
+            activeCfg = null
+            val anonBody = JSONObject().apply {
+                put("context", webContext())
+                put("browseId", browseId)
+            }
+            root = postInnerTube(
+                url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+                body = anonBody
+            )
+        }
 
         var title = ""
         var channel = ""
@@ -961,6 +989,10 @@ object YouTubeInnerTube {
                 ?.let { extractText(it.optJSONObject("ownerText")) }
                 .orEmpty()
             collectPlaylistVideos(root, items, seen)
+            if (items.isEmpty()) {
+                collectItems(root, items, seen)
+                items.removeAll { it.isPlaylist }
+            }
 
             // Follow InnerTube continuation tokens so playlists with 100+ / 500+
             // songs load completely (YouTube returns ~100 items per page).
@@ -969,12 +1001,14 @@ object YouTubeInnerTube {
             while (!nextToken.isNullOrBlank() && items.size < maxItems && pages < 15) {
                 pages++
                 val contBody = JSONObject().apply {
-                    put("context", webContext())
+                    put("context", if (activeCfg != null) webContext(activeCfg) else webContext())
                     put("continuation", nextToken)
                 }
                 val contRoot = postInnerTube(
-                    "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
-                    contBody
+                    url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+                    body = contBody,
+                    authHeaders = activeAuth,
+                    webConfig = activeCfg
                 ) ?: break
                 val before = items.size
                 collectPlaylistVideos(contRoot, items, seen)
@@ -987,10 +1021,15 @@ object YouTubeInnerTube {
         // any playlists where /browse omits items).
         if (items.isEmpty()) {
             val nextBody = JSONObject().apply {
-                put("context", webContext())
+                put("context", if (activeCfg != null) webContext(activeCfg) else webContext())
                 put("playlistId", cleanId)
             }
-            val nextRoot = postInnerTube("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", nextBody)
+            val nextRoot = postInnerTube(
+                url = "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
+                body = nextBody,
+                authHeaders = activeAuth,
+                webConfig = activeCfg
+            )
             if (nextRoot != null) {
                 if (title.isBlank()) {
                     title = nextRoot.optJSONObject("contents")

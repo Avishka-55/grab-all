@@ -123,6 +123,16 @@ class SettingsFragment : Fragment(), MainActivity.TabFragment {
             sbSwitch.toggle()
         }
 
+        val prebufferSwitch = view.findViewById<SwitchCompat>(R.id.settingsAudioPrebuffer)
+        styleSwitch(ctx, prebufferSwitch)
+        prebufferSwitch.isChecked = YouTubeStore.isAudioPrebufferEnabled(ctx)
+        prebufferSwitch.setOnCheckedChangeListener { _, checked ->
+            context?.let { YouTubeStore.setAudioPrebufferEnabled(it, checked) }
+        }
+        view.findViewById<View>(R.id.rowAudioPrebuffer).setOnClickListener {
+            prebufferSwitch.toggle()
+        }
+
         // ---- Parallel Downloads Selector ----
         val concStatusText = view.findViewById<TextView>(R.id.settingsConcurrencyStatus)
         val concChips = listOf(

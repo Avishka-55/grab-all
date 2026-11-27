@@ -28,11 +28,13 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -92,7 +94,7 @@ data class YouTubePlaybackState(
 @OptIn(UnstableApi::class)
 class YouTubePlaybackService : MediaSessionService() {
 
-    private enum class StreamMode { ADAPTIVE_MERGE, HLS_VARIANT, HLS_MASTER, MUXED }
+    private enum class StreamMode { AUDIO_ONLY, ADAPTIVE_MERGE, HLS_VARIANT, HLS_MASTER, MUXED }
 
     private var player: ExoPlayer? = null
     private var uiPlayer: Player? = null
@@ -101,6 +103,9 @@ class YouTubePlaybackService : MediaSessionService() {
     // Cached pool so tapping a new video never blocks behind a slow fallback
     // or SponsorBlock fetch for a previous video.
     private val ioExecutor = Executors.newCachedThreadPool()
+    // Single serialized worker for background next-track URL + Audio-Only byte pre-buffering
+    // so we never issue parallel YouTube bursts on VPN or starve the active playback stream.
+    private val prebufferExecutor = Executors.newSingleThreadExecutor()
 
     private val queue = mutableListOf<YtItem>()
     private val playedVideoIds = mutableSetOf<String>()
@@ -172,14 +177,15 @@ class YouTubePlaybackService : MediaSessionService() {
     private var pendingSeekPositionMs: Long? = null
     private var autoRecoveryAttempts = 0
 
-    // Background pre-resolved stream for the next video in the queue (15m TTL)
-    // so Next (⏭) and Autoplay start nearly instantly even over VPN.
+    // Background pre-resolved streams (up to 2 upcoming queue tracks, 15m TTL)
+    // plus Audio-Only ~20s byte pre-buffering (~384 KB) & cover art pre-warming
+    // so Next (⏭) and Autoplay start nearly instantaneously like Spotify.
+    private val preloadLock = Any()
+    private val preloadedStreams = LinkedHashMap<String, Pair<VideoStreamInfo, Long>>()
+    private val preloadingVideoIds = mutableSetOf<String>()
+    private val prebufferedAudioIds = mutableSetOf<String>()
     @Volatile
-    private var preloadedStreamInfo: VideoStreamInfo? = null
-    @Volatile
-    private var preloadedAtMs: Long = 0L
-    @Volatile
-    private var preloadingVideoId: String? = null
+    private var prebufferGen: Int = 0
 
     private val sponsorTicker = object : Runnable {
         override fun run() {
@@ -207,47 +213,151 @@ class YouTubePlaybackService : MediaSessionService() {
     }
 
     /**
-     * Silently pre-resolves the next video in the queue once the current track
-     * has played past 8s (or has <= 20s remaining) so Next (⏭) and Autoplay
-     * transitions start immediately without waiting on stream resolution.
+     * Silently pre-resolves upcoming queue tracks once the current track has
+     * played past 8s (or has <= 20s remaining) and is not buffering:
+     * - Video mode: pre-resolves next 1 track URL so switching skips InnerTube wait.
+     * - Audio-Only mode (when enabled in Settings & no downloads active):
+     *   pre-resolves + pre-caches the first ~20s (~384 KB) of audio bytes into
+     *   ExoPlayer's bounded 40 MB SimpleCache AND pre-warms the cover thumbnail
+     *   (~20 KB) for the next 2 queued songs for instant Spotify-style switching.
      */
     private fun maybePreloadNextTrack(p: ExoPlayer) {
-        val nextItem = queue.getOrNull(queueIndex + 1) ?: return
-        if (nextItem.isPlaylist) return
+        if (p.playbackState != Player.STATE_READY) return
         val pos = p.currentPosition
         val dur = p.duration
         val shouldPreload = pos >= 8_000L || (dur > 0L && dur != C.TIME_UNSET && (dur - pos) <= 20_000L)
         if (!shouldPreload) return
-        val existing = preloadedStreamInfo
+
+        val audioPrebufferActive = isEffectivelyAudioOnly() &&
+            YouTubeStore.isAudioPrebufferEnabled(applicationContext) &&
+            DownloadProgressBus.activeCount() == 0
+        val lookAheadCount = if (audioPrebufferActive) 2 else 1
         val now = System.currentTimeMillis()
-        if (existing?.videoId == nextItem.id && (now - preloadedAtMs) < PRELOAD_TTL_MS) return
-        if (preloadingVideoId == nextItem.id) return
-        preloadingVideoId = nextItem.id
-        ioExecutor.execute {
-            try {
-                val info = YouTubeInnerTube.resolveStreams(applicationContext, nextItem.id).info
-                if (info != null) {
-                    preloadedStreamInfo = info
-                    preloadedAtMs = System.currentTimeMillis()
+        val genSnapshot = prebufferGen
+
+        for (offset in 1..lookAheadCount) {
+            val nextItem = queue.getOrNull(queueIndex + offset) ?: break
+            if (nextItem.isPlaylist || nextItem.id.isBlank()) continue
+
+            var needsResolve = false
+            var needsAudioBytes = false
+            val shouldStart = synchronized(preloadLock) {
+                val cached = preloadedStreams[nextItem.id]
+                val isFresh = cached != null && (now - cached.second) < PRELOAD_TTL_MS
+                val alreadyInFlight = nextItem.id in preloadingVideoIds
+                val alreadyBuffered = nextItem.id in prebufferedAudioIds
+                needsResolve = !isFresh && !alreadyInFlight
+                needsAudioBytes = audioPrebufferActive && !alreadyBuffered && !alreadyInFlight
+                if (needsResolve || needsAudioBytes) {
+                    preloadingVideoIds.add(nextItem.id)
+                    true
+                } else {
+                    false
                 }
-            } catch (_: Throwable) {
-            } finally {
-                if (preloadingVideoId == nextItem.id) {
-                    preloadingVideoId = null
+            }
+            if (!shouldStart) continue
+
+            val audioTrackPref = selectedAudioTrackId
+            prebufferExecutor.execute {
+                try {
+                    if (genSnapshot != prebufferGen) return@execute
+                    var info: VideoStreamInfo? = synchronized(preloadLock) {
+                        val existing = preloadedStreams[nextItem.id]
+                        if (existing != null && (System.currentTimeMillis() - existing.second) < PRELOAD_TTL_MS) {
+                            existing.first
+                        } else {
+                            null
+                        }
+                    }
+                    if (info == null) {
+                        val resolved = YouTubeInnerTube.resolveStreams(applicationContext, nextItem.id).info
+                        if (resolved != null && genSnapshot == prebufferGen) {
+                            info = resolved
+                            synchronized(preloadLock) {
+                                preloadedStreams[nextItem.id] = resolved to System.currentTimeMillis()
+                                while (preloadedStreams.size > 3) {
+                                    val oldestKey = preloadedStreams.keys.firstOrNull() ?: break
+                                    preloadedStreams.remove(oldestKey)
+                                    prebufferedAudioIds.remove(oldestKey)
+                                }
+                            }
+                        }
+                    }
+                    val targetInfo = info ?: return@execute
+                    if (!needsAudioBytes || genSnapshot != prebufferGen) return@execute
+                    if (!isEffectivelyAudioOnly() || DownloadProgressBus.activeCount() > 0) return@execute
+
+                    // 1) Pre-warm cover art (~15-25 KB) into ThumbnailLoader RAM+disk cache
+                    val thumbUrl = targetInfo.thumbnailUrl.ifBlank { nextItem.thumbnailUrl }
+                    if (thumbUrl.startsWith("http")) {
+                        ThumbnailLoader.loadSync(thumbUrl, targetWidthPx = 360)
+                    }
+
+                    // 2) Pre-cache first ~20s (~384 KB) of adaptive audio bytes into SimpleCache
+                    val audioStream = targetInfo.bestAudio(audioTrackPref)
+                    if (audioStream != null && audioStream.url.startsWith("http")) {
+                        val ok = prebufferAudioBytes(audioStream.url, targetInfo.userAgent, genSnapshot)
+                        if (ok && genSnapshot == prebufferGen) {
+                            synchronized(preloadLock) {
+                                prebufferedAudioIds.add(nextItem.id)
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {
+                } finally {
+                    synchronized(preloadLock) {
+                        preloadingVideoIds.remove(nextItem.id)
+                    }
                 }
             }
         }
     }
 
-    private fun consumePreloadedStreamInfo(videoId: String): VideoStreamInfo? {
-        val info = preloadedStreamInfo ?: return null
-        val fresh = (System.currentTimeMillis() - preloadedAtMs) < PRELOAD_TTL_MS
-        if (info.videoId == videoId && fresh) {
-            preloadedStreamInfo = null
-            preloadedAtMs = 0L
-            return info
+    /**
+     * Writes the first [AUDIO_PREBUFFER_BYTES] (~384 KB ≈ 20s of 128 kbps M4A)
+     * of [audioUrl] into ExoPlayer's bounded 40 MB [SimpleCache] using the exact
+     * same CacheDataSource + YouTubeChunkedDataSource key so playback gets a
+     * 100% cache hit on startup.
+     */
+    private fun prebufferAudioBytes(audioUrl: String, userAgent: String, genSnapshot: Int): Boolean {
+        val cache = getOrCreateMediaCache(applicationContext) ?: return false
+        return try {
+            val httpFactory = DefaultHttpDataSource.Factory()
+                .setUserAgent(userAgent)
+                .setDefaultRequestProperties(mapOf("Accept-Language" to "en-US,en;q=0.9"))
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(8_000)
+                .setReadTimeoutMs(10_000)
+            val chunkedFactory = YouTubeChunkedDataSource.Factory(httpFactory)
+            val cacheDataSource = CacheDataSource.Factory()
+                .setCache(cache)
+                .setUpstreamDataSourceFactory(chunkedFactory)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+                .createDataSourceForDownloading()
+            val spec = DataSpec.Builder()
+                .setUri(Uri.parse(audioUrl))
+                .setPosition(0L)
+                .setLength(AUDIO_PREBUFFER_BYTES)
+                .build()
+            val writer = CacheWriter(cacheDataSource, spec, ByteArray(16 * 1024)) { _, _, _ ->
+                if (genSnapshot != prebufferGen || !isEffectivelyAudioOnly() || DownloadProgressBus.activeCount() > 0) {
+                    throw InterruptedException("Prebuffer cancelled")
+                }
+            }
+            writer.cache()
+            true
+        } catch (_: Throwable) {
+            false
         }
-        return null
+    }
+
+    private fun consumePreloadedStreamInfo(videoId: String): VideoStreamInfo? {
+        synchronized(preloadLock) {
+            val entry = preloadedStreams.remove(videoId) ?: return null
+            prebufferedAudioIds.remove(videoId)
+            val fresh = (System.currentTimeMillis() - entry.second) < PRELOAD_TTL_MS
+            return if (fresh) entry.first else null
+        }
     }
 
     override fun onCreate() {
@@ -527,9 +637,12 @@ class YouTubePlaybackService : MediaSessionService() {
     }
 
     fun clearPreloadedStreamInfo() {
-        preloadedStreamInfo = null
-        preloadedAtMs = 0L
-        preloadingVideoId = null
+        prebufferGen++
+        synchronized(preloadLock) {
+            preloadedStreams.clear()
+            preloadingVideoIds.clear()
+            prebufferedAudioIds.clear()
+        }
     }
 
     override fun onDestroy() {
@@ -541,7 +654,9 @@ class YouTubePlaybackService : MediaSessionService() {
         uiPlayer = null
         player?.release()
         player = null
+        clearPreloadedStreamInfo()
         ioExecutor.shutdownNow()
+        prebufferExecutor.shutdownNow()
         if (instance === this) {
             instance = null
         }
@@ -742,8 +857,14 @@ class YouTubePlaybackService : MediaSessionService() {
 
     fun setAudioOnlyMode(enabled: Boolean) {
         if (isAudioOnly == enabled) return
+        val wasAudioOnly = isEffectivelyAudioOnly()
         isAudioOnly = enabled
-        applyTrackSelection()
+        val nowAudioOnly = isEffectivelyAudioOnly()
+        if (wasAudioOnly && !nowAudioOnly && currentStreamMode == StreamMode.AUDIO_ONLY) {
+            upgradeFromAudioOnlyToVideo()
+        } else {
+            applyTrackSelection()
+        }
         broadcastState()
     }
 
@@ -756,9 +877,26 @@ class YouTubePlaybackService : MediaSessionService() {
      */
     fun setVideoSurfaceVisible(visible: Boolean) {
         if (isVideoSurfaceVisible == visible) return
+        val wasAudioOnly = isEffectivelyAudioOnly()
         isVideoSurfaceVisible = visible
-        applyTrackSelection()
+        val nowAudioOnly = isEffectivelyAudioOnly()
+        if (wasAudioOnly && !nowAudioOnly && currentStreamMode == StreamMode.AUDIO_ONLY) {
+            upgradeFromAudioOnlyToVideo()
+        } else {
+            applyTrackSelection()
+        }
         broadcastState()
+    }
+
+    /** Seamlessly upgrades a pure Audio-Only source back to Video+Audio at the current timestamp. */
+    private fun upgradeFromAudioOnlyToVideo() {
+        val info = currentStreamInfo ?: return
+        val p = player ?: return
+        val pos = p.currentPosition.coerceAtLeast(0L)
+        val shouldPlay = p.playWhenReady
+        attemptedModes.remove(StreamMode.ADAPTIVE_MERGE)
+        attemptedModes.add(StreamMode.AUDIO_ONLY)
+        tryNextStreamMode(info, resumePosMs = pos, playImmediately = shouldPlay)
     }
 
     fun setCaptionsEnabled(enabled: Boolean) {
@@ -915,7 +1053,7 @@ class YouTubePlaybackService : MediaSessionService() {
         val heights = mutableSetOf<Int>()
         val info = currentStreamInfo
         when (currentStreamMode) {
-            StreamMode.ADAPTIVE_MERGE -> {
+            StreamMode.AUDIO_ONLY, StreamMode.ADAPTIVE_MERGE -> {
                 info?.videoStreams?.forEach {
                     if (it.height > 0) heights.add(normalizeQualityHeight(it.height))
                 }
@@ -954,6 +1092,7 @@ class YouTubePlaybackService : MediaSessionService() {
     /** Human-readable live readout of what ExoPlayer is actually decoding right now. */
     fun currentStreamStatsLabel(): String {
         val modeLabel = when (currentStreamMode) {
+            StreamMode.AUDIO_ONLY -> "Audio-Only"
             StreamMode.ADAPTIVE_MERGE -> "Adaptive"
             StreamMode.HLS_VARIANT -> "HLS"
             StreamMode.HLS_MASTER -> "HLS Live"
@@ -1044,9 +1183,7 @@ class YouTubePlaybackService : MediaSessionService() {
         queueIndex = -1
         fetchingAutoNext = false
         currentStreamInfo = null
-        preloadedStreamInfo = null
-        preloadedAtMs = 0L
-        preloadingVideoId = null
+        clearPreloadedStreamInfo()
         activeVideoHeight = null
         preparedVideoHeight = null
         currentArtwork = null
@@ -1396,11 +1533,31 @@ class YouTubePlaybackService : MediaSessionService() {
             .setArtworkUri(info.thumbnailUrl.takeIf { it.startsWith("http") }?.let { Uri.parse(it) })
             .build()
 
+        // 0) Pure Audio-Only Single Source (instant ~50ms startup from pre-buffered SimpleCache
+        //    with ZERO video header probes when in Audio-Only / screen-off mode):
+        val videoStream = info.pickVideoStream(selectedHeight)
+        val audioStream = info.bestAudio(selectedAudioTrackId)
+        if (isEffectivelyAudioOnly() && StreamMode.AUDIO_ONLY !in attemptedModes && audioStream != null) {
+            attemptedModes.add(StreamMode.AUDIO_ONLY)
+            currentStreamMode = StreamMode.AUDIO_ONLY
+            preparedVideoHeight = null
+            activeVideoHeight = null
+            val aItem = MediaItem.Builder()
+                .setUri(audioStream.url)
+                .setMediaMetadata(meta)
+                .build()
+            val aSrc = ProgressiveMediaSource.Factory(dsFactory).setLoadErrorHandlingPolicy(failFastPolicy).createMediaSource(aItem)
+            applyTrackSelection()
+            p.setMediaSource(aSrc, resumePosMs)
+            p.setPlaybackSpeed(playbackSpeed)
+            p.playWhenReady = playImmediately
+            p.prepare()
+            return true
+        }
+
         // 1) Direct Adaptive Merge FIRST (exact chosen 144p-2160p video + original-language M4A audio):
         // Deterministic quality switching (~0.3s), zero ABR downgrade, true 1440p/4K VP9,
         // and zero video bytes downloaded in Audio-Only mode.
-        val videoStream = info.pickVideoStream(selectedHeight)
-        val audioStream = info.bestAudio(selectedAudioTrackId)
         if (StreamMode.ADAPTIVE_MERGE !in attemptedModes && videoStream != null && audioStream != null) {
             attemptedModes.add(StreamMode.ADAPTIVE_MERGE)
             currentStreamMode = StreamMode.ADAPTIVE_MERGE
@@ -2074,6 +2231,8 @@ class YouTubePlaybackService : MediaSessionService() {
         private const val YT_NOTIFICATION_ID = 3
         private const val MAX_MEDIA_CACHE_BYTES = 40L * 1024L * 1024L
         private const val PRELOAD_TTL_MS = 15L * 60L * 1000L
+        private const val AUDIO_PREBUFFER_BYTES = 384L * 1024L // ~20s of 128 kbps M4A + header
+        private const val EXPIRED_MEDIA_CACHE_AGE_MS = 6L * 60L * 60L * 1000L // YouTube stream URLs expire ~6h
 
         const val ACTION_PLAY_PAUSE = "com.graball.youtube.ACTION_PLAY_PAUSE"
         const val ACTION_NEXT = "com.graball.youtube.ACTION_NEXT"
@@ -2108,6 +2267,28 @@ class YouTubePlaybackService : MediaSessionService() {
             try {
                 File(context.applicationContext.cacheDir, "yt_media_cache").deleteRecursively()
             } catch (_: Exception) {
+            }
+        }
+
+        /**
+         * Prunes expired (>6h old) YouTube stream entries from [SimpleCache] so
+         * stale IP/time-expired chunks don't sit around as dead weight.
+         */
+        fun pruneExpiredMediaCache(context: Context) {
+            try {
+                val dir = File(context.applicationContext.cacheDir, "yt_media_cache")
+                if (!dir.exists()) return
+                val cache = getOrCreateMediaCache(context) ?: return
+                val cutoff = System.currentTimeMillis() - EXPIRED_MEDIA_CACHE_AGE_MS
+                val keys = cache.keys.toList()
+                for (key in keys) {
+                    val spans = cache.getCachedSpans(key)
+                    val newestTouch = spans.maxOfOrNull { it.lastTouchTimestamp } ?: 0L
+                    if (newestTouch in 1L until cutoff) {
+                        cache.removeResource(key)
+                    }
+                }
+            } catch (_: Throwable) {
             }
         }
 
