@@ -493,7 +493,20 @@ class FastYouTubeDownloader(
                                 requestedMaxHeight = maxHeight,
                                 audioOnly = audioOnly
                             )
-                            val info = resolved.info
+                            val rawInfo = resolved.info
+                            val info = if (rawInfo != null) {
+                                val trackTitle = rawInfo.title.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+                                    ?: track.title.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+                                    ?: rawInfo.title
+                                val trackChannel = rawInfo.channel.ifBlank { track.channel }
+                                if (trackTitle != rawInfo.title || trackChannel != rawInfo.channel) {
+                                    rawInfo.copy(title = trackTitle, channel = trackChannel)
+                                } else {
+                                    rawInfo
+                                }
+                            } else {
+                                null
+                            }
                             if (cancelled) {
                                 inFlightProgress.remove(idx)
                                 break

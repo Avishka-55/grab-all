@@ -62,6 +62,7 @@ import com.graball.DarkBottomSheet
 import com.graball.LoginActivity
 import com.graball.R
 import com.graball.SleepTimerManager
+import com.graball.engine.DownloadProgressBus
 import com.graball.engine.WebViewCookieSync
 import java.util.concurrent.Executors
 import kotlin.math.abs
@@ -643,7 +644,11 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         val item = state.currentItem
         val info = state.streamInfo
-        videoTitle.text = info?.title ?: item?.title ?: "Nothing playing"
+        videoTitle.text = info?.title?.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+            ?: item?.title?.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+            ?: info?.title?.takeIf { it.isNotBlank() }
+            ?: item?.title?.takeIf { it.isNotBlank() }
+            ?: "Nothing playing"
         val channelLabel = currentEngagement?.channelName?.takeIf { it.isNotBlank() }
             ?: info?.channel?.takeIf { it.isNotBlank() }
             ?: item?.channel.orEmpty()

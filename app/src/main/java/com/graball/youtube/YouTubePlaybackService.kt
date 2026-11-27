@@ -44,6 +44,8 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.MediaStyleNotificationHelper
+import com.graball.engine.DownloadProgressBus
+import com.graball.engine.FastYouTubeDownloader
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
@@ -1135,9 +1137,19 @@ class YouTubePlaybackService : MediaSessionService() {
                         }
                     }
                 }
+                var resolvedInfo = result.info
+                if (resolvedInfo != null &&
+                    DownloadProgressBus.isPlaceholderTitle(resolvedInfo.title) &&
+                    DownloadProgressBus.isPlaceholderTitle(item.title)
+                ) {
+                    val oembedTitle = FastYouTubeDownloader.fetchYouTubeOEmbedTitle(item.id)
+                    if (!oembedTitle.isNullOrBlank()) {
+                        resolvedInfo = resolvedInfo.copy(title = oembedTitle)
+                    }
+                }
                 mainHandler.post {
                     if (gen != loadGeneration) return@post
-                    val info = result.info
+                    val info = resolvedInfo
                     if (info == null) {
                         isLoading = false
                         loadingStatus = null
@@ -1177,12 +1189,21 @@ class YouTubePlaybackService : MediaSessionService() {
         overrideStartPositionMs: Long?
     ) {
         if (gen != loadGeneration) return
+        val rawInfo = withoutFailedFormats(info)
+        val bestTitle = rawInfo.title.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+            ?: item.title.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+            ?: rawInfo.title.ifBlank { item.title }
+        val bestChannel = rawInfo.channel.ifBlank { item.channel }
         @Suppress("NAME_SHADOWING")
-        val info = withoutFailedFormats(info)
+        val info = if (bestTitle != rawInfo.title || bestChannel != rawInfo.channel) {
+            rawInfo.copy(title = bestTitle, channel = bestChannel)
+        } else {
+            rawInfo
+        }
         currentStreamInfo = info
         val enriched = item.copy(
-            title = info.title,
-            channel = info.channel.ifBlank { item.channel },
+            title = bestTitle,
+            channel = bestChannel,
             thumbnailUrl = info.thumbnailUrl.ifBlank { item.thumbnailUrl }
         )
         if (index in queue.indices) {

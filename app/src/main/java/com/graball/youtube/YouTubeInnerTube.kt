@@ -1903,8 +1903,8 @@ object YouTubeInnerTube {
         }
 
         val details = root.optJSONObject("videoDetails")
-        val title = details?.optString("title").orEmpty().ifBlank { "YouTube Video" }
-        val channel = details?.optString("author").orEmpty()
+        val title = extractPlayerTitle(root, details).ifBlank { "YouTube Video" }
+        val channel = extractPlayerChannel(root, details)
         val durationSec = details?.optString("lengthSeconds")?.toLongOrNull() ?: 0L
         val views = formatViews(details?.optString("viewCount")?.toLongOrNull())
         val publishDate = extractPlayerPublishDate(root)
@@ -2477,8 +2477,8 @@ object YouTubeInnerTube {
         }
 
         val details = root.optJSONObject("videoDetails")
-        val title = details?.optString("title").orEmpty().ifBlank { "YouTube Video" }
-        val channel = details?.optString("author").orEmpty()
+        val title = extractPlayerTitle(root, details).ifBlank { "YouTube Video" }
+        val channel = extractPlayerChannel(root, details)
         val durationSec = details?.optString("lengthSeconds")?.toLongOrNull() ?: 0L
         val views = formatViews(details?.optString("viewCount")?.toLongOrNull())
         val publishDate = extractPlayerPublishDate(root)
@@ -3029,7 +3029,7 @@ object YouTubeInnerTube {
             ResolveResult(
                 VideoStreamInfo(
                     videoId = videoId,
-                    title = root.optString("title", "YouTube Video"),
+                    title = root.optString("title").orEmpty().ifBlank { "YouTube Video" },
                     channel = root.optString("uploader", root.optString("channel", "")),
                     durationSec = root.optLong("duration", 0L),
                     viewCount = formatViews(root.optLong("view_count", -1L).takeIf { it >= 0 }),
@@ -3786,6 +3786,32 @@ object YouTubeInnerTube {
         }
         val last = arr.optJSONObject(arr.length() - 1)?.optString("url").orEmpty()
         return if (last.startsWith("//")) "https:$last" else last
+    }
+
+    private fun extractPlayerTitle(root: JSONObject, details: JSONObject?): String {
+        val fromDetails = details?.optString("title").orEmpty().trim()
+        if (fromDetails.isNotBlank()) return fromDetails
+        val micro = root.optJSONObject("microformat")?.optJSONObject("playerMicroformatRenderer")
+        val titleObj = micro?.optJSONObject("title")
+        val simple = titleObj?.optString("simpleText").orEmpty().trim()
+        if (simple.isNotBlank()) return simple
+        val runs = titleObj?.optJSONArray("runs")
+        if (runs != null) {
+            val sb = StringBuilder()
+            for (i in 0 until runs.length()) {
+                sb.append(runs.optJSONObject(i)?.optString("text").orEmpty())
+            }
+            val joined = sb.toString().trim()
+            if (joined.isNotBlank()) return joined
+        }
+        return ""
+    }
+
+    private fun extractPlayerChannel(root: JSONObject, details: JSONObject?): String {
+        val fromDetails = details?.optString("author").orEmpty().trim()
+        if (fromDetails.isNotBlank()) return fromDetails
+        val micro = root.optJSONObject("microformat")?.optJSONObject("playerMicroformatRenderer")
+        return micro?.optString("ownerChannelName").orEmpty().trim()
     }
 
     private fun extractPlayerPublishDate(root: JSONObject): String {

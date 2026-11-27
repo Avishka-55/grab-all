@@ -622,7 +622,9 @@ object DownloadSheetHelper {
 
             // Refresh header title/duration if resolved info is richer
             if (info != null) {
-                val resolvedTitle = info.title.ifBlank { currentItem.title }
+                val resolvedTitle = info.title.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+                    ?: currentItem.title.takeIf { !DownloadProgressBus.isPlaceholderTitle(it) }
+                    ?: info.title.ifBlank { currentItem.title }
                 val resolvedChannel = info.channel.ifBlank { currentItem.channel }
                 val resolvedDuration = if (info.durationSec > 0L) formatDuration(info.durationSec) else currentItem.duration
                 val resolvedThumb = info.thumbnailUrl.ifBlank { currentItem.thumbnailUrl }
