@@ -97,7 +97,9 @@ object YouTubeInnerTube {
         val commentsToken: String?,
         val subscriberCount: String = "",
         val channelAvatarUrl: String = "",
-        val topCommentPreview: String = ""
+        val topCommentPreview: String = "",
+        val publishDate: String = "",
+        val viewCount: String = ""
     )
 
     data class CommentsPage(
@@ -3337,10 +3339,27 @@ object YouTubeInnerTube {
         var commentCount = ""
         var commentsToken: String? = null
         var topCommentPreview = ""
+        var publishDate = ""
+        var viewCount = ""
 
         fun scan(node: Any?) {
             when (node) {
                 is JSONObject -> {
+                    if (node.has("videoPrimaryInfoRenderer")) {
+                        val pri = node.optJSONObject("videoPrimaryInfoRenderer")
+                        val relDate = extractText(pri?.optJSONObject("relativeDateText"))
+                        val absDate = extractText(pri?.optJSONObject("dateText"))
+                        val chosenDate = relDate.ifBlank { absDate }
+                        if (chosenDate.isNotBlank() && publishDate.isBlank()) {
+                            publishDate = chosenDate
+                        }
+                        val vc = pri?.optJSONObject("viewCount")?.optJSONObject("videoViewCountRenderer")
+                        val viewsTxt = extractText(vc?.optJSONObject("shortViewCount"))
+                            .ifBlank { extractText(vc?.optJSONObject("viewCount")) }
+                        if (viewsTxt.isNotBlank() && viewCount.isBlank()) {
+                            viewCount = viewsTxt
+                        }
+                    }
                     if (node.has("videoSecondaryInfoRenderer")) {
                         val sec = node.optJSONObject("videoSecondaryInfoRenderer")
                         val owner = sec?.optJSONObject("owner")?.optJSONObject("videoOwnerRenderer")
@@ -3453,7 +3472,9 @@ object YouTubeInnerTube {
             commentsToken = commentsToken,
             subscriberCount = subscriberCount,
             channelAvatarUrl = channelAvatarUrl,
-            topCommentPreview = topCommentPreview
+            topCommentPreview = topCommentPreview,
+            publishDate = publishDate,
+            viewCount = viewCount
         )
     }
 
@@ -3612,9 +3633,25 @@ object YouTubeInnerTube {
                 }
             }
         }
-        val views = extractText(obj.optJSONObject("shortViewCountText"))
+        var views = extractText(obj.optJSONObject("shortViewCountText"))
             .ifBlank { extractText(obj.optJSONObject("viewCountText")) }
-        val publishedTime = extractText(obj.optJSONObject("publishedTimeText"))
+        var publishedTime = extractText(obj.optJSONObject("publishedTimeText"))
+        if (views.isBlank() || publishedTime.isBlank()) {
+            // playlistVideoRenderer packs views + posted date inside videoInfo.runs
+            val infoRuns = obj.optJSONObject("videoInfo")?.optJSONArray("runs")
+            if (infoRuns != null) {
+                for (i in 0 until infoRuns.length()) {
+                    val part = infoRuns.optJSONObject(i)?.optString("text").orEmpty()
+                        .trim().trim('•', '·', ' ')
+                    if (part.isBlank()) continue
+                    val low = part.lowercase()
+                    when {
+                        views.isBlank() && (low.contains("view") || low.contains("watching")) -> views = part
+                        publishedTime.isBlank() && looksLikeRelativeOrDate(low) -> publishedTime = part
+                    }
+                }
+            }
+        }
         val thumb = pickThumb(obj.optJSONObject("thumbnail"))
             .ifBlank { "https://i.ytimg.com/vi/$id/hqdefault.jpg" }
         val channelId = extractChannelIdFromRuns(obj.optJSONObject("ownerText"))
@@ -3699,21 +3736,34 @@ object YouTubeInnerTube {
         val metaRows = meta?.optJSONObject("metadata")
             ?.optJSONObject("contentMetadataViewModel")
             ?.optJSONArray("metadataRows")
-        val channel = metaRows?.optJSONObject(0)
-            ?.optJSONArray("metadataParts")
-            ?.optJSONObject(0)
-            ?.optJSONObject("text")
-            ?.optString("content")
-            .orEmpty()
-        val row1Parts = metaRows?.optJSONObject(1)?.optJSONArray("metadataParts")
-        val views = row1Parts?.optJSONObject(0)
-            ?.optJSONObject("text")
-            ?.optString("content")
-            .orEmpty()
-        val publishedTime = row1Parts?.optJSONObject(1)
-            ?.optJSONObject("text")
-            ?.optString("content")
-            .orEmpty()
+        val allParts = mutableListOf<String>()
+        if (metaRows != null) {
+            for (r in 0 until metaRows.length()) {
+                val parts = metaRows.optJSONObject(r)?.optJSONArray("metadataParts") ?: continue
+                for (p in 0 until parts.length()) {
+                    val txt = parts.optJSONObject(p)
+                        ?.optJSONObject("text")
+                        ?.optString("content")
+                        .orEmpty()
+                        .trim()
+                    if (txt.isNotBlank()) allParts.add(txt)
+                }
+            }
+        }
+        var channel = ""
+        var views = ""
+        var publishedTime = ""
+        for (part in allParts) {
+            val low = part.lowercase()
+            when {
+                views.isBlank() && (low.contains("view") || low.contains("watching")) -> views = part
+                publishedTime.isBlank() && looksLikeRelativeOrDate(low) -> publishedTime = part
+                channel.isBlank() -> channel = part
+            }
+        }
+        if (channel.isBlank()) {
+            channel = allParts.firstOrNull().orEmpty()
+        }
 
         val imgView = obj.optJSONObject("contentImage")
         val thumbModel = imgView?.optJSONObject("collectionThumbnailViewModel")
@@ -3871,6 +3921,15 @@ object YouTubeInnerTube {
         if (fromDetails.isNotBlank()) return fromDetails
         val micro = root.optJSONObject("microformat")?.optJSONObject("playerMicroformatRenderer")
         return micro?.optString("ownerChannelName").orEmpty().trim()
+    }
+
+    private fun looksLikeRelativeOrDate(lower: String): Boolean {
+        return lower.contains("ago") ||
+            lower.contains("streamed") ||
+            lower.contains("premiered") ||
+            lower.contains("yesterday") ||
+            lower.contains("today") ||
+            Regex("""\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b""").containsMatchIn(lower)
     }
 
     private fun extractPlayerPublishDate(root: JSONObject): String {

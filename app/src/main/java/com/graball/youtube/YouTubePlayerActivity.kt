@@ -660,16 +660,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
             ?: info?.title?.takeIf { it.isNotBlank() }
             ?: item?.title?.takeIf { it.isNotBlank() }
             ?: "Nothing playing"
-        val channelLabel = currentEngagement?.channelName?.takeIf { it.isNotBlank() }
-            ?: info?.channel?.takeIf { it.isNotBlank() }
-            ?: item?.channel.orEmpty()
-        val viewsLabel = info?.viewCount?.takeIf { it.isNotBlank() } ?: item?.views.orEmpty()
-        val dateLabel = info?.publishDate?.takeIf { it.isNotBlank() }
-            ?: item?.publishedTime?.takeIf { it.isNotBlank() }
-            .orEmpty()
-        videoMeta.text = listOf(viewsLabel, dateLabel, channelLabel)
-            .filter { it.isNotBlank() }
-            .joinToString(" · ")
+        val channelLabel = refreshVideoMeta(state)
         if (channelLabel.isNotBlank()) {
             channelNameView.text = channelLabel
         }
@@ -813,6 +804,26 @@ class YouTubePlayerActivity : AppCompatActivity() {
         actionComments.text = if (commentCount != null) "💬 Comments · $commentCount" else "💬 Comments"
         val teaser = eng?.topCommentPreview?.takeIf { it.isNotBlank() }
         commentsPreview.text = teaser ?: "Tap to view comments"
+        refreshVideoMeta(YouTubePlaybackService.currentState)
+    }
+
+    private fun refreshVideoMeta(state: YouTubePlaybackState): String {
+        val item = state.currentItem
+        val info = state.streamInfo
+        val channelLabel = currentEngagement?.channelName?.takeIf { it.isNotBlank() }
+            ?: info?.channel?.takeIf { it.isNotBlank() }
+            ?: item?.channel.orEmpty()
+        val viewsLabel = info?.viewCount?.takeIf { it.isNotBlank() }
+            ?: currentEngagement?.viewCount?.takeIf { it.isNotBlank() }
+            ?: item?.views.orEmpty()
+        val dateLabel = info?.publishDate?.takeIf { it.isNotBlank() }
+            ?: currentEngagement?.publishDate?.takeIf { it.isNotBlank() }
+            ?: item?.publishedTime?.takeIf { it.isNotBlank() }
+            .orEmpty()
+        videoMeta.text = listOf(viewsLabel, dateLabel, channelLabel)
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+        return channelLabel
     }
 
     private fun openChannelPage() {
