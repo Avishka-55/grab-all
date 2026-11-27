@@ -180,53 +180,76 @@ object SleepTimerManager {
 
     fun showPickerDialog(context: Context, onDismiss: (() -> Unit)? = null) {
         val st = currentState()
-        val title = when (st.mode) {
-            Mode.OFF -> "🌙 Sleep Timer"
-            Mode.END_OF_TRACK -> "🌙 Sleep Timer · End of track"
+        val activeBadge = when (st.mode) {
+            Mode.OFF -> null
+            Mode.END_OF_TRACK -> "End of track"
             Mode.TIMED -> {
                 val mins = ceil(st.remainingMs / 60_000.0).toInt().coerceAtLeast(1)
-                "🌙 Sleep Timer · ${mins}m left"
+                "${mins}m left"
             }
         }
-        val items = arrayOf(
-            if (st.mode == Mode.OFF) "✓ Off" else "Off",
-            "15 minutes",
-            "30 minutes",
-            "45 minutes",
-            "60 minutes",
-            if (st.mode == Mode.END_OF_TRACK) "✓ End of current video / song" else "End of current video / song"
+        val activeMins = if (st.mode == Mode.TIMED) {
+            ceil(st.remainingMs / 60_000.0).toInt()
+        } else {
+            -1
+        }
+
+        val dialog = DarkBottomSheet.createDialog(context)
+        val root = DarkBottomSheet.createContainer(context)
+        root.addView(
+            DarkBottomSheet.createHeader(
+                ctx = context,
+                title = "Sleep Timer",
+                subtitle = "Automatically pauses playback",
+                badge = activeBadge,
+                onClose = { dialog.dismiss() }
+            )
         )
-        AlertDialog.Builder(context)
-            .setTitle(title)
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> {
-                        cancel()
-                        Toast.makeText(context, "Sleep timer off", Toast.LENGTH_SHORT).show()
-                    }
-                    1 -> {
-                        startMinutes(context, 15)
-                        Toast.makeText(context, "🌙 Sleep timer set for 15 min", Toast.LENGTH_SHORT).show()
-                    }
-                    2 -> {
-                        startMinutes(context, 30)
-                        Toast.makeText(context, "🌙 Sleep timer set for 30 min", Toast.LENGTH_SHORT).show()
-                    }
-                    3 -> {
-                        startMinutes(context, 45)
-                        Toast.makeText(context, "🌙 Sleep timer set for 45 min", Toast.LENGTH_SHORT).show()
-                    }
-                    4 -> {
-                        startMinutes(context, 60)
-                        Toast.makeText(context, "🌙 Sleep timer set for 60 min", Toast.LENGTH_SHORT).show()
-                    }
-                    5 -> {
-                        armEndOfTrack(context)
-                        Toast.makeText(context, "🌙 Playback will pause when this finishes", Toast.LENGTH_SHORT).show()
-                    }
-                }
+
+        val listBox = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+
+        listBox.addView(
+            DarkBottomSheet.createOptionRow(
+                ctx = context,
+                title = "Off",
+                selected = st.mode == Mode.OFF
+            ) {
+                cancel()
+                Toast.makeText(context, "Sleep timer off", Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
             }
-            .setOnDismissListener { onDismiss?.invoke() }
-            .show()
+        )
+
+        listOf(15, 30, 45, 60).forEach { mins ->
+            listBox.addView(
+                DarkBottomSheet.createOptionRow(
+                    ctx = context,
+                    title = "$mins minutes",
+                    selected = st.mode == Mode.TIMED && activeMins in (mins - 14)..mins
+                ) {
+                    startMinutes(context, mins)
+                    Toast.makeText(context, "🌙 Sleep timer set for $mins min", Toast.LENGTH_SHORT).show()
+                    dialog.dismiss()
+                }
+            )
+        }
+
+        listBox.addView(
+            DarkBottomSheet.createOptionRow(
+                ctx = context,
+                title = "End of current video / song",
+                subtitle = "Pauses smoothly when this track ends",
+                selected = st.mode == Mode.END_OF_TRACK
+            ) {
+                armEndOfTrack(context)
+                Toast.makeText(context, "🌙 Playback will pause when this finishes", Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+        )
+
+        root.addView(DarkBottomSheet.wrapScrollable(context, listBox, maxHeightFraction = 0.54f))
+        DarkBottomSheet.show(dialog, root, onDismiss = onDismiss)
     }
 }

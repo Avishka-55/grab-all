@@ -390,8 +390,8 @@ class SettingsFragment : Fragment(), MainActivity.TabFragment {
         val dp = ctx.resources.displayMetrics.density
         fun d(v: Int) = (v * dp).toInt()
 
-        val dialog = createDarkBottomSheet(ctx)
-        val root = createSheetContainer(ctx, dp)
+        val dialog = DarkBottomSheet.createDialog(ctx)
+        val root = DarkBottomSheet.createContainer(ctx, horizontalPadDp = 18)
 
         // Header
         val headerRow = LinearLayout(ctx).apply {
@@ -577,8 +577,7 @@ class SettingsFragment : Fragment(), MainActivity.TabFragment {
         btnRow.addView(resetBtn)
         root.addView(btnRow)
 
-        dialog.setContentView(root)
-        dialog.show()
+        DarkBottomSheet.show(dialog, root)
     }
 
     // ---- Sleek Dark App Update Bottom Sheet ----
@@ -588,8 +587,8 @@ class SettingsFragment : Fragment(), MainActivity.TabFragment {
         val dp = ctx.resources.displayMetrics.density
         fun d(v: Int) = (v * dp).toInt()
 
-        val dialog = createDarkBottomSheet(ctx)
-        val root = createSheetContainer(ctx, dp)
+        val dialog = DarkBottomSheet.createDialog(ctx)
+        val root = DarkBottomSheet.createContainer(ctx, horizontalPadDp = 18)
 
         val headerRow = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -700,44 +699,7 @@ class SettingsFragment : Fragment(), MainActivity.TabFragment {
         })
         root.addView(btnRow)
 
-        dialog.setContentView(root)
-        dialog.show()
-    }
-
-    private fun createDarkBottomSheet(ctx: Context): Dialog {
-        return Dialog(ctx).apply {
-            requestWindowFeature(Window.FEATURE_NO_TITLE)
-            window?.apply {
-                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-                setGravity(Gravity.BOTTOM)
-                setLayout(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT
-                )
-            }
-        }
-    }
-
-    private fun createSheetContainer(ctx: Context, dp: Float): LinearLayout {
-        fun d(v: Int) = (v * dp).toInt()
-        return LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#18192B"))
-                cornerRadii = floatArrayOf(22 * dp, 22 * dp, 22 * dp, 22 * dp, 0f, 0f, 0f, 0f)
-            }
-            setPadding(d(18), d(10), d(18), d(20))
-            addView(View(ctx).apply {
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#3A3D58"))
-                    cornerRadius = 3 * dp
-                }
-                layoutParams = LinearLayout.LayoutParams(d(38), d(4)).apply {
-                    gravity = Gravity.CENTER_HORIZONTAL
-                    bottomMargin = d(12)
-                }
-            })
-        }
+        DarkBottomSheet.show(dialog, root)
     }
 
     private fun buildSheetSwitchRow(

@@ -58,6 +58,7 @@ import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.graball.BrowseActivity
+import com.graball.DarkBottomSheet
 import com.graball.LoginActivity
 import com.graball.R
 import com.graball.SleepTimerManager
@@ -1889,74 +1890,120 @@ class YouTubePlayerActivity : AppCompatActivity() {
         }
         val state = YouTubePlaybackService.currentState
         val activeIdx = if (state.captionsEnabled) state.selectedCaptionIndex else -1
-        val labels = mutableListOf(
-            if (activeIdx < 0) "✓ Off" else "Off"
+        val dp = resources.displayMetrics.density
+        fun d(v: Int) = (v * dp).toInt()
+        val orange = ContextCompat.getColor(this, R.color.graball_orange)
+
+        val dialog = DarkBottomSheet.createDialog(this)
+        val root = DarkBottomSheet.createContainer(this)
+        root.addView(
+            DarkBottomSheet.createHeader(
+                ctx = this,
+                title = "Subtitles & Captions",
+                badge = "${tracks.size} languages",
+                onClose = { dialog.dismiss() }
+            )
+        )
+
+        // Inline Text Size Selector Row (no extra dialog hop!)
+        val sizeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#202236"))
+                cornerRadius = 12 * dp
+            }
+            setPadding(d(12), d(8), d(10), d(8))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = d(10) }
+        }
+        sizeRow.addView(TextView(this).apply {
+            text = "Aa Text Size"
+            textSize = 12.5f
+            setTextColor(Color.parseColor("#C7CBE0"))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        val sizeNames = listOf("Small", "Medium", "Large")
+        val sizeChips = mutableListOf<TextView>()
+        fun refreshSizeChips(selectedIdx: Int) {
+            sizeChips.forEachIndexed { idx, chip ->
+                val active = idx == selectedIdx
+                chip.setTextColor(if (active) Color.WHITE else Color.parseColor("#9DA2BD"))
+                chip.background = GradientDrawable().apply {
+                    cornerRadius = 8 * dp
+                    setColor(if (active) orange else Color.parseColor("#2A2D46"))
+                }
+            }
+        }
+        sizeNames.forEachIndexed { idx, label ->
+            val chip = TextView(this).apply {
+                text = label
+                textSize = 11.5f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(d(10), d(5), d(10), d(5))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { if (idx > 0) marginStart = d(5) }
+                setOnClickListener {
+                    YouTubeStore.setCaptionTextSize(this@YouTubePlayerActivity, idx)
+                    updateSubtitleOverlayPosition()
+                    refreshSizeChips(idx)
+                    showHud("Subtitle size: $label")
+                }
+            }
+            sizeChips.add(chip)
+            sizeRow.addView(chip)
+        }
+        refreshSizeChips(YouTubeStore.getCaptionTextSize(this))
+        root.addView(sizeRow)
+
+        val listBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        listBox.addView(
+            DarkBottomSheet.createOptionRow(
+                ctx = this,
+                title = "Off",
+                subtitle = "Hide subtitles",
+                selected = activeIdx < 0
+            ) {
+                svc.selectCaption(null)
+                subtitleOverlay.visibility = View.GONE
+                stopSubtitleTicker()
+                showHud("Subtitles: OFF")
+                dialog.dismiss()
+            }
         )
         tracks.forEachIndexed { idx, cap ->
-            val mark = if (idx == activeIdx) "✓ " else ""
-            labels.add("$mark${cap.label}")
-        }
-        val sizeLabels = arrayOf("Small", "Medium", "Large")
-        val currentSizeIdx = YouTubeStore.getCaptionTextSize(this)
-        AlertDialog.Builder(this)
-            .setTitle("Subtitles / Captions")
-            .setItems(labels.toTypedArray()) { _, which ->
-                if (which == 0) {
-                    svc.selectCaption(null)
-                    subtitleOverlay.visibility = View.GONE
-                    stopSubtitleTicker()
-                    showHud("Subtitles: OFF")
-                } else {
-                    val chosenIdx = which - 1
-                    val label = tracks.getOrNull(chosenIdx)?.label ?: "ON"
-                    showHud("Loading CC: $label…")
-                    svc.selectCaption(chosenIdx) { loaded ->
+            listBox.addView(
+                DarkBottomSheet.createOptionRow(
+                    ctx = this,
+                    title = cap.label,
+                    selected = idx == activeIdx
+                ) {
+                    dialog.dismiss()
+                    showHud("Loading CC: ${cap.label}…")
+                    svc.selectCaption(idx) { loaded ->
                         if (isFinishing) return@selectCaption
                         if (loaded) {
-                            showHud("CC: $label")
+                            showHud("CC: ${cap.label}")
                             syncSubtitleTicker(YouTubePlaybackService.currentState)
                         } else {
                             showHud("Couldn't load captions for this track")
                         }
                     }
                 }
-            }
-            .setNeutralButton("Aa Size: ${sizeLabels[currentSizeIdx]}") { _, _ ->
-                showSubtitleSizePicker()
-            }
-            .setOnDismissListener {
-                if (isFullscreen && !inPipMode) {
-                    applyChromeVisibility()
-                }
-            }
-            .show()
-    }
+            )
+        }
 
-    private fun showSubtitleSizePicker() {
-        val current = YouTubeStore.getCaptionTextSize(this)
-        val options = arrayOf(
-            if (current == 0) "✓ Small" else "Small",
-            if (current == 1) "✓ Medium (Default)" else "Medium (Default)",
-            if (current == 2) "✓ Large" else "Large"
-        )
-        AlertDialog.Builder(this)
-            .setTitle("Subtitle Text Size")
-            .setItems(options) { _, which ->
-                YouTubeStore.setCaptionTextSize(this, which)
-                updateSubtitleOverlayPosition()
-                val name = when (which) {
-                    0 -> "Small"
-                    2 -> "Large"
-                    else -> "Medium"
-                }
-                showHud("Subtitle size: $name")
-            }
-            .setOnDismissListener {
-                if (isFullscreen && !inPipMode) {
-                    applyChromeVisibility()
-                }
-            }
-            .show()
+        root.addView(DarkBottomSheet.wrapScrollable(this, listBox, maxHeightFraction = 0.48f))
+        DarkBottomSheet.show(dialog, root) {
+            if (isFullscreen && !inPipMode) applyChromeVisibility()
+        }
     }
 
     private fun showAudioTrackPicker() {
@@ -1964,24 +2011,43 @@ class YouTubePlayerActivity : AppCompatActivity() {
         val tracks = svc.availableAudioTracks()
         if (tracks.size <= 1) return
         val currentLabel = svc.currentAudioTrackLabel()
-        val labels = tracks.map { t ->
-            val mark = if (t.label == currentLabel) "✓ " else ""
-            val suffix = if (t.isOriginal && !t.label.contains("original", ignoreCase = true)) " (Original)" else ""
-            "$mark${t.label}$suffix"
-        }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Audio Language")
-            .setItems(labels) { _, which ->
-                val chosen = tracks[which]
-                svc.selectAudioTrack(chosen.id)
-                showHud("Audio: ${chosen.label}")
-            }
-            .setOnDismissListener {
-                if (isFullscreen && !inPipMode) {
-                    applyChromeVisibility()
+
+        val dialog = DarkBottomSheet.createDialog(this)
+        val root = DarkBottomSheet.createContainer(this)
+        root.addView(
+            DarkBottomSheet.createHeader(
+                ctx = this,
+                title = "Audio Language",
+                subtitle = "Switch dub or original audio track",
+                badge = "${tracks.size} tracks",
+                onClose = { dialog.dismiss() }
+            )
+        )
+
+        val listBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        tracks.forEach { t ->
+            val selected = t.label == currentLabel
+            val cleanTitle = t.label.replace(Regex("\\s*\\(original\\)", RegexOption.IGNORE_CASE), "").trim()
+            listBox.addView(
+                DarkBottomSheet.createOptionRow(
+                    ctx = this,
+                    title = cleanTitle.ifBlank { t.label },
+                    badge = if (t.isOriginal) "ORIGINAL" else null,
+                    selected = selected
+                ) {
+                    svc.selectAudioTrack(t.id)
+                    showHud("Audio: ${t.label}")
+                    dialog.dismiss()
                 }
-            }
-            .show()
+            )
+        }
+
+        root.addView(DarkBottomSheet.wrapScrollable(this, listBox, maxHeightFraction = 0.52f))
+        DarkBottomSheet.show(dialog, root) {
+            if (isFullscreen && !inPipMode) applyChromeVisibility()
+        }
     }
 
     // ---- Quality & Speed Pickers ----
@@ -2000,73 +2066,160 @@ class YouTubePlayerActivity : AppCompatActivity() {
         }
         val audioTracks = svc.availableAudioTracks()
         val hasMultiAudio = audioTracks.size > 1
-        val labels = mutableListOf<String>()
-        if (hasMultiAudio) {
-            labels.add("🔊 Audio: ${svc.currentAudioTrackLabel()} ▸")
-        }
-        labels.add(
-            if (!state.isAudioOnly && state.selectedHeight == null) {
-                if (activeH != null) "✓ Auto (${activeH}p)" else "✓ Auto"
-            } else {
-                "Auto"
-            }
-        )
-        labels.add(
-            if (state.isAudioOnly) "✓ Audio only (battery saver)" else "Audio only (battery saver)"
-        )
-        heights.forEach { h ->
-            val mark = if (!state.isAudioOnly && effectiveCheckedH == h) "✓ " else ""
-            labels.add("$mark${h}p")
-        }
-
         val stats = svc.currentStreamStatsLabel()
-        val pickerTitle = if (stats.isNotBlank()) "Video Quality ($stats)" else "Video Quality"
 
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(pickerTitle)
-            .setItems(labels.toTypedArray()) { _, which ->
-                val offset = if (hasMultiAudio) 1 else 0
-                if (hasMultiAudio && which == 0) {
+        val dialog = DarkBottomSheet.createDialog(this)
+        val root = DarkBottomSheet.createContainer(this)
+        root.addView(
+            DarkBottomSheet.createHeader(
+                ctx = this,
+                title = "Video Quality",
+                subtitle = stats.ifBlank { "Choose playback resolution" },
+                badge = activeH?.let { "${it}p" },
+                onClose = { dialog.dismiss() }
+            )
+        )
+
+        val listBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        if (hasMultiAudio) {
+            listBox.addView(
+                DarkBottomSheet.createOptionRow(
+                    ctx = this,
+                    title = "🔊 Audio Language",
+                    subtitle = svc.currentAudioTrackLabel(),
+                    trailingText = "›"
+                ) {
+                    dialog.dismiss()
                     showAudioTrackPicker()
-                    return@setItems
                 }
-                when (which - offset) {
-                    0 -> {
-                        svc.setAudioOnlyMode(false)
-                        svc.setQuality(null)
-                        showHud("Quality: Auto")
-                    }
-                    1 -> {
-                        svc.setAudioOnlyMode(true)
-                        showHud("Audio Only")
-                    }
-                    else -> {
-                        val h = heights[which - offset - 2]
-                        svc.setAudioOnlyMode(false)
-                        svc.setQuality(h)
-                        showHud("Quality: ${h}p")
-                    }
-                }
+            )
+        }
+
+        val autoSelected = !state.isAudioOnly && state.selectedHeight == null
+        listBox.addView(
+            DarkBottomSheet.createOptionRow(
+                ctx = this,
+                title = "Auto",
+                subtitle = if (activeH != null) "Adapts to network · Currently ${activeH}p" else "Adapts to your connection",
+                badge = "AUTO",
+                selected = autoSelected
+            ) {
+                svc.setAudioOnlyMode(false)
+                svc.setQuality(null)
+                showHud("Quality: Auto")
+                dialog.dismiss()
             }
-            .setOnDismissListener {
-                if (isFullscreen && !inPipMode) {
-                    applyChromeVisibility()
-                }
+        )
+
+        listBox.addView(
+            DarkBottomSheet.createOptionRow(
+                ctx = this,
+                title = "🎧 Audio Only",
+                subtitle = "Saves battery & mobile data",
+                selected = state.isAudioOnly
+            ) {
+                svc.setAudioOnlyMode(true)
+                showHud("Audio Only")
+                dialog.dismiss()
             }
-            .create()
-        dialog.show()
+        )
+
+        heights.forEach { h ->
+            val qualityBadge = when {
+                h >= 2160 -> "4K"
+                h >= 1440 -> "2K"
+                h >= 720 -> "HD"
+                else -> null
+            }
+            val selected = !state.isAudioOnly && effectiveCheckedH == h
+            listBox.addView(
+                DarkBottomSheet.createOptionRow(
+                    ctx = this,
+                    title = "${h}p",
+                    badge = qualityBadge,
+                    selected = selected
+                ) {
+                    svc.setAudioOnlyMode(false)
+                    svc.setQuality(h)
+                    showHud("Quality: ${h}p")
+                    dialog.dismiss()
+                }
+            )
+        }
+
+        root.addView(DarkBottomSheet.wrapScrollable(this, listBox, maxHeightFraction = 0.54f))
+        DarkBottomSheet.show(dialog, root) {
+            if (isFullscreen && !inPipMode) applyChromeVisibility()
+        }
     }
 
     private fun showSpeedPicker() {
         val svc = YouTubePlaybackService.instance ?: return
         val speeds = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
-        val labels = speeds.map { "${trimSpeed(it)}×" }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Playback Speed")
-            .setItems(labels) { _, which ->
-                svc.setSpeed(speeds[which])
+        val current = YouTubePlaybackService.currentState.playbackSpeed
+        val dp = resources.displayMetrics.density
+        fun d(v: Int) = (v * dp).toInt()
+        val orange = ContextCompat.getColor(this, R.color.graball_orange)
+
+        val dialog = DarkBottomSheet.createDialog(this)
+        val root = DarkBottomSheet.createContainer(this)
+        root.addView(
+            DarkBottomSheet.createHeader(
+                ctx = this,
+                title = "Playback Speed",
+                badge = "${trimSpeed(current)}×",
+                onClose = { dialog.dismiss() }
+            )
+        )
+
+        // Clean 2-row pill grid for instant 1-tap selection
+        val row1 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = d(8) }
+        }
+        val row2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        speeds.forEachIndexed { idx, sp ->
+            val selected = abs(sp - current) < 0.05f
+            val chip = TextView(this).apply {
+                text = if (sp == 1.0f) "1× Normal" else "${trimSpeed(sp)}×"
+                textSize = 13.5f
+                setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                setTextColor(if (selected) Color.WHITE else Color.parseColor("#D0D4E6"))
+                gravity = Gravity.CENTER
+                background = GradientDrawable().apply {
+                    cornerRadius = 12 * dp
+                    setColor(if (selected) orange else Color.parseColor("#202236"))
+                }
+                layoutParams = LinearLayout.LayoutParams(0, d(42), 1f).apply {
+                    val isLastInRow = (idx == 3 || idx == speeds.lastIndex)
+                    if (!isLastInRow) marginEnd = d(7)
+                }
+                setOnClickListener {
+                    svc.setSpeed(sp)
+                    showHud("Speed: ${trimSpeed(sp)}×")
+                    dialog.dismiss()
+                }
             }
-            .show()
+            if (idx < 4) row1.addView(chip) else row2.addView(chip)
+        }
+        root.addView(row1)
+        root.addView(row2)
+
+        DarkBottomSheet.show(dialog, root) {
+            if (isFullscreen && !inPipMode) applyChromeVisibility()
+        }
     }
 
     private fun updateBookmarkChip(bookmarked: Boolean) {

@@ -1695,8 +1695,8 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
         fun d(v: Int) = (v * dp).toInt()
         val orange = ContextCompat.getColor(ctx, R.color.graball_orange)
 
-        val dialog = createMusicBottomSheet(ctx)
-        val root = createMusicSheetContainer(ctx, dp)
+        val dialog = DarkBottomSheet.createDialog(ctx)
+        val root = DarkBottomSheet.createContainer(ctx, horizontalPadDp = 16)
 
         // Header
         val header = LinearLayout(ctx).apply {
@@ -1836,8 +1836,7 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
             )
         }
         root.addView(rv)
-        dialog.setContentView(root)
-        dialog.show()
+        DarkBottomSheet.show(dialog, root)
     }
 
     private fun audioReadPermission(): String {
@@ -2325,8 +2324,8 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
         val orange = ContextCompat.getColor(ctx, R.color.graball_orange)
 
         val checked = BooleanArray(allFolders.size) { i -> isFolderVisible(allFolders[i]) }
-        val dialog = createMusicBottomSheet(ctx)
-        val root = createMusicSheetContainer(ctx, dp)
+        val dialog = DarkBottomSheet.createDialog(ctx)
+        val root = DarkBottomSheet.createContainer(ctx, horizontalPadDp = 16)
 
         // Header
         val header = LinearLayout(ctx).apply {
@@ -2563,8 +2562,7 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
         })
         root.addView(btnRow)
 
-        dialog.setContentView(root)
-        dialog.show()
+        DarkBottomSheet.show(dialog, root)
     }
 
     // ---- Sorting (Custom Dark Bottom Sheet) ----
@@ -2576,8 +2574,8 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
         val orange = ContextCompat.getColor(ctx, R.color.graball_orange)
         val modes = SortMode.values()
 
-        val dialog = createMusicBottomSheet(ctx)
-        val root = createMusicSheetContainer(ctx, dp)
+        val dialog = DarkBottomSheet.createDialog(ctx)
+        val root = DarkBottomSheet.createContainer(ctx, horizontalPadDp = 16)
 
         val header = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -2640,44 +2638,7 @@ class MusicFragment : Fragment(), MainActivity.TabFragment {
             root.addView(row)
         }
 
-        dialog.setContentView(root)
-        dialog.show()
-    }
-
-    private fun createMusicBottomSheet(ctx: Context): Dialog {
-        return Dialog(ctx).apply {
-            requestWindowFeature(Window.FEATURE_NO_TITLE)
-            window?.apply {
-                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-                setGravity(Gravity.BOTTOM)
-                setLayout(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT
-                )
-            }
-        }
-    }
-
-    private fun createMusicSheetContainer(ctx: Context, dp: Float): LinearLayout {
-        fun d(v: Int) = (v * dp).toInt()
-        return LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#18192B"))
-                cornerRadii = floatArrayOf(22 * dp, 22 * dp, 22 * dp, 22 * dp, 0f, 0f, 0f, 0f)
-            }
-            setPadding(d(16), d(10), d(16), d(18))
-            addView(View(ctx).apply {
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#3A3D58"))
-                    cornerRadius = 3 * dp
-                }
-                layoutParams = LinearLayout.LayoutParams(d(38), d(4)).apply {
-                    gravity = Gravity.CENTER_HORIZONTAL
-                    bottomMargin = d(12)
-                }
-            })
-        }
+        DarkBottomSheet.show(dialog, root)
     }
 
     private fun buildSheetCloseButton(ctx: Context, dp: Float, onClick: () -> Unit): TextView {

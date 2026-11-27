@@ -12,4 +12,9 @@
         <item name="android:navigationBarColor">@color/graball_nav</item>
         <item name="colorAccent">@color/graball_orange</item>
     </style>
+
+    <style name="GrabAllBottomSheetAnim">
+        <item name="android:windowEnterAnimation">@anim/slide_in_up</item>
+        <item name="android:windowExitAnimation">@anim/slide_out_down</item>
+    </style>
 </resources>
