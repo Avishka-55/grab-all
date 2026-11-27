@@ -66,9 +66,20 @@ object YouTubeJsSolver {
     )
 
     private val http = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(18, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .connectionPool(okhttp3.ConnectionPool(4, 45, TimeUnit.SECONDS))
         .build()
+
+    fun evictIdleConnections() {
+        try {
+            http.connectionPool.evictAll()
+        } catch (_: Exception) {
+        }
+    }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val initLock = Any()

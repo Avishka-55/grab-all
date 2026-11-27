@@ -31,6 +31,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import com.graball.BrowseActivity
+import com.graball.GrabAllApp
 import com.graball.LoginActivity
 import com.graball.R
 import com.graball.engine.WebViewCookieSync
@@ -97,8 +98,9 @@ class YouTubeActivity : AppCompatActivity() {
     private lateinit var filterChips: Map<YouTubeInnerTube.SearchFilter, TextView>
     private lateinit var adapter: YtItemAdapter
 
-    private val io = Executors.newSingleThreadExecutor()
+    private val io = Executors.newFixedThreadPool(2)
     private val suggestIo = Executors.newSingleThreadExecutor()
+    private var lastSeenNetGen = GrabAllApp.networkGeneration
     private val mainHandler = Handler(Looper.getMainLooper())
     private var suggestRunnable: Runnable? = null
     private var suppressSuggestions = false
@@ -444,6 +446,15 @@ class YouTubeActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        val netGenNow = GrabAllApp.networkGeneration
+        if (netGenNow != lastSeenNetGen) {
+            lastSeenNetGen = netGenNow
+            if (accountAvatar.drawable == null) {
+                loadedAvatarUrl = null
+            }
+            ThumbnailLoader.retryMissingImagesIn(recycler)
+            ThumbnailLoader.retryMissingImagesIn(miniBar, defaultTargetWidthPx = 160)
+        }
         refreshAccountButton()
         val fp = currentAccountFingerprint()
         if (lastAccountFingerprint != null && fp != lastAccountFingerprint) {

@@ -2,6 +2,7 @@ package com.graball.youtube
 
 import android.util.Log
 import com.graball.engine.WebViewCookieSync
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -58,8 +59,13 @@ object YouTubeSessionConfig {
      */
     val sharedOkHttpClient: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(WebViewCookieSync.okHttpCookieJar)
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(18, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .pingInterval(25, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(8, 45, TimeUnit.SECONDS))
         .build()
 
     /**
@@ -67,9 +73,25 @@ object YouTubeSessionConfig {
      * (`VISIONOS`, `ANDROID_VR`, `IOS`) and autocomplete suggestions.
      */
     val anonymousOkHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(18, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .pingInterval(25, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(8, 45, TimeUnit.SECONDS))
         .build()
+
+    fun evictIdleConnections() {
+        try {
+            sharedOkHttpClient.connectionPool.evictAll()
+        } catch (_: Exception) {
+        }
+        try {
+            anonymousOkHttpClient.connectionPool.evictAll()
+        } catch (_: Exception) {
+        }
+    }
 
     private val lock = Any()
 

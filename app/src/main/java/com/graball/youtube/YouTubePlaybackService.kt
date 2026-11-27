@@ -355,6 +355,9 @@ class YouTubePlaybackService : MediaSessionService() {
                                 0L
                             }
                         val recoverable = error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
+                            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
+                            error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
                             error.errorCode == PlaybackException.ERROR_CODE_FAILED_RUNTIME_CHECK ||
                             error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ||
                             error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ||
@@ -367,11 +370,14 @@ class YouTubePlaybackService : MediaSessionService() {
                         }
                         if (info != null && error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
                             evictStreamFromCache(info)
-                            // Remember the format that was rejected so the fresh
-                            // re-resolve doesn't pick the same dead itag again.
+                            // Remember the format that was rejected (query ?itag= OR HLS /itag/95/)
+                            // so the fresh re-resolve doesn't pick the same dead itag again.
                             val http = error.cause as? HttpDataSource.InvalidResponseCodeException
                             if (http != null && (http.responseCode == 403 || http.responseCode == 416)) {
-                                http.dataSpec.uri.getQueryParameter("itag")?.toIntOrNull()?.let {
+                                val uri = http.dataSpec.uri
+                                val badItag = uri.getQueryParameter("itag")?.toIntOrNull()
+                                    ?: PATH_ITAG_REGEX.find(uri.toString())?.groupValues?.getOrNull(1)?.toIntOrNull()
+                                badItag?.let {
                                     failedItagsVideoId = info.videoId
                                     failedItags.add(it)
                                 }
@@ -384,20 +390,22 @@ class YouTubePlaybackService : MediaSessionService() {
                             broadcastState()
                             return
                         }
-                        // If a transient HTTP error (e.g. 403/416/503 from an early seek or
-                        // expired/rate-limited GoogleVideo range) hits with no fallback mode
-                        // left, silently re-resolve a fresh stream once at the target position.
+                        // Escalating recovery when all modes fail on HTTP 403 or VPN drop:
+                        // Attempt 1 -> evict sockets & force-refresh V8 base.js + ytcfg.
+                        // Attempt 2 -> bypass V8 completely and escalate directly to yt-dlp + QuickJS.
                         if (recoverable &&
                             autoRecoveryAttempts < 2 &&
                             queueIndex in queue.indices
                         ) {
                             autoRecoveryAttempts++
-                            Log.w(TAG, "Auto-recovering from BAD_HTTP_STATUS at ${pos}ms")
+                            val level = autoRecoveryAttempts
+                            Log.w(TAG, "Auto-recovering (level=$level) from ${error.errorCodeName} at ${pos}ms")
                             loadAtIndex(
                                 queueIndex,
                                 startFromBeginning = (pos == 0L),
                                 overrideStartPositionMs = pos.takeIf { it > 0L },
-                                resetRecoveryCounter = false
+                                resetRecoveryCounter = false,
+                                recoveryLevel = level
                             )
                             return
                         }
@@ -516,6 +524,12 @@ class YouTubePlaybackService : MediaSessionService() {
         if (p == null || !p.playWhenReady || p.playbackState == Player.STATE_IDLE) {
             stopSelf()
         }
+    }
+
+    fun clearPreloadedStreamInfo() {
+        preloadedStreamInfo = null
+        preloadedAtMs = 0L
+        preloadingVideoId = null
     }
 
     override fun onDestroy() {
@@ -1055,7 +1069,8 @@ class YouTubePlaybackService : MediaSessionService() {
         index: Int,
         startFromBeginning: Boolean = false,
         overrideStartPositionMs: Long? = null,
-        resetRecoveryCounter: Boolean = true
+        resetRecoveryCounter: Boolean = true,
+        recoveryLevel: Int = 0
     ) {
         val item = queue.getOrNull(index) ?: return
         playedVideoIds.add(item.id)
@@ -1075,13 +1090,22 @@ class YouTubePlaybackService : MediaSessionService() {
             loadedSubtitleKey = null
         }
         // Watchdog: if resolving hangs (slow/blocked network tier), silently retry
-        // once instead of leaving the user on an endless spinner.
+        // once instead of leaving the user on an endless spinner. Give escalated
+        // yt-dlp + QuickJS fallback (recoveryLevel >= 2) enough room to finish.
+        val watchdogMs = if (recoveryLevel >= 2) 60_000L else 25_000L
         mainHandler.postDelayed({
             if (gen != loadGeneration || !isLoading) return@postDelayed
             if (stallRetries < 1 && index in queue.indices) {
                 stallRetries++
-                Log.w(TAG, "Resolve stalled >20s for ${item.id}, auto-retrying")
-                loadAtIndex(index, startFromBeginning, overrideStartPositionMs, resetRecoveryCounter = false)
+                val nextLevel = (recoveryLevel + 1).coerceAtMost(2)
+                Log.w(TAG, "Resolve stalled >${watchdogMs}ms for ${item.id}, auto-retrying (level=$nextLevel)")
+                loadAtIndex(
+                    index,
+                    startFromBeginning,
+                    overrideStartPositionMs,
+                    resetRecoveryCounter = false,
+                    recoveryLevel = nextLevel
+                )
             } else {
                 loadGeneration++
                 isLoading = false
@@ -1089,7 +1113,7 @@ class YouTubePlaybackService : MediaSessionService() {
                 lastError = "Taking too long to load. Tap Retry."
                 broadcastState()
             }
-        }, 20_000L)
+        }, watchdogMs)
         // Set loading state BEFORE player?.stop() so ExoPlayer's synchronous
         // onIsPlayingChanged(false) callback keeps the foreground notification pinned.
         isLoading = true
@@ -1127,8 +1151,9 @@ class YouTubePlaybackService : MediaSessionService() {
         ioExecutor.execute {
             try {
                 val result = YouTubeInnerTube.resolveStreams(
-                    applicationContext,
-                    item.id
+                    context = applicationContext,
+                    videoId = item.id,
+                    recoveryLevel = recoveryLevel
                 ) { status ->
                     mainHandler.post {
                         if (gen == loadGeneration && isLoading) {
@@ -2084,6 +2109,13 @@ class YouTubePlaybackService : MediaSessionService() {
                 File(context.applicationContext.cacheDir, "yt_media_cache").deleteRecursively()
             } catch (_: Exception) {
             }
+        }
+
+        private val PATH_ITAG_REGEX = Regex("""/itag/(\d+)/""")
+
+        /** Called by [com.graball.GrabAllApp] on VPN/network transitions to drop IP-bound preloads. */
+        fun onNetworkChanged() {
+            instance?.clearPreloadedStreamInfo()
         }
 
         @Volatile

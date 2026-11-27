@@ -2,6 +2,7 @@ package com.graball.youtube
 
 import android.util.Log
 import android.webkit.CookieManager
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
@@ -28,8 +29,19 @@ object YouTubeSubtitleParser {
     private val client = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(14, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .connectionPool(ConnectionPool(4, 45, TimeUnit.SECONDS))
         .followRedirects(true)
         .build()
+
+    fun evictIdleConnections() {
+        try {
+            client.connectionPool.evictAll()
+        } catch (_: Exception) {
+        }
+    }
 
     private val TTML_P_REGEX = Regex(
         """<p\b([^>]*)>(.*?)</p>""",
@@ -47,6 +59,7 @@ object YouTubeSubtitleParser {
     )
     private val NUMERIC_ENTITY_REGEX = Regex("""&#(\d+);""")
     private val HEX_ENTITY_REGEX = Regex("""&#x([0-9a-fA-F]+);""")
+    private val WHITESPACE_REGEX = Regex("""\s+""")
 
     /** Fetch & parse a single [CaptionTrack] off the main thread. */
     fun fetchAndParse(track: CaptionTrack, userAgent: String): List<SubtitleCue> {
@@ -97,10 +110,92 @@ object YouTubeSubtitleParser {
             trimmed.contains("<text ", ignoreCase = true) -> parseXmlText(trimmed)
             else -> emptyList()
         }
-        return cues.sortedBy { it.startMs }
+        return normalizeCues(cues)
     }
 
-    /** O(log N) lookup of active subtitle lines at [positionMs]. */
+    /**
+     * Cleans YouTube's rolling 2-line captions (TTML/SRV3 overlapping durations
+     * and WebVTT repeated-prefix lines) so each new caption appears cleanly
+     * without repeating the previous caption above it:
+     * - Strips leading lines that duplicate the previous cue's trailing line(s).
+     * - Merges truly simultaneous cues (within 150ms start delta, e.g. two speakers).
+     * - Clamps sequential overlapping durations (`prev.endMs = next.startMs`) so
+     *   stale previous lines disappear the moment the new caption begins.
+     */
+    private fun normalizeCues(raw: List<SubtitleCue>): List<SubtitleCue> {
+        if (raw.isEmpty()) return emptyList()
+        val sorted = raw.sortedWith(compareBy<SubtitleCue> { it.startMs }.thenBy { it.endMs })
+        val out = ArrayList<SubtitleCue>(sorted.size)
+
+        for (cue in sorted) {
+            val cueLines = cue.text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            if (cueLines.isEmpty() || cue.endMs <= cue.startMs) continue
+
+            if (out.isEmpty()) {
+                out.add(cue.copy(text = cueLines.joinToString("\n")))
+                continue
+            }
+
+            val prev = out.last()
+            val prevLines = prev.text.lines()
+
+            // 1) Strip repeated rolling prefix lines carried over from the previous cue
+            //    (common in YouTube auto-generated WebVTT and scrolling TTML).
+            val dedupedLines = stripRepeatedPrefix(prevLines, cueLines)
+            if (dedupedLines.isEmpty()) {
+                // Pure duplicate of previous cue: extend its end time cleanly.
+                out[out.lastIndex] = prev.copy(endMs = maxOf(prev.endMs, cue.endMs))
+                continue
+            }
+            val cleanedText = dedupedLines.joinToString("\n")
+
+            // 2) Same timestamp (simultaneous speakers): merge into one multi-line cue.
+            if (cue.startMs - prev.startMs <= 150L) {
+                val mergedLines = (prevLines + dedupedLines).distinct()
+                out[out.lastIndex] = SubtitleCue(
+                    startMs = prev.startMs,
+                    endMs = maxOf(prev.endMs, cue.endMs),
+                    text = mergedLines.take(3).joinToString("\n")
+                )
+                continue
+            }
+
+            // 3) Sequential cue overlapping previous cue's padded rolling duration:
+            //    end the previous cue right where the new caption starts.
+            if (prev.endMs > cue.startMs) {
+                out[out.lastIndex] = prev.copy(endMs = cue.startMs)
+            }
+            out.add(SubtitleCue(cue.startMs, cue.endMs, cleanedText))
+        }
+        return out.filter { it.endMs > it.startMs && it.text.isNotBlank() }
+    }
+
+    /**
+     * Removes leading lines of [curLines] that repeat the trailing lines of [prevLines]
+     * (case-insensitive, normalized whitespace) — e.g. when a rolling VTT cue repeats
+     * line 1 from the previous cue and adds line 2 below it.
+     */
+    private fun stripRepeatedPrefix(prevLines: List<String>, curLines: List<String>): List<String> {
+        fun norm(s: String): String = s.trim().replace(WHITESPACE_REGEX, " ").lowercase()
+        val prevNorm = prevLines.map(::norm)
+        val curNorm = curLines.map(::norm)
+
+        // Exact full match with previous cue or its last line
+        if (curNorm == prevNorm) return emptyList()
+
+        // Find the largest overlap k where the last k lines of prev equal the first k lines of cur
+        val maxK = minOf(prevNorm.size, curNorm.size)
+        for (k in maxK downTo 1) {
+            val prevTail = prevNorm.subList(prevNorm.size - k, prevNorm.size)
+            val curHead = curNorm.subList(0, k)
+            if (prevTail == curHead) {
+                return curLines.drop(k)
+            }
+        }
+        return curLines
+    }
+
+    /** O(log N) lookup of the active subtitle cue at [positionMs]. */
     fun findActiveText(cues: List<SubtitleCue>, positionMs: Long): String? {
         if (cues.isEmpty() || positionMs < 0L) return null
         // Binary search for the rightmost cue with startMs <= positionMs
@@ -117,18 +212,8 @@ object YouTubeSubtitleParser {
             }
         }
         if (idx < 0) return null
-        // Collect up to 2 overlapping cues near idx (handles brief overlaps cleanly)
-        val lines = mutableListOf<String>()
-        val scanStart = (idx - 4).coerceAtLeast(0)
-        for (i in scanStart..idx) {
-            val c = cues[i]
-            if (positionMs in c.startMs..c.endMs) {
-                if (lines.lastOrNull() != c.text) {
-                    lines.add(c.text)
-                }
-            }
-        }
-        return if (lines.isEmpty()) null else lines.takeLast(2).joinToString("\n")
+        val cue = cues[idx]
+        return if (positionMs >= cue.startMs && positionMs < cue.endMs) cue.text else null
     }
 
     private fun parseTtmlOrSrv3(xml: String): List<SubtitleCue> {

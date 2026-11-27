@@ -6,10 +6,14 @@ import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
 import android.util.LruCache
+import android.view.View
+import android.view.ViewGroup
 import android.widget.ImageView
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -26,10 +30,15 @@ object ThumbnailLoader {
     private const val MAX_DISK_BYTES = 16L * 1024L * 1024L
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val executor = Executors.newFixedThreadPool(3)
+    // 6 workers so 2-3 slow VPN sockets never starve visible thumbnails & channel avatars.
+    private val executor = Executors.newFixedThreadPool(6)
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .writeTimeout(6, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .connectionPool(ConnectionPool(6, 45, TimeUnit.SECONDS))
         .build()
 
     @Volatile
@@ -114,6 +123,36 @@ object ThumbnailLoader {
         return bmp
     }
 
+    fun evictIdleConnections() {
+        try {
+            client.connectionPool.evictAll()
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Re-triggers loading ONLY for visible [ImageView]s under [root] that have a
+     * pending HTTP URL tag but still have a blank/black drawable (e.g. after a
+     * screen-off Doze / VPN tunnel drop timed out the initial request). Already-
+     * loaded images are untouched (zero flicker).
+     */
+    fun retryMissingImagesIn(root: View?, defaultTargetWidthPx: Int = 360) {
+        if (root == null) return
+        if (root is ImageView) {
+            val tagUrl = root.tag as? String
+            if (!tagUrl.isNullOrBlank() && tagUrl.startsWith("http") && root.drawable == null) {
+                val targetW = root.width.takeIf { it > 0 }?.coerceIn(96, 720) ?: defaultTargetWidthPx
+                load(tagUrl, root, targetWidthPx = targetW)
+            }
+            return
+        }
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                retryMissingImagesIn(root.getChildAt(i), defaultTargetWidthPx)
+            }
+        }
+    }
+
     fun clearAll(context: Context) {
         cache.evictAll()
         try {
@@ -148,15 +187,24 @@ object ThumbnailLoader {
     }
 
     private fun fetchBytes(url: String): ByteArray? {
-        return try {
-            val req = Request.Builder().url(url).build()
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                resp.body?.bytes()
+        for (attempt in 0..1) {
+            try {
+                val req = Request.Builder().url(url).build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return null
+                    return resp.body?.bytes()
+                }
+            } catch (_: IOException) {
+                // Stale pooled socket after screen-off/VPN switch: evict idle sockets
+                // and retry once on a fresh connection.
+                if (attempt == 0) {
+                    evictIdleConnections()
+                }
+            } catch (_: Throwable) {
+                return null
             }
-        } catch (_: Throwable) {
-            null
         }
+        return null
     }
 
     private fun decodeBytes(bytes: ByteArray, targetW: Int): Bitmap? {

@@ -59,6 +59,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.graball.BrowseActivity
 import com.graball.DarkBottomSheet
+import com.graball.GrabAllApp
 import com.graball.LoginActivity
 import com.graball.R
 import com.graball.SleepTimerManager
@@ -131,7 +132,8 @@ class YouTubePlayerActivity : AppCompatActivity() {
     private data class VideoChapter(val timeMs: Long, val timeLabel: String, val title: String)
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val io = Executors.newSingleThreadExecutor()
+    private val io = Executors.newFixedThreadPool(3)
+    private var lastSeenNetGen = GrabAllApp.networkGeneration
     private var lastRelatedVideoId: String? = null
     private var lastChaptersDescKey: String? = null
     private var currentEngagement: YouTubeInnerTube.VideoEngagement? = null
@@ -465,6 +467,15 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        val netGenNow = GrabAllApp.networkGeneration
+        if (netGenNow != lastSeenNetGen) {
+            lastSeenNetGen = netGenNow
+            ThumbnailLoader.retryMissingImagesIn(window.decorView)
+            val vid = lastRelatedVideoId
+            if (currentEngagement == null && !vid.isNullOrBlank()) {
+                loadRelated(vid)
+            }
+        }
         if (!inPipMode && !isFullscreen) {
             floatingAudio.attach()
         }

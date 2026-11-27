@@ -1509,93 +1509,108 @@ object YouTubeInnerTube {
     fun resolveStreams(
         context: Context,
         videoId: String,
+        recoveryLevel: Int = 0,
         onStatus: ((String) -> Unit)? = null
     ): ResolveResult {
+        if (recoveryLevel >= 1) {
+            YouTubeSessionConfig.evictIdleConnections()
+            YouTubeJsSolver.evictIdleConnections()
+        }
         val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
         val hasCookies = authHeaders != null
         val visitorData by lazy { ensureVisitorData() }
         var tier1Error: String? = null
 
-        // Step 1 (~250ms off-VPN, zero WebView, 144p-4K + HLS):
-        // Always try VISIONOS first with no 15-minute lockout so turning off VPN
-        // immediately restores instant 250ms HD playback.
-        onStatus?.invoke("Connecting to YouTube…")
-        val visionOs = resolveViaClient(
-            videoId = videoId,
-            clientName = "VISIONOS",
-            clientVersion = VISIONOS_CLIENT_VERSION,
-            clientNameId = "101",
-            userAgent = VISIONOS_UA,
-            visitorData = visitorData,
-            extraClientFields = mapOf(
-                "deviceMake" to "Apple",
-                "deviceModel" to "RealityDevice17,1",
-                "osName" to "visionOS",
-                "osVersion" to "26.6.1"
-            )
-        )
-        if (visionOs.info != null) {
-            val vAudio = visionOs.info.audioStreams
-            val onlyDubbedReturned = vAudio.isNotEmpty() &&
-                vAudio.none { it.isOriginalAudio } &&
-                vAudio.all { it.isDubbedOrDescriptive }
-            if (!onlyDubbedReturned) {
-                return visionOs
-            }
-            Log.d(TAG, "VISIONOS returned only dubbed audio for $videoId; trying next client for original audio")
-        }
-        tier1Error = visionOs.error
-
-        if (!looksLikeBotBlock(visionOs.error)) {
-            val androidVr = resolveViaClient(
-                videoId = videoId,
-                clientName = "ANDROID_VR",
-                clientVersion = ANDROID_VR_CLIENT_VERSION,
-                clientNameId = "28",
-                userAgent = ANDROID_VR_UA,
-                visitorData = visitorData,
-                extraClientFields = mapOf(
-                    "deviceMake" to "Oculus",
-                    "deviceModel" to "Quest 3",
-                    "androidSdkVersion" to 32,
-                    "osName" to "Android",
-                    "osVersion" to "12L"
+        // Recovery level >= 2 means Tier 1 & Tier 2 (V8) URLs already got HTTP 403
+        // from ExoPlayer on this VPN IP: skip directly to bundled yt-dlp + QuickJS!
+        if (recoveryLevel < 2) {
+            // Step 1 (~250ms off-VPN, zero WebView, 144p-4K + HLS):
+            // Always try VISIONOS first with no 15-minute lockout so turning off VPN
+            // immediately restores instant 250ms HD playback.
+            if (recoveryLevel == 0) {
+                onStatus?.invoke("Connecting to YouTube…")
+                val visionOs = resolveViaClient(
+                    videoId = videoId,
+                    clientName = "VISIONOS",
+                    clientVersion = VISIONOS_CLIENT_VERSION,
+                    clientNameId = "101",
+                    userAgent = VISIONOS_UA,
+                    visitorData = visitorData,
+                    extraClientFields = mapOf(
+                        "deviceMake" to "Apple",
+                        "deviceModel" to "RealityDevice17,1",
+                        "osName" to "visionOS",
+                        "osVersion" to "26.6.1"
+                    )
                 )
-            )
-            if (androidVr.info != null) {
-                return androidVr
-            }
-        }
+                if (visionOs.info != null) {
+                    val vAudio = visionOs.info.audioStreams
+                    val onlyDubbedReturned = vAudio.isNotEmpty() &&
+                        vAudio.none { it.isOriginalAudio } &&
+                        vAudio.all { it.isDubbedOrDescriptive }
+                    if (!onlyDubbedReturned) {
+                        return visionOs
+                    }
+                    Log.d(TAG, "VISIONOS returned only dubbed audio for $videoId; trying next client for original audio")
+                }
+                tier1Error = visionOs.error
 
-        // Step 2 (~0.7s on VPN, full 144p-1080p HLS):
-        // Uses our ~165ms native V8 player_ias base.js solver (zero AST parsing)
-        // to solve `/n/` on `web_safari` 144p-1080p HLS (or `TV_SAMSUNG` adaptive).
-        onStatus?.invoke("Loading HD stream…")
-        val v8 = resolveViaV8(
-            context = context,
-            videoId = videoId,
-            visitorData = visitorData,
-            authHeaders = authHeaders,
-            includeHlsFallback = true
-        )
-        if (v8.info != null) {
-            return v8
+                if (!looksLikeBotBlock(visionOs.error)) {
+                    val androidVr = resolveViaClient(
+                        videoId = videoId,
+                        clientName = "ANDROID_VR",
+                        clientVersion = ANDROID_VR_CLIENT_VERSION,
+                        clientNameId = "28",
+                        userAgent = ANDROID_VR_UA,
+                        visitorData = visitorData,
+                        extraClientFields = mapOf(
+                            "deviceMake" to "Oculus",
+                            "deviceModel" to "Quest 3",
+                            "androidSdkVersion" to 32,
+                            "osName" to "Android",
+                            "osVersion" to "12L"
+                        )
+                    )
+                    if (androidVr.info != null) {
+                        return androidVr
+                    }
+                }
+            }
+
+            // Step 2 (~0.7s on VPN, full 144p-1080p HLS / 4K TV_SAMSUNG):
+            // Uses our ~165ms native V8 player_ias base.js solver (zero AST parsing).
+            // On recoveryLevel == 1 (after HTTP 403), force-refresh base.js & ytcfg
+            // so rotated signatures or a new VPN exit IP are healed immediately.
+            onStatus?.invoke(
+                if (recoveryLevel == 1) "Refreshing stream session…" else "Loading HD stream…"
+            )
+            val v8 = resolveViaV8(
+                context = context,
+                videoId = videoId,
+                visitorData = visitorData,
+                authHeaders = authHeaders,
+                includeHlsFallback = true,
+                forceRefreshSolver = (recoveryLevel >= 1)
+            )
+            if (v8.info != null) {
+                return v8
+            }
+            Log.d(TAG, "Step 2 native V8 failed ($videoId: ${v8.error}), falling back to yt-dlp")
+            if (tier1Error.isNullOrBlank()) tier1Error = v8.error
         }
-        Log.d(TAG, "Step 2 native V8 failed ($videoId: ${v8.error}), falling back to yt-dlp")
 
         // Step 3 (Guaranteed 144p-1080p safety-net via bundled yt-dlp + QuickJS + live cookies):
         onStatus?.invoke(
-            if (hasCookies && !hasWarmJsSolverCache(context)) {
-                "Preparing YouTube engine (first time only)…"
-            } else {
-                "Resolving HD stream…"
+            when {
+                recoveryLevel >= 2 -> "Switching to fallback engine…"
+                hasCookies && !hasWarmJsSolverCache(context) -> "Preparing YouTube engine (first time only)…"
+                else -> "Resolving HD stream…"
             }
         )
         val ytDlpResult = resolveViaYtDlp(context, videoId)
         if (ytDlpResult.info != null) return ytDlpResult
 
         val reason = ytDlpResult.error?.takeIf { it.isNotBlank() }
-            ?: v8.error?.takeIf { it.isNotBlank() }
             ?: tier1Error?.takeIf { it.isNotBlank() }
             ?: "Couldn't load stream for this video"
         return ResolveResult(null, reason)
@@ -1615,14 +1630,19 @@ object YouTubeInnerTube {
         videoId: String,
         visitorData: String?,
         authHeaders: WebViewCookieSync.YouTubeAuthHeaders?,
-        includeHlsFallback: Boolean
+        includeHlsFallback: Boolean,
+        forceRefreshSolver: Boolean = false
     ): ResolveResult {
-        val ready = YouTubeJsSolver.ensureReady(context)
+        if (forceRefreshSolver) {
+            YouTubeJsSolver.invalidate()
+            YouTubeSessionConfig.invalidate()
+        }
+        val ready = YouTubeJsSolver.ensureReady(context, forceRefresh = forceRefreshSolver)
             ?: return ResolveResult(
                 null,
                 "V8 JS solver unavailable (${YouTubeJsSolver.lastError.ifBlank { "unknown" }})"
             )
-        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val cfg = YouTubeSessionConfig.ensureWebConfig(forceRefresh = forceRefreshSolver)
         var effectiveSts = cfg.signatureTimestamp ?: ready.signatureTimestamp
         var lastReason: String? = null
 
