@@ -38,43 +38,45 @@ object YouTubeInnerTube {
     private const val WEB_CLIENT_VERSION = YouTubeSessionConfig.FALLBACK_WEB_CLIENT_VERSION
     private const val WEB_UA = YouTubeSessionConfig.DESKTOP_WEB_UA
 
-    private const val VISIONOS_CLIENT_VERSION = "1.03"
-    private const val VISIONOS_UA =
-        "com.google.visionosyoutube/1.03 (RealityDevice17,1; U; CPU visionOS 26_6_1 like Mac OS X; en_US) gzip"
+    private val VISIONOS_CLIENT_VERSION: String get() = YouTubeRuntimeConfig.current.visionosVersion
+    private val VISIONOS_UA: String get() = YouTubeRuntimeConfig.current.visionosUa
 
-    private const val ANDROID_VR_CLIENT_VERSION = "1.61.48"
-    private const val ANDROID_VR_UA =
-        "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+    private val ANDROID_VR_CLIENT_VERSION: String get() = YouTubeRuntimeConfig.current.androidVrVersion
+    private val ANDROID_VR_UA: String get() = YouTubeRuntimeConfig.current.androidVrUa
 
     private const val IOS_CLIENT_VERSION = "21.26.4"
     private const val IOS_UA =
         "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
 
-    private const val TV_SAMSUNG_CLIENT_VERSION = "5.20260707"
-    private const val TV_SAMSUNG_UA =
-        "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1"
+    private val TV_SAMSUNG_CLIENT_VERSION: String get() = YouTubeRuntimeConfig.current.tvSamsungVersion
+    private val TV_SAMSUNG_UA: String get() = YouTubeRuntimeConfig.current.tvSamsungUa
 
-    private const val TV_API_CLIENT_VERSION = "7.20260707.07.00"
-    private const val TV_API_UA =
-        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"
+    private val TV_API_CLIENT_VERSION: String get() = YouTubeRuntimeConfig.current.tvApiVersion
+    private val TV_API_UA: String get() = YouTubeRuntimeConfig.current.tvApiUa
 
-    private const val MWEB_CLIENT_VERSION = "2.20260708.05.00"
-    private const val MWEB_UA =
-        "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+    private val MWEB_CLIENT_VERSION: String get() = YouTubeRuntimeConfig.current.mwebVersion
+    private val MWEB_UA: String get() = YouTubeRuntimeConfig.current.mwebUa
 
-    private const val WEB_REMIX_CLIENT_VERSION = "1.20260707.12.00"
-    private const val WEB_CREATOR_CLIENT_VERSION = "1.20260708.06.00"
+    private val WEB_REMIX_CLIENT_VERSION: String get() = YouTubeRuntimeConfig.current.webRemixVersion
+    private val WEB_CREATOR_CLIENT_VERSION: String get() = YouTubeRuntimeConfig.current.webCreatorVersion
 
     private val MUSIC_CHIP_LABELS = setOf(
         "music", "música", "musica", "音乐", "音樂", "موسيقى", "संगीत", "музыка", "musique", "musik"
     )
 
-    private const val WEB_SAFARI_UA =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+    private val WEB_SAFARI_UA: String get() = YouTubeRuntimeConfig.current.webSafariUa
+
+    @Volatile
+    private var tier1BlockedNetGen: Long = -1L
+
+    @Volatile
+    private var preferredV8Client: Pair<Long, String>? = null
 
     /** Resets cached session hints after account sign-in/out or network changes. */
     fun resetAnonBotBlockHint() {
         cachedVisitorData = null
+        tier1BlockedNetGen = -1L
+        preferredV8Client = null
     }
 
     private fun looksLikeBotBlock(error: String?): Boolean {
@@ -1669,27 +1671,34 @@ object YouTubeInnerTube {
         if (recoveryLevel >= 1) {
             YouTubeSessionConfig.evictIdleConnections()
             YouTubeJsSolver.evictIdleConnections()
+            YouTubeRuntimeConfig.refreshInBackground(context, force = true)
+            tier1BlockedNetGen = -1L
+            preferredV8Client = null
         }
         val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
         val hasCookies = authHeaders != null
         val visitorData by lazy { ensureVisitorData() }
         var tier1Error: String? = null
+        val currentNetGen = com.graball.GrabAllApp.networkGeneration
 
         // Recovery level >= 2 means Tier 1 & Tier 2 (V8) URLs already got HTTP 403
         // from ExoPlayer on this VPN IP: skip directly to bundled yt-dlp + QuickJS!
         if (recoveryLevel < 2) {
-            // Step 1 (~250ms off-VPN, zero WebView, 144p-4K + HLS):
-            // Always try VISIONOS first with no 15-minute lockout so turning off VPN
-            // immediately restores instant 250ms HD playback.
-            if (recoveryLevel == 0) {
+            // Step 1 (~250ms off-VPN, zero WebView, 144p-4K VP9/AV1/H.264):
+            // Skip immediately while on the SAME VPN network where VISIONOS already
+            // returned LOGIN_REQUIRED; the instant VPN disconnects or network changes,
+            // GrabAllApp.networkGeneration increments and VISIONOS is tried again!
+            if (recoveryLevel == 0 && tier1BlockedNetGen != currentNetGen) {
                 onStatus?.invoke("Connecting to YouTube…")
+                // Never block Step 1 on a 700 KB homepage scrape — use cached visitorData only.
+                val fastVisitor = cachedVisitorData?.takeIf { it.isNotBlank() }
                 val visionOs = resolveViaClient(
                     videoId = videoId,
                     clientName = "VISIONOS",
                     clientVersion = VISIONOS_CLIENT_VERSION,
                     clientNameId = "101",
                     userAgent = VISIONOS_UA,
-                    visitorData = visitorData,
+                    visitorData = fastVisitor,
                     extraClientFields = mapOf(
                         "deviceMake" to "Apple",
                         "deviceModel" to "RealityDevice17,1",
@@ -1709,14 +1718,16 @@ object YouTubeInnerTube {
                 }
                 tier1Error = visionOs.error
 
-                if (!looksLikeBotBlock(visionOs.error)) {
+                if (looksLikeBotBlock(visionOs.error)) {
+                    tier1BlockedNetGen = currentNetGen
+                } else {
                     val androidVr = resolveViaClient(
                         videoId = videoId,
                         clientName = "ANDROID_VR",
                         clientVersion = ANDROID_VR_CLIENT_VERSION,
                         clientNameId = "28",
                         userAgent = ANDROID_VR_UA,
-                        visitorData = visitorData,
+                        visitorData = fastVisitor,
                         extraClientFields = mapOf(
                             "deviceMake" to "Oculus",
                             "deviceModel" to "Quest 3",
@@ -1805,132 +1816,145 @@ object YouTubeInnerTube {
         var effectiveSts = ready.signatureTimestamp
         var lastReason: String? = null
 
-        // 1) When signed in: try WEB_CREATOR FIRST with an authenticated BotGuard GVS PO Token.
-        if (authHeaders != null) {
-            val creatorRoot = requestWebCreatorPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
-            if (creatorRoot != null) {
-                val verified = tryPotProtectedAdaptiveClient(
-                    context = context,
-                    videoId = videoId,
-                    root = creatorRoot,
-                    userAgent = WEB_UA,
-                    sourceClient = "WEB_CREATOR",
-                    visitorData = visitorData,
-                    authHeaders = authHeaders,
-                    cfg = cfg
-                )
-                if (verified.info != null) {
-                    return verified
-                }
-                if (lastReason.isNullOrBlank()) lastReason = verified.error
-                Log.w(TAG, "WEB_CREATOR adaptive probe failed ($videoId: ${verified.error}); trying MWEB")
-            }
-
-            // 1b) Try MWEB (iPad Safari) with the same warm BotGuard GVS PO Token.
-            val mwebRoot = requestMwebPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
-            if (mwebRoot != null) {
-                val verified = tryPotProtectedAdaptiveClient(
-                    context = context,
-                    videoId = videoId,
-                    root = mwebRoot,
-                    userAgent = MWEB_UA,
-                    sourceClient = "MWEB",
-                    visitorData = visitorData,
-                    authHeaders = authHeaders,
-                    cfg = cfg
-                )
-                if (verified.info != null) {
-                    return verified
-                }
-                if (lastReason.isNullOrBlank()) lastReason = verified.error
-                Log.w(TAG, "MWEB adaptive probe failed ($videoId: ${verified.error}); trying TV_SAMSUNG")
-            }
+        // Build dynamic V8 client priority order from hot-updatable config,
+        // promoting whichever client succeeded on this VPN/network generation to #1!
+        val currentNetGen = com.graball.GrabAllApp.networkGeneration
+        val baseOrder = if (authHeaders != null) {
+            YouTubeRuntimeConfig.current.signedInV8Order
+        } else {
+            YouTubeRuntimeConfig.current.guestV8Order
+        }
+        val stickyWinner = preferredV8Client?.takeIf { it.first == currentNetGen }?.second
+        val clientOrder = if (stickyWinner != null && stickyWinner in baseOrder) {
+            listOf(stickyWinner) + baseOrder.filter { it != stickyWinner }
+        } else {
+            baseOrder
         }
 
-        // 2) Try TV_SAMSUNG (TVHTML5 5.x) — works both signed-in AND in guest mode
-        //    with zero PO token, unthrottled 2 MB chunk streaming up to 4K, and full
-        //    multi-language Original vs AI-dub audio track metadata.
-        //    Probed for BOTH 4xx AND YouTube's HTTP-500 honeypot itags!
-        run {
-            var tvRoot = requestTvSamsungPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
-            val firstStatus = tvRoot?.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
-            val firstReason = tvRoot?.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
-            if (firstStatus != "OK" && firstReason.contains("reload", ignoreCase = true)) {
-                YouTubeJsSolver.invalidate()
-                val refreshed = YouTubeJsSolver.ensureReady(context, forceRefresh = true)
-                if (refreshed != null) {
-                    effectiveSts = refreshed.signatureTimestamp
-                    tvRoot = requestTvSamsungPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
-                }
-            }
-            if (tvRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(
-                    videoId = videoId,
-                    root = tvRoot,
-                    userAgent = TV_SAMSUNG_UA,
-                    authHeaders = authHeaders,
-                    sourceClient = "TV_SAMSUNG"
-                )
-                if (parsed.info != null &&
-                    parsed.info.videoStreams.isNotEmpty() &&
-                    parsed.info.audioStreams.isNotEmpty()
-                ) {
-                    val checked = verifyAdaptiveAudioAndVideo(parsed.info, TV_SAMSUNG_UA, origin = null)
-                    if (checked != null) {
-                        return ResolveResult(checked)
+        for (clientKey in clientOrder) {
+            when (clientKey) {
+                "WEB_CREATOR" -> if (authHeaders != null) {
+                    val creatorRoot = requestWebCreatorPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+                    if (creatorRoot != null) {
+                        val verified = tryPotProtectedAdaptiveClient(
+                            context = context,
+                            videoId = videoId,
+                            root = creatorRoot,
+                            userAgent = WEB_UA,
+                            sourceClient = "WEB_CREATOR",
+                            visitorData = visitorData,
+                            authHeaders = authHeaders,
+                            cfg = cfg
+                        )
+                        if (verified.info != null) {
+                            preferredV8Client = currentNetGen to "WEB_CREATOR"
+                            return verified
+                        }
+                        if (lastReason.isNullOrBlank()) lastReason = verified.error
+                        Log.w(TAG, "WEB_CREATOR adaptive probe failed ($videoId: ${verified.error})")
                     }
-                    Log.w(TAG, "TVHTML5 stream probe rejected (4xx/5xx) for $videoId; trying TV_API")
-                    lastReason = "TV_SAMSUNG stream rejected"
-                } else {
-                    if (lastReason.isNullOrBlank()) lastReason = parsed.error
-                    Log.d(TAG, "TVHTML5 V8 note ($videoId): ${parsed.error}")
                 }
-            }
-        }
-
-        // 2b) Try TV_API (TVHTML5 7.x Cobalt) — zero PO token, alternate TV pool.
-        run {
-            val tvApiRoot = requestTvApiPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
-            if (tvApiRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(
-                    videoId = videoId,
-                    root = tvApiRoot,
-                    userAgent = TV_API_UA,
-                    authHeaders = authHeaders,
-                    sourceClient = "TV_API"
-                )
-                if (parsed.info != null &&
-                    parsed.info.videoStreams.isNotEmpty() &&
-                    parsed.info.audioStreams.isNotEmpty()
-                ) {
-                    val checked = verifyAdaptiveAudioAndVideo(parsed.info, TV_API_UA, origin = null)
-                    if (checked != null) {
-                        return ResolveResult(checked)
+                "MWEB" -> if (authHeaders != null) {
+                    val mwebRoot = requestMwebPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+                    if (mwebRoot != null) {
+                        val verified = tryPotProtectedAdaptiveClient(
+                            context = context,
+                            videoId = videoId,
+                            root = mwebRoot,
+                            userAgent = MWEB_UA,
+                            sourceClient = "MWEB",
+                            visitorData = visitorData,
+                            authHeaders = authHeaders,
+                            cfg = cfg
+                        )
+                        if (verified.info != null) {
+                            preferredV8Client = currentNetGen to "MWEB"
+                            return verified
+                        }
+                        if (lastReason.isNullOrBlank()) lastReason = verified.error
+                        Log.w(TAG, "MWEB adaptive probe failed ($videoId: ${verified.error})")
                     }
-                    Log.w(TAG, "TV_API stream probe rejected for $videoId; trying next client")
                 }
-            }
-        }
-
-        // 3) When signed in: try WEB_REMIX (YouTube Music player) with the cached
-        //    BotGuard GVS PO Token as an additional clean authenticated adaptive client.
-        if (authHeaders != null) {
-            val remixRoot = requestWebRemixPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
-            if (remixRoot != null) {
-                val verified = tryPotProtectedAdaptiveClient(
-                    context = context,
-                    videoId = videoId,
-                    root = remixRoot,
-                    userAgent = WEB_UA,
-                    sourceClient = "WEB_REMIX",
-                    visitorData = visitorData,
-                    authHeaders = authHeaders,
-                    cfg = cfg
-                )
-                if (verified.info != null) {
-                    return verified
+                "TV_SAMSUNG" -> {
+                    var tvRoot = requestTvSamsungPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+                    val firstStatus = tvRoot?.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+                    val firstReason = tvRoot?.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
+                    if (firstStatus != "OK" && firstReason.contains("reload", ignoreCase = true)) {
+                        YouTubeJsSolver.invalidate()
+                        val refreshed = YouTubeJsSolver.ensureReady(context, forceRefresh = true)
+                        if (refreshed != null) {
+                            effectiveSts = refreshed.signatureTimestamp
+                            tvRoot = requestTvSamsungPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+                        }
+                    }
+                    if (tvRoot != null) {
+                        val parsed = parseDecryptedPlayerRoot(
+                            videoId = videoId,
+                            root = tvRoot,
+                            userAgent = TV_SAMSUNG_UA,
+                            authHeaders = authHeaders,
+                            sourceClient = "TV_SAMSUNG"
+                        )
+                        if (parsed.info != null &&
+                            parsed.info.videoStreams.isNotEmpty() &&
+                            parsed.info.audioStreams.isNotEmpty()
+                        ) {
+                            val checked = verifyAdaptiveAudioAndVideo(parsed.info, TV_SAMSUNG_UA, origin = null)
+                            if (checked != null) {
+                                preferredV8Client = currentNetGen to "TV_SAMSUNG"
+                                return ResolveResult(checked)
+                            }
+                            Log.w(TAG, "TVHTML5 stream probe rejected (4xx/5xx) for $videoId")
+                            lastReason = "TV_SAMSUNG stream rejected"
+                        } else {
+                            if (lastReason.isNullOrBlank()) lastReason = parsed.error
+                            Log.d(TAG, "TVHTML5 V8 note ($videoId): ${parsed.error}")
+                        }
+                    }
                 }
-                Log.w(TAG, "WEB_REMIX adaptive probe failed ($videoId: ${verified.error}); trying HLS")
+                "TV_API" -> {
+                    val tvApiRoot = requestTvApiPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+                    if (tvApiRoot != null) {
+                        val parsed = parseDecryptedPlayerRoot(
+                            videoId = videoId,
+                            root = tvApiRoot,
+                            userAgent = TV_API_UA,
+                            authHeaders = authHeaders,
+                            sourceClient = "TV_API"
+                        )
+                        if (parsed.info != null &&
+                            parsed.info.videoStreams.isNotEmpty() &&
+                            parsed.info.audioStreams.isNotEmpty()
+                        ) {
+                            val checked = verifyAdaptiveAudioAndVideo(parsed.info, TV_API_UA, origin = null)
+                            if (checked != null) {
+                                preferredV8Client = currentNetGen to "TV_API"
+                                return ResolveResult(checked)
+                            }
+                            Log.w(TAG, "TV_API stream probe rejected for $videoId")
+                        }
+                    }
+                }
+                "WEB_REMIX" -> if (authHeaders != null) {
+                    val remixRoot = requestWebRemixPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+                    if (remixRoot != null) {
+                        val verified = tryPotProtectedAdaptiveClient(
+                            context = context,
+                            videoId = videoId,
+                            root = remixRoot,
+                            userAgent = WEB_UA,
+                            sourceClient = "WEB_REMIX",
+                            visitorData = visitorData,
+                            authHeaders = authHeaders,
+                            cfg = cfg
+                        )
+                        if (verified.info != null) {
+                            preferredV8Client = currentNetGen to "WEB_REMIX"
+                            return verified
+                        }
+                        Log.w(TAG, "WEB_REMIX adaptive probe failed ($videoId: ${verified.error})")
+                    }
+                }
             }
         }
 
@@ -2013,10 +2037,10 @@ object YouTubeInnerTube {
     )
 
     /**
-     * Verifies both adaptive audio and video pass a real 16 KB chunk read.
-     * If the preferred M4A audio stream is rejected (e.g. HTTP 403 on itag 140)
-     * while an alternate codec (e.g. Opus WebM itag 251) passes, filters out the
-     * rejected codec so ExoPlayer plays full 144p-4K adaptive cleanly!
+     * Verifies both adaptive audio and video pass a real 2 MB chunk probe IN PARALLEL
+     * (cuts pre-probe wait time in half on VPN!). If M4A audio is rejected while an
+     * alternate codec (e.g. Opus WebM itag 251) passes, filters out the rejected codec
+     * so ExoPlayer plays full 144p-4K adaptive cleanly.
      */
     private fun verifyAdaptiveAudioAndVideo(
         info: VideoStreamInfo,
@@ -2024,13 +2048,30 @@ object YouTubeInnerTube {
         origin: String?
     ): VideoStreamInfo? {
         val videoProbe = info.pickVideoStream(null)?.url ?: info.videoStreams.firstOrNull()?.url
-        if (videoProbe == null || isStreamUrlRejected(videoProbe, userAgent, origin)) {
-            return null
+        val primaryAudio = info.bestAudio()
+        if (videoProbe == null || primaryAudio == null) return null
+
+        var audioRejected = false
+        val latch = java.util.concurrent.CountDownLatch(1)
+        Thread {
+            try {
+                audioRejected = isStreamUrlRejected(primaryAudio.url, userAgent, origin)
+            } finally {
+                latch.countDown()
+            }
+        }.apply {
+            isDaemon = true
+            start()
         }
-        val primaryAudio = info.bestAudio() ?: return null
-        if (!isStreamUrlRejected(primaryAudio.url, userAgent, origin)) {
-            return info
+        val videoRejected = isStreamUrlRejected(videoProbe, userAgent, origin)
+        try {
+            latch.await(7, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
         }
+
+        if (videoRejected) return null
+        if (!audioRejected) return info
+
         val primaryIsMp4 = primaryAudio.mimeType.contains("mp4", ignoreCase = true) ||
             primaryAudio.mimeType.contains("aac", ignoreCase = true)
         val altPool = info.audioStreams.filter { fmt ->
@@ -3206,11 +3247,21 @@ object YouTubeInnerTube {
         val captions = parseInnerTubeCaptions(root)
         val audioHints = extractOriginalAudioHints(streamingData, captions)
 
+        val videoStreams = mutableListOf<StreamFormat>()
+        val audioStreams = mutableListOf<StreamFormat>()
+        val muxedStreams = mutableListOf<StreamFormat>()
+
+        parseInnerTubeFormats(streamingData.optJSONArray("formats"), isMuxedDefault = true, videoStreams, audioStreams, muxedStreams)
+        parseInnerTubeFormats(streamingData.optJSONArray("adaptiveFormats"), isMuxedDefault = false, videoStreams, audioStreams, muxedStreams)
+
         val rawHlsUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
-        var effectiveHlsUrl: String? = rawHlsUrl
+        val effectiveHlsUrl: String? = rawHlsUrl
         var hlsVariants: List<StreamFormat> = emptyList()
         var hlsAudioTracks: List<HlsAudioTrack> = emptyList()
-        if (rawHlsUrl != null) {
+        // Speedup (~250-400ms saved on every off-VPN video!): skip synchronously fetching
+        // the HLS manifest whenever direct adaptive video+audio streams are already ready.
+        val hasDirectAdaptive = videoStreams.isNotEmpty() && audioStreams.isNotEmpty()
+        if (rawHlsUrl != null && !hasDirectAdaptive) {
             val parsedHls = fetchParsedHlsManifest(
                 masterUrl = rawHlsUrl,
                 userAgent = userAgent,
@@ -3222,13 +3273,6 @@ object YouTubeInnerTube {
                 hlsAudioTracks = parsedHls.audioTracks
             }
         }
-
-        val videoStreams = mutableListOf<StreamFormat>()
-        val audioStreams = mutableListOf<StreamFormat>()
-        val muxedStreams = mutableListOf<StreamFormat>()
-
-        parseInnerTubeFormats(streamingData.optJSONArray("formats"), isMuxedDefault = true, videoStreams, audioStreams, muxedStreams)
-        parseInnerTubeFormats(streamingData.optJSONArray("adaptiveFormats"), isMuxedDefault = false, videoStreams, audioStreams, muxedStreams)
 
         if (effectiveHlsUrl == null && hlsVariants.isEmpty() && muxedStreams.isEmpty() && (videoStreams.isEmpty() || audioStreams.isEmpty())) {
             return ResolveResult(null, "No playable stream URLs")

@@ -220,10 +220,11 @@ class YouTubeChunkedDataSource(
         if (endExclusive != C.LENGTH_UNSET.toLong() && currentPos >= endExclusive) {
             return
         }
+        val chunkSize = if (currentPos == 0L) FIRST_CHUNK_SIZE_BYTES else CHUNK_SIZE_BYTES
         val chunkEnd = if (endExclusive != C.LENGTH_UNSET.toLong()) {
-            min(currentPos + CHUNK_SIZE_BYTES - 1L, endExclusive - 1L)
+            min(currentPos + chunkSize - 1L, endExclusive - 1L)
         } else {
-            currentPos + CHUNK_SIZE_BYTES - 1L
+            currentPos + chunkSize - 1L
         }
         if (chunkEnd < currentPos) return
 
@@ -280,7 +281,8 @@ class YouTubeChunkedDataSource(
     }
 
     companion object {
-        private const val CHUNK_SIZE_BYTES = 2L * 1024L * 1024L // 2 MB unthrottled GoogleVideo chunks
+        private const val FIRST_CHUNK_SIZE_BYTES = 512L * 1024L // Fast 512 KB initial chunk for instant Frame 1
+        private const val CHUNK_SIZE_BYTES = 2L * 1024L * 1024L // 2 MB unthrottled GoogleVideo chunks thereafter
         private val CLEN_REGEX = Regex("""[?&]clen=(\d+)""")
     }
 }

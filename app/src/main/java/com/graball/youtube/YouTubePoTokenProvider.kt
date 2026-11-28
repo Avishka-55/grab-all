@@ -165,6 +165,34 @@ object YouTubePoTokenProvider {
         }
     }
 
+    private val requestKey: String
+        get() = YouTubeRuntimeConfig.current.botguardRequestKey
+
+    private val jnnApiKey: String
+        get() = YouTubeRuntimeConfig.current.botguardJnnApiKey
+
+    @Volatile
+    private var prewarming: Boolean = false
+
+    /** Silently pre-warms BotGuard integrity in the background (triggered only on VPN). */
+    fun prewarmInBackground(context: Context) {
+        if (isReadyInMemory() || prewarming) return
+        if (SystemClock.elapsedRealtime() < cooldownUntilElapsedMs) return
+        prewarming = true
+        val appCtx = context.applicationContext
+        Thread {
+            try {
+                ensureIntegrityReady(appCtx, forceRefresh = false)
+            } catch (_: Throwable) {
+            } finally {
+                prewarming = false
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+    }
+
     fun isReadyInMemory(): Boolean {
         val now = SystemClock.elapsedRealtime()
         return (webView != null && now < integrityExpiresAtElapsedMs) ||
@@ -336,7 +364,7 @@ object YouTubePoTokenProvider {
                 .header("User-Agent", YouTubeSessionConfig.DESKTOP_WEB_UA)
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json+protobuf")
-                .header("x-goog-api-key", JNN_API_KEY)
+                .header("x-goog-api-key", jnnApiKey)
                 .header("x-user-agent", "grpc-web-javascript/0.1")
                 .post(jsonBody.toRequestBody(PROTO_JSON_MEDIA))
                 .build()
@@ -354,7 +382,7 @@ object YouTubePoTokenProvider {
     }
 
     private fun fetchChallenge(): ChallengeData? {
-        val raw = postJnn(CREATE_URL, "[\"$REQUEST_KEY\"]") ?: return null
+        val raw = postJnn(CREATE_URL, "[\"$requestKey\"]") ?: return null
         return try {
             val top = JSONArray(raw)
             val inner: JSONArray = if (top.length() > 1 && top.opt(1) is String) {
@@ -407,7 +435,7 @@ object YouTubePoTokenProvider {
 
     private fun fetchIntegrityToken(bgResponse: String): Pair<String, Long>? {
         val body = JSONArray().apply {
-            put(REQUEST_KEY)
+            put(requestKey)
             put(bgResponse)
         }.toString()
         val raw = postJnn(GENERATE_IT_URL, body) ?: return null
@@ -781,7 +809,12 @@ object YouTubePoTokenProvider {
     }
 
     private fun patchBaseJsForEmbedPot(js: String): String? {
-        val match = EMBED_POT_FN_REGEX.find(js) ?: return null
+        val activeRegex = try {
+            Regex(YouTubeRuntimeConfig.current.embedPotRegex, RegexOption.MULTILINE)
+        } catch (_: Exception) {
+            EMBED_POT_FN_REGEX
+        }
+        val match = activeRegex.find(js) ?: EMBED_POT_FN_REGEX.find(js) ?: return null
         val start = match.range.first
         var depth = 0
         var seenBrace = false

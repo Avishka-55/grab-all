@@ -21,6 +21,7 @@ import com.graball.youtube.YouTubeJsSolver
 import com.graball.youtube.YouTubePlaybackService
 import com.graball.youtube.YouTubePlayerActivity
 import com.graball.youtube.YouTubePoTokenProvider
+import com.graball.youtube.YouTubeRuntimeConfig
 import com.graball.youtube.YouTubeSessionConfig
 import com.graball.youtube.YouTubeSubtitleParser
 import java.util.WeakHashMap
@@ -46,6 +47,7 @@ class GrabAllApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        YouTubeRuntimeConfig.init(this)
         registerNetworkResetCallback()
         scheduleIdleCacheHousekeeping()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
@@ -114,6 +116,12 @@ class GrabAllApp : Application() {
                     val vpnNow = caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
                     val prev = lastVpnTransport
                     lastVpnTransport = vpnNow
+                    if (vpnNow) {
+                        // Silently pre-warm V8 + BotGuard while user browses on VPN
+                        // (zero overhead when off-VPN!).
+                        YouTubeJsSolver.prewarmInBackground(applicationContext)
+                        YouTubePoTokenProvider.prewarmInBackground(applicationContext)
+                    }
                     if (prev != null && prev != vpnNow) {
                         evictStaleNetworkState(if (vpnNow) "vpn_connected" else "vpn_disconnected")
                     }

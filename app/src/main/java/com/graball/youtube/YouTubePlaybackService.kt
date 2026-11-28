@@ -371,8 +371,8 @@ class YouTubePlaybackService : MediaSessionService() {
             .setBufferDurationsMs(
                 25_000, // minBufferMs (25s smooth cushion on VPN)
                 60_000, // maxBufferMs (buffer up to 60s ahead via fast 2MB chunks)
-                1_000,  // bufferForPlaybackMs (snappy 1s start)
-                2_000   // bufferForPlaybackAfterRebufferMs
+                500,    // bufferForPlaybackMs (fast 0.5s first frame)
+                1_500   // bufferForPlaybackAfterRebufferMs
             )
             .build()
 

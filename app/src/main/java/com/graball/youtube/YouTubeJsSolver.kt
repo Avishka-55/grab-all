@@ -421,7 +421,12 @@ object YouTubeJsSolver {
     private fun patchBaseJsWithExports(baseJs: String): String? {
         val footerIdx = baseJs.lastIndexOf(PLAYER_FOOTER)
         if (footerIdx < 0) return null
-        val match = URL_HELPER_SIG_REGEX.find(baseJs) ?: return null
+        val activeRegex = try {
+            Regex(YouTubeRuntimeConfig.current.urlHelperSigRegex)
+        } catch (_: Exception) {
+            URL_HELPER_SIG_REGEX
+        }
+        val match = activeRegex.find(baseJs) ?: URL_HELPER_SIG_REGEX.find(baseJs) ?: return null
         val sigFn = match.groupValues[1]
         val urlHelper = match.groupValues[2]
         if (sigFn.isBlank() || urlHelper.isBlank()) return null

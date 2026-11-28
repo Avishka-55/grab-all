@@ -1581,15 +1581,15 @@ class YouTubePlayerActivity : AppCompatActivity() {
 
         fun updateLoadMoreButton() {
             if (activeReplyParent != null) {
-                if (!nextRepliesToken.isNullOrBlank()) {
-                    loadMoreBtn.text = if (loadingReplies) "Loading…" else "Load more replies"
+                if (loadingReplies) {
+                    loadMoreBtn.text = "Loading more replies…"
                     loadMoreBtn.visibility = View.VISIBLE
                 } else {
                     loadMoreBtn.visibility = View.GONE
                 }
             } else {
-                if (!nextToken.isNullOrBlank()) {
-                    loadMoreBtn.text = if (loadingMore) "Loading…" else "Load more comments"
+                if (loadingMore && loadedComments.isNotEmpty()) {
+                    loadMoreBtn.text = "Loading more comments…"
                     loadMoreBtn.visibility = View.VISIBLE
                 } else {
                     loadMoreBtn.visibility = View.GONE
@@ -1830,6 +1830,31 @@ class YouTubePlayerActivity : AppCompatActivity() {
                 fetchBatch(tok, true)
             }
         }
+
+        // Seamless infinite scroll (official YouTube style): auto-loads the next
+        // page as soon as the user nears the bottom of loaded comments or replies.
+        listRv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                if (dy <= 0 || loadingMore || activeReplyParent != null) return
+                val tok = nextToken ?: return
+                val lm = rv.layoutManager as? LinearLayoutManager ?: return
+                val total = commentAdapter.itemCount
+                if (total > 0 && lm.findLastVisibleItemPosition() >= total - 4) {
+                    fetchBatch(tok, true)
+                }
+            }
+        })
+        repliesRv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                if (dy <= 0 || loadingReplies || activeReplyParent == null) return
+                val tok = nextRepliesToken ?: return
+                val lm = rv.layoutManager as? LinearLayoutManager ?: return
+                val total = repliesAdapter.itemCount
+                if (total > 0 && lm.findLastVisibleItemPosition() >= total - 3) {
+                    fetchRepliesBatch(tok, append = true)
+                }
+            }
+        })
 
         renderSortChips()
         dialog.setContentView(sheet)

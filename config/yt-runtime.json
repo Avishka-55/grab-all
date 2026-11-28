@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-11-28",
+  "clients": {
+    "visionosVersion": "1.03",
+    "visionosUa": "com.google.visionosyoutube/1.03 (RealityDevice17,1; U; CPU visionOS 26_6_1 like Mac OS X; en_US) gzip",
+    "androidVrVersion": "1.61.48",
+    "androidVrUa": "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    "webCreatorVersion": "1.20260708.06.00",
+    "mwebVersion": "2.20260708.05.00",
+    "mwebUa": "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "tvSamsungVersion": "5.20260707",
+    "tvSamsungUa": "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1",
+    "tvApiVersion": "7.20260707.07.00",
+    "tvApiUa": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+    "webRemixVersion": "1.20260707.12.00",
+    "webSafariUa": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+  },
+  "v8ClientOrder": {
+    "signedIn": [
+      "WEB_CREATOR",
+      "MWEB",
+      "TV_SAMSUNG",
+      "TV_API",
+      "WEB_REMIX"
+    ],
+    "guest": [
+      "TV_SAMSUNG",
+      "TV_API"
+    ]
+  },
+  "botguard": {
+    "requestKey": "O43z0dpjhgX20SCx4KAo",
+    "jnnApiKey": "AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw",
+    "embedPotRegex": "^(?=.*pot_cms)(?=.*pot_csms).*$"
+  },
+  "jsSolver": {
+    "urlHelperSigRegex": "([a-zA-Z0-9_$]{2,})=function\\s*\\([a-zA-Z0-9_$]+,[a-zA-Z0-9_$]+,[a-zA-Z0-9_$]+\\)\\{(?:[^}{]{0,600}\\bnew\\s+(g\\.[a-zA-Z0-9_$]+)\\s*\\([a-zA-Z0-9_$]+,(?:!0|true)\\)[^}{]{0,400}\\.set\\([\"']alr[\"'],[\"']yes[\"']\\)[^}{]{0,200}\\breturn\\b)"
+  }
+}
