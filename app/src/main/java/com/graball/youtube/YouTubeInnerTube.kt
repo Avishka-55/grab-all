@@ -1527,19 +1527,17 @@ object YouTubeInnerTube {
             if (tier1Error.isNullOrBlank()) tier1Error = androidVr.error
         }
 
-        if (authHeaders != null) {
-            val v8 = resolveViaV8(
-                context = context,
-                videoId = videoId,
-                visitorData = visitorData,
-                authHeaders = authHeaders,
-                includeHlsFallback = false
-            )
-            if (v8.info != null &&
-                (v8.info.audioStreams.isNotEmpty() || v8.info.muxedStreams.isNotEmpty())
-            ) {
-                return v8
-            }
+        val v8 = resolveViaV8(
+            context = context,
+            videoId = videoId,
+            visitorData = visitorData,
+            authHeaders = authHeaders,
+            includeHlsFallback = false
+        )
+        if (v8.info != null &&
+            (v8.info.audioStreams.isNotEmpty() || v8.info.muxedStreams.isNotEmpty())
+        ) {
+            return v8
         }
 
         return ResolveResult(null, tier1Error ?: "No direct streams")
@@ -1687,7 +1685,10 @@ object YouTubeInnerTube {
         var effectiveSts = cfg.signatureTimestamp ?: ready.signatureTimestamp
         var lastReason: String? = null
 
-        if (authHeaders != null) {
+        // Try TV_SAMSUNG (TVHTML5 5.x) FIRST — works both signed-in AND in guest mode
+        // with zero PO token, unthrottled 2 MB chunk streaming up to 4K, and full
+        // multi-language Original vs AI-dub audio track metadata!
+        run {
             var tvRoot = requestTvSamsungPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             val firstStatus = tvRoot?.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
             val firstReason = tvRoot?.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
@@ -1705,10 +1706,16 @@ object YouTubeInnerTube {
                     parsed.info.videoStreams.isNotEmpty() &&
                     parsed.info.audioStreams.isNotEmpty()
                 ) {
-                    return parsed
+                    val probeUrl = parsed.info.bestAudio()?.url ?: parsed.info.videoStreams.first().url
+                    if (!isStreamUrlRejected403(probeUrl, TV_SAMSUNG_UA)) {
+                        return parsed
+                    }
+                    Log.w(TAG, "TVHTML5 stream probe returned HTTP 403 for $videoId; trying WEB_SAFARI HLS")
+                    lastReason = "TV_SAMSUNG stream rejected (HTTP 403)"
+                } else {
+                    if (lastReason.isNullOrBlank()) lastReason = parsed.error
+                    Log.d(TAG, "TVHTML5 V8 note ($videoId): ${parsed.error}")
                 }
-                if (lastReason.isNullOrBlank()) lastReason = parsed.error
-                Log.d(TAG, "TVHTML5 V8 note ($videoId): ${parsed.error}")
             }
         }
 
@@ -1744,7 +1751,12 @@ object YouTubeInnerTube {
                         parsed.info.hlsVariants.isNotEmpty() ||
                         !parsed.info.hlsUrl.isNullOrBlank())
                 ) {
-                    return parsed
+                    val probeUrl = parsed.info.bestAudio()?.url
+                        ?: parsed.info.videoStreams.firstOrNull()?.url
+                    if (probeUrl == null || !isStreamUrlRejected403(probeUrl, WEB_SAFARI_UA)) {
+                        return parsed
+                    }
+                    Log.w(TAG, "WEB_EMBEDDED_PLAYER stream probe returned HTTP 403 for $videoId")
                 }
             }
             if (safariFallback != null) {
@@ -1761,11 +1773,39 @@ object YouTubeInnerTube {
         val muxedStreams: List<StreamFormat>
     )
 
+    /**
+     * Lightweight ~150ms GoogleVideo 0-byte range probe: returns true ONLY when
+     * GoogleVideo explicitly rejects the decrypted stream URL with HTTP 403, so
+     * [resolveViaV8] can immediately skip a broken/rejected client and fall back
+     * to `WEB_SAFARI` HLS without bouncing through ExoPlayer.
+     */
+    private fun isStreamUrlRejected403(url: String, userAgent: String): Boolean {
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", userAgent)
+                .header("Range", "bytes=0-0")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .get()
+                .build()
+            val probeClient = anonClient.newBuilder()
+                .connectTimeout(4, TimeUnit.SECONDS)
+                .readTimeout(4, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.SECONDS)
+                .build()
+            probeClient.newCall(req).execute().use { resp ->
+                resp.code == 403
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun requestTvSamsungPlayer(
         videoId: String,
         visitorData: String?,
         signatureTimestamp: Int,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?,
         cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig()
     ): JSONObject? {
         val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
@@ -1809,7 +1849,8 @@ object YouTubeInnerTube {
             clientVersion = TV_SAMSUNG_CLIENT_VERSION,
             visitorData = effectiveVisitor,
             authHeaders = authHeaders,
-            webConfig = null
+            webConfig = null,
+            useAnonymousClient = (authHeaders == null)
         )
     }
 

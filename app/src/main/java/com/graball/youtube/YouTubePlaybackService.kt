@@ -1232,7 +1232,7 @@ class YouTubePlaybackService : MediaSessionService() {
         val watchdogMs = if (recoveryLevel >= 2) 60_000L else 25_000L
         mainHandler.postDelayed({
             if (gen != loadGeneration || !isLoading) return@postDelayed
-            if (stallRetries < 1 && index in queue.indices) {
+            if (stallRetries < 1 && recoveryLevel < 2 && index in queue.indices) {
                 stallRetries++
                 val nextLevel = (recoveryLevel + 1).coerceAtMost(2)
                 Log.w(TAG, "Resolve stalled >${watchdogMs}ms for ${item.id}, auto-retrying (level=$nextLevel)")

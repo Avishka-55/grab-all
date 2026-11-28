@@ -252,8 +252,8 @@ object YouTubeJsSolver {
             }
 
             val cacheDir = File(context.filesDir, "yt-v8-cache").apply { mkdirs() }
-            val patchedFile = File(cacheDir, "native_$playerId.js")
-            val stsFile = File(cacheDir, "native_$playerId.sts")
+            val patchedFile = File(cacheDir, "native_v2_$playerId.js")
+            val stsFile = File(cacheDir, "native_v2_$playerId.sts")
 
             var sts = stsFile.takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
             var patchedBytes = patchedFile.takeIf { it.isFile && it.length() > 100_000L }
@@ -427,8 +427,12 @@ object YouTubeJsSolver {
 
         val exportBlock = buildString {
             append("\nwindow.__ytSolver={\n")
+            // YouTube's URL-helper sig wrapper decodes its input (decodeURIComponent)
+            // and percent-encodes its output (encodeURIComponent, e.g. '==' -> '%3D%3D')
+            // before storing it on the helper URL object. Pass an encoded input and
+            // safely decode the result so callers never double-encode '%3D' -> '%253D'.
             append("  sig:function(x){var h=").append(sigFn)
-            append("('https://www.youtube.com/videoplayback','signature',String(x));return h&&h.get?h.get('signature'):'';},\n")
+            append("('https://www.youtube.com/videoplayback','signature',encodeURIComponent(String(x)));var r=h&&h.get?h.get('signature'):'';if(!r)return '';try{return decodeURIComponent(r);}catch(e){return r;}},\n")
             append("  n:function(x){var h=new ").append(urlHelper)
             append("('https://www.youtube.com/videoplayback?n='+encodeURIComponent(String(x)),true);return h&&h.get?h.get('n'):'';}\n")
             append("};\n")
@@ -579,9 +583,14 @@ object YouTubeJsSolver {
     }
 
     private fun pruneCacheDir(dir: File) {
-        val players = dir.listFiles { f -> f.isFile && f.name.endsWith(".js") }
-            ?.sortedByDescending { it.lastModified() }
-            ?: return
+        val allJs = dir.listFiles { f -> f.isFile && f.name.endsWith(".js") } ?: return
+        // Clean up legacy v1 patched player files immediately.
+        allJs.filter { !it.name.startsWith("native_v2_") }.forEach { oldFile ->
+            runCatching { oldFile.delete() }
+            runCatching { File(dir, oldFile.name.removeSuffix(".js") + ".sts").delete() }
+        }
+        val players = allJs.filter { it.name.startsWith("native_v2_") }
+            .sortedByDescending { it.lastModified() }
         if (players.size > 2) {
             players.drop(2).forEach { jsFile ->
                 runCatching { jsFile.delete() }
