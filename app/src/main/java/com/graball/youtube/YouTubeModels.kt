@@ -82,6 +82,7 @@ data class VideoStreamInfo(
     val videoId: String,
     val title: String,
     val channel: String,
+    val channelId: String = "",
     val durationSec: Long,
     val viewCount: String,
     val publishDate: String = "",

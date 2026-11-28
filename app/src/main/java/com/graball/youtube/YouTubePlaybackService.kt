@@ -1110,13 +1110,13 @@ class YouTubePlaybackService : MediaSessionService() {
         } else {
             activeVideoHeight?.let { "${it}p" }.orEmpty()
         }
-        val codec = fmt?.codecs?.lowercase().orEmpty().let {
-            when {
-                it.contains("av01") -> "AV1"
-                it.contains("vp9") || it.contains("vp09") -> "VP9"
-                it.contains("avc1") || it.contains("h264") -> "H.264"
-                else -> ""
-            }
+        val codecSrc = listOfNotNull(fmt?.codecs, fmt?.sampleMimeType).joinToString(" ").lowercase()
+        val codec = when {
+            codecSrc.contains("av01") -> "AV1"
+            codecSrc.contains("vp9") || codecSrc.contains("vp09") -> "VP9"
+            codecSrc.contains("hevc") || codecSrc.contains("hvc1") || codecSrc.contains("hev1") -> "HEVC"
+            codecSrc.contains("avc") || codecSrc.contains("h264") -> "H.264"
+            else -> ""
         }
         val audioTag = currentAudioTrackLabel()
             .takeIf { it.isNotBlank() && it != "Original" }
@@ -1124,12 +1124,15 @@ class YouTubePlaybackService : MediaSessionService() {
             ?.trim()
             .orEmpty()
         val clientTag = currentStreamInfo?.sourceClient?.takeIf { it.isNotBlank() }.orEmpty()
-        val potNote = if (currentStreamMode == StreamMode.MUXED && YouTubePoTokenProvider.lastError.isNotBlank()) {
-            "pot:${YouTubePoTokenProvider.lastError}"
+        val muxDiag = if (currentStreamMode == StreamMode.MUXED) {
+            listOfNotNull(
+                lastPlaybackDiagnostic?.substringAfter(": ")?.takeIf { it.isNotBlank() },
+                YouTubePoTokenProvider.lastError.takeIf { it.isNotBlank() }?.let { "pot:$it" }
+            ).joinToString(" / ")
         } else {
             ""
         }
-        return listOf(res, codec, modeLabel, clientTag, audioTag, potNote)
+        return listOf(res, codec, modeLabel, clientTag, audioTag, muxDiag)
             .filter { it.isNotBlank() }
             .joinToString(" · ")
     }

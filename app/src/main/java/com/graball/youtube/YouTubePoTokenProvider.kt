@@ -9,31 +9,35 @@ import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
-import com.graball.engine.WebViewCookieSync
+import android.webkit.WebViewClient
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Lightweight native WebView BotGuard PO Token (`&pot=...`) provider.
+ * Dual-engine native WebView GVS PO Token (`&pot=...`) provider:
  *
- * Lazily initialized ONLY when a GVS PO-token-enforcing client (`WEB_CREATOR`,
- * `WEB_REMIX`, `WEB_SAFARI`) is needed (e.g., on cloud VPNs where `VISIONOS`
- * is bot-blocked and `TV_SAMSUNG` receives poisoned HTTP-500 honeypot itags),
- * so off-VPN playback incurs zero WebView overhead.
+ * 1. **BotGuard Waa (`mintPoToken`)**: Lightweight offline WebView running
+ *    YouTube's `/api/jnn/v1/Create` + `GenerateIT` protocol (no auth headers,
+ *    no page load, ~6-12h integrity cache) — ideal for `WEB_CREATOR` / `WEB_REMIX`.
+ * 2. **Embed `base.js` Hook (`mintEmbedPoToken`)**: Hidden WebView loading
+ *    `https://www.youtube.com/embed/<videoId>` (sharing live signed-in WebView
+ *    cookies) and intercepting `/s/player/.../base.js` to expose YouTube's own
+ *    built-in PO-token minter (`pot_cms`/`pot_csms`) — ideal for `MWEB` and as a
+ *    signed-in fallback whenever BotGuard Waa tokens are rejected on flagged VPNs.
  *
- * Uses YouTube's standard Waa/BotGuard protocol:
- * 1. `POST /api/jnn/v1/Create` -> BotGuard VM JS + program
- * 2. Execute VM inside an offline hidden WebView (`blockNetworkLoads = true`)
- * 3. `POST /api/jnn/v1/GenerateIT` -> session integrity token (valid ~6-12h)
- * 4. Mint GVS PO tokens in RAM (< 20 ms) bound to `dataSyncId` / `visitorData` / `videoId`.
+ * Both engines initialize lazily ONLY when a PO-token-enforcing client is needed,
+ * so off-VPN `VISIONOS` / `ANDROID_VR` playback incurs zero overhead.
  */
 object YouTubePoTokenProvider {
 
@@ -45,13 +49,18 @@ object YouTubePoTokenProvider {
     private const val MIN_TTL_SEC = 600L
     private const val MAX_TTL_SEC = 43_200L
     private const val SAFETY_MARGIN_SEC = 300L
+    private const val EMBED_SESSION_TTL_MS = 6L * 60L * 60L * 1000L
     private const val MAX_CONSECUTIVE_FAILURES = 3
     private const val FAILURE_COOLDOWN_MS = 3L * 60L * 1000L
 
     private val PROTO_JSON_MEDIA = "application/json+protobuf; charset=utf-8".toMediaType()
+    private val EMBED_POT_FN_REGEX = Regex("^(?=.*pot_cms)(?=.*pot_csms).*$", RegexOption.MULTILINE)
     private val mainHandler = Handler(Looper.getMainLooper())
+
     private val initLock = Any()
     private val mintLock = Any()
+    private val embedInitLock = Any()
+    private val embedMintLock = Any()
 
     private data class CachedToken(
         val token: String,
@@ -70,6 +79,7 @@ object YouTubePoTokenProvider {
         val error: String
     )
 
+    // ---- Engine 1 (BotGuard Waa) state ----
     @Volatile
     private var webView: WebView? = null
 
@@ -77,19 +87,42 @@ object YouTubePoTokenProvider {
     private var integrityExpiresAtElapsedMs: Long = 0L
 
     @Volatile
-    private var integrityWasLoggedIn: Boolean = false
-
-    @Volatile
     private var consecutiveFailures: Int = 0
 
     @Volatile
     private var cooldownUntilElapsedMs: Long = 0L
+
+    // ---- Engine 2 (Embed base.js) state ----
+    @Volatile
+    private var embedWebView: WebView? = null
+
+    @Volatile
+    private var embedExpiresAtElapsedMs: Long = 0L
+
+    @Volatile
+    private var embedReadyLatch: CountDownLatch? = null
+
+    @Volatile
+    private var embedContextReady: Boolean = false
+
+    @Volatile
+    private var embedConsecutiveFailures: Int = 0
+
+    @Volatile
+    private var embedCooldownUntilElapsedMs: Long = 0L
+
+    @Volatile
+    private var cachedPatchedBaseJsUrl: String = ""
+
+    @Volatile
+    private var cachedPatchedBaseJsBytes: ByteArray = ByteArray(0)
 
     @Volatile
     var lastError: String = ""
         private set
 
     private val tokenCache = ConcurrentHashMap<String, CachedToken>()
+    private val embedTokenCache = ConcurrentHashMap<String, CachedToken>()
     private val challengePayloads = ConcurrentHashMap<String, String>()
     private val callLatches = ConcurrentHashMap<String, CountDownLatch>()
     private val callResults = ConcurrentHashMap<String, JsCallResult>()
@@ -120,29 +153,56 @@ object YouTubePoTokenProvider {
         }
     }
 
-    fun isReadyInMemory(): Boolean =
-        webView != null && SystemClock.elapsedRealtime() < integrityExpiresAtElapsedMs
+    private val embedBridge = object {
+        @JavascriptInterface
+        fun onPotEvent(event: String, detail: String) {
+            if (event == "ctx_ready") {
+                embedContextReady = true
+                embedReadyLatch?.countDown()
+            } else if (event == "patch_ready") {
+                Log.d(TAG, "Embed base.js PO-token patch injected")
+            }
+        }
+    }
 
-    /** Clears cached tokens & tears down the hidden WebView (e.g. on VPN switch or 403 retry). */
+    fun isReadyInMemory(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        return (webView != null && now < integrityExpiresAtElapsedMs) ||
+            (embedWebView != null && embedContextReady && now < embedExpiresAtElapsedMs)
+    }
+
+    /** Clears cached tokens & tears down both hidden WebViews (e.g. on VPN switch or retry). */
     fun invalidate() {
         tokenCache.clear()
+        embedTokenCache.clear()
         consecutiveFailures = 0
         cooldownUntilElapsedMs = 0L
+        embedConsecutiveFailures = 0
+        embedCooldownUntilElapsedMs = 0L
+        lastError = ""
         synchronized(initLock) {
             integrityExpiresAtElapsedMs = 0L
             val existing = webView
             webView = null
             if (existing != null) {
-                mainHandler.post { destroyWebViewSafely(existing) }
+                mainHandler.post { destroyWebViewSafely(existing, "GrabAllPotBridge") }
+            }
+        }
+        synchronized(embedInitLock) {
+            embedExpiresAtElapsedMs = 0L
+            embedContextReady = false
+            val existing = embedWebView
+            embedWebView = null
+            if (existing != null) {
+                mainHandler.post { destroyWebViewSafely(existing, "GrabAllEmbedPot") }
             }
         }
     }
 
-    /**
-     * Mints (or returns a cached) GVS PO Token bound to [identifier]
-     * (typically `dataSyncId` when signed in, `visitorData` when guest, or `videoId`).
-     * Must be called off the main thread.
-     */
+    // =========================================================================
+    // Engine 1: BotGuard Waa (Create + GenerateIT in offline hidden WebView)
+    // =========================================================================
+
     fun mintPoToken(
         context: Context,
         identifier: String,
@@ -198,31 +258,24 @@ object YouTubePoTokenProvider {
     }
 
     private fun ensureIntegrityReady(appContext: Context, forceRefresh: Boolean): Boolean {
-        val loggedInNow = WebViewCookieSync.hasLoggedInYouTubeSession()
         val now = SystemClock.elapsedRealtime()
-        if (!forceRefresh && webView != null && now < integrityExpiresAtElapsedMs &&
-            integrityWasLoggedIn == loggedInNow
-        ) {
+        if (!forceRefresh && webView != null && now < integrityExpiresAtElapsedMs) {
             return true
         }
 
         synchronized(initLock) {
             val now2 = SystemClock.elapsedRealtime()
-            if (!forceRefresh && webView != null && now2 < integrityExpiresAtElapsedMs &&
-                integrityWasLoggedIn == loggedInNow
-            ) {
+            if (!forceRefresh && webView != null && now2 < integrityExpiresAtElapsedMs) {
                 return true
             }
 
-            // Tear down any previous WebView so the BotGuard VM starts clean.
             webView?.let { old ->
                 webView = null
-                mainHandler.post { destroyWebViewSafely(old) }
+                mainHandler.post { destroyWebViewSafely(old, "GrabAllPotBridge") }
             }
             integrityExpiresAtElapsedMs = 0L
 
-            val authHeaders = if (loggedInNow) WebViewCookieSync.buildYouTubeAuthHeaders(appContext) else null
-            val challenge = fetchChallenge(authHeaders) ?: run {
+            val challenge = fetchChallenge() ?: run {
                 recordFailure(lastError.ifBlank { "create_challenge_failed" })
                 return false
             }
@@ -233,13 +286,13 @@ object YouTubePoTokenProvider {
             }
 
             val bgResp = runBotGuardInit(wv, challenge) ?: run {
-                mainHandler.post { destroyWebViewSafely(wv) }
+                mainHandler.post { destroyWebViewSafely(wv, "GrabAllPotBridge") }
                 recordFailure(lastError.ifBlank { "botguard_init_failed" })
                 return false
             }
 
-            val integrity = fetchIntegrityToken(bgResp, authHeaders) ?: run {
-                mainHandler.post { destroyWebViewSafely(wv) }
+            val integrity = fetchIntegrityToken(bgResp) ?: run {
+                mainHandler.post { destroyWebViewSafely(wv, "GrabAllPotBridge") }
                 recordFailure(lastError.ifBlank { "generate_it_failed" })
                 return false
             }
@@ -247,19 +300,18 @@ object YouTubePoTokenProvider {
             val (integrityStdB64, ttlSec) = integrity
             val setOk = setIntegrityInWebView(wv, integrityStdB64)
             if (!setOk) {
-                mainHandler.post { destroyWebViewSafely(wv) }
+                mainHandler.post { destroyWebViewSafely(wv, "GrabAllPotBridge") }
                 recordFailure("set_integrity_failed")
                 return false
             }
 
             val effectiveTtlSec = (ttlSec - SAFETY_MARGIN_SEC).coerceIn(MIN_TTL_SEC, MAX_TTL_SEC)
             webView = wv
-            integrityWasLoggedIn = loggedInNow
             integrityExpiresAtElapsedMs = SystemClock.elapsedRealtime() + effectiveTtlSec * 1000L
             consecutiveFailures = 0
             cooldownUntilElapsedMs = 0L
             lastError = ""
-            Log.d(TAG, "BotGuard integrity ready (ttl=${effectiveTtlSec}s, auth=$loggedInNow)")
+            Log.d(TAG, "BotGuard integrity ready (ttl=${effectiveTtlSec}s)")
             return true
         }
     }
@@ -270,32 +322,25 @@ object YouTubePoTokenProvider {
         if (count >= MAX_CONSECUTIVE_FAILURES) {
             cooldownUntilElapsedMs = SystemClock.elapsedRealtime() + FAILURE_COOLDOWN_MS
         }
-        Log.w(TAG, "PO token failure #$count: $reason")
+        Log.w(TAG, "BotGuard PO token failure #$count: $reason")
     }
 
-    private fun postJnn(
-        url: String,
-        jsonBody: String,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?
-    ): String? {
+    /**
+     * Calls YouTube's gRPC-Web BotGuard Waa endpoint (`/api/jnn/v1/Create` & `GenerateIT`).
+     * Never sends `Authorization: SAPISIDHASH` (Google's jnn gateway rejects it with HTTP 401).
+     */
+    private fun postJnn(url: String, jsonBody: String): String? {
         return try {
-            val reqBuilder = Request.Builder()
+            val req = Request.Builder()
                 .url(url)
                 .header("User-Agent", YouTubeSessionConfig.DESKTOP_WEB_UA)
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json+protobuf")
-                .header("Origin", "https://www.youtube.com")
-                .header("Referer", "https://www.youtube.com/")
                 .header("x-goog-api-key", JNN_API_KEY)
                 .header("x-user-agent", "grpc-web-javascript/0.1")
                 .post(jsonBody.toRequestBody(PROTO_JSON_MEDIA))
-            if (authHeaders != null) {
-                reqBuilder.header("Cookie", authHeaders.cookieHeader)
-                reqBuilder.header("Authorization", authHeaders.authorizationHeader)
-                reqBuilder.header("X-Origin", "https://www.youtube.com")
-                reqBuilder.header("X-Goog-AuthUser", "0")
-            }
-            YouTubeSessionConfig.anonymousOkHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                .build()
+            YouTubeSessionConfig.anonymousOkHttpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     lastError = "jnn_http_${resp.code}"
                     return null
@@ -308,8 +353,8 @@ object YouTubePoTokenProvider {
         }
     }
 
-    private fun fetchChallenge(authHeaders: WebViewCookieSync.YouTubeAuthHeaders?): ChallengeData? {
-        val raw = postJnn(CREATE_URL, "[\"$REQUEST_KEY\"]", authHeaders) ?: return null
+    private fun fetchChallenge(): ChallengeData? {
+        val raw = postJnn(CREATE_URL, "[\"$REQUEST_KEY\"]") ?: return null
         return try {
             val top = JSONArray(raw)
             val inner: JSONArray = if (top.length() > 1 && top.opt(1) is String) {
@@ -360,15 +405,12 @@ object YouTubePoTokenProvider {
         }
     }
 
-    private fun fetchIntegrityToken(
-        bgResponse: String,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?
-    ): Pair<String, Long>? {
+    private fun fetchIntegrityToken(bgResponse: String): Pair<String, Long>? {
         val body = JSONArray().apply {
             put(REQUEST_KEY)
             put(bgResponse)
         }.toString()
-        val raw = postJnn(GENERATE_IT_URL, body, authHeaders) ?: return null
+        val raw = postJnn(GENERATE_IT_URL, body) ?: return null
         return try {
             val arr = JSONArray(raw)
             val tokenRaw = arr.optString(0)
@@ -433,7 +475,7 @@ object YouTubePoTokenProvider {
         if (!ok || wv == null || createErr != null) {
             lastError = createErr ?: "webview_ready_timeout"
             if (wv != null) {
-                mainHandler.post { destroyWebViewSafely(wv) }
+                mainHandler.post { destroyWebViewSafely(wv, "GrabAllPotBridge") }
             }
             return null
         }
@@ -534,9 +576,295 @@ object YouTubePoTokenProvider {
             .replace('/', '_')
     }
 
-    private fun destroyWebViewSafely(wv: WebView) {
+    // =========================================================================
+    // Engine 2: YouTube Embed base.js PO-Token Hook (live signed-in WebView)
+    // =========================================================================
+
+    /**
+     * Mints a PO token using YouTube's own embed player (`youtube.com/embed/<videoId>`)
+     * running inside a hidden WebView with live YouTube cookies and a runtime
+     * `base.js` (`pot_cms`/`pot_csms`) hook.
+     */
+    fun mintEmbedPoToken(
+        context: Context,
+        videoId: String,
+        identifier: String = videoId,
+        forceRefresh: Boolean = false
+    ): String? {
+        val cleanId = identifier.trim()
+        val cleanVid = videoId.trim()
+        if (cleanId.isEmpty() || cleanVid.isEmpty()) return null
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            Log.w(TAG, "mintEmbedPoToken called on main thread; skipping")
+            return null
+        }
+
+        val now = SystemClock.elapsedRealtime()
+        if (!forceRefresh) {
+            val cached = embedTokenCache[cleanId]
+            if (cached != null && now < cached.expiresAtElapsedMs) {
+                return cached.token
+            }
+        } else {
+            embedTokenCache.remove(cleanId)
+        }
+
+        if (!forceRefresh && now < embedCooldownUntilElapsedMs) {
+            return null
+        }
+
+        if (!ensureEmbedWebViewReady(context.applicationContext, cleanVid, forceRefresh)) {
+            return null
+        }
+
+        val minted = synchronized(embedMintLock) {
+            val recheck = embedTokenCache[cleanId]
+            if (!forceRefresh && recheck != null && SystemClock.elapsedRealtime() < recheck.expiresAtElapsedMs) {
+                return@synchronized recheck.token
+            }
+            val wv = embedWebView ?: return@synchronized null
+            val first = evalEmbedMint(wv, cleanId)
+            if (first != null && first.length > 16) {
+                first
+            } else {
+                // YouTube's embed BotGuard sometimes returns a short placeholder
+                // token during its first ~1s warmup; wait once and re-mint.
+                try {
+                    Thread.sleep(900L)
+                } catch (_: InterruptedException) {
+                }
+                evalEmbedMint(wv, cleanId)
+            }
+        }
+
+        if (minted != null && minted.length > 16) {
+            embedConsecutiveFailures = 0
+            embedCooldownUntilElapsedMs = 0L
+            lastError = ""
+            val expiry = embedExpiresAtElapsedMs.coerceAtLeast(SystemClock.elapsedRealtime() + 60_000L)
+            if (embedTokenCache.size > 48) {
+                embedTokenCache.clear()
+            }
+            embedTokenCache[cleanId] = CachedToken(minted, expiry)
+            return minted
+        }
+
+        recordEmbedFailure("embed_pot_short")
+        return null
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun ensureEmbedWebViewReady(
+        appContext: Context,
+        seedVideoId: String,
+        forceRefresh: Boolean
+    ): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (!forceRefresh && embedWebView != null && embedContextReady && now < embedExpiresAtElapsedMs) {
+            return true
+        }
+
+        synchronized(embedInitLock) {
+            val now2 = SystemClock.elapsedRealtime()
+            if (!forceRefresh && embedWebView != null && embedContextReady && now2 < embedExpiresAtElapsedMs) {
+                return true
+            }
+
+            embedWebView?.let { old ->
+                embedWebView = null
+                mainHandler.post { destroyWebViewSafely(old, "GrabAllEmbedPot") }
+            }
+            embedContextReady = false
+            embedExpiresAtElapsedMs = 0L
+
+            val latch = CountDownLatch(1)
+            embedReadyLatch = latch
+            var created: WebView? = null
+            var errMsg: String? = null
+
+            mainHandler.post {
+                try {
+                    val wv = WebView(appContext).apply {
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.databaseEnabled = true
+                        settings.loadsImagesAutomatically = false
+                        settings.blockNetworkImage = true
+                        settings.mediaPlaybackRequiresUserGesture = true
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            settings.safeBrowsingEnabled = false
+                        }
+                        addJavascriptInterface(embedBridge, "GrabAllEmbedPot")
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldInterceptRequest(
+                                view: WebView,
+                                request: WebResourceRequest
+                            ): WebResourceResponse? {
+                                val u = request.url.toString()
+                                if (u.contains("/player/") && u.contains("/base.js")) {
+                                    return interceptAndPatchEmbedBaseJs(u)
+                                }
+                                if (u.contains("googlevideo.com/") ||
+                                    u.contains("ytimg.com/") ||
+                                    u.contains("ggpht.com/") ||
+                                    u.contains("doubleclick.net/")
+                                ) {
+                                    return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
+                                }
+                                return null
+                            }
+                        }
+                    }
+                    created = wv
+                    wv.loadUrl("https://www.youtube.com/embed/$seedVideoId")
+                } catch (t: Throwable) {
+                    errMsg = t.message ?: t.javaClass.simpleName
+                    latch.countDown()
+                }
+            }
+
+            val ready = try {
+                latch.await(14, TimeUnit.SECONDS)
+            } catch (_: InterruptedException) {
+                false
+            } finally {
+                embedReadyLatch = null
+            }
+
+            val wv = created
+            if (!ready || !embedContextReady || wv == null || errMsg != null) {
+                if (wv != null) {
+                    mainHandler.post { destroyWebViewSafely(wv, "GrabAllEmbedPot") }
+                }
+                recordEmbedFailure(errMsg ?: "embed_pot_timeout")
+                return false
+            }
+
+            embedWebView = wv
+            embedExpiresAtElapsedMs = SystemClock.elapsedRealtime() + EMBED_SESSION_TTL_MS
+            embedConsecutiveFailures = 0
+            embedCooldownUntilElapsedMs = 0L
+            lastError = ""
+            Log.d(TAG, "Embed base.js PO-token provider ready (seed=$seedVideoId)")
+            return true
+        }
+    }
+
+    private fun interceptAndPatchEmbedBaseJs(url: String): WebResourceResponse? {
+        return try {
+            if (url == cachedPatchedBaseJsUrl && cachedPatchedBaseJsBytes.isNotEmpty()) {
+                return WebResourceResponse(
+                    "application/javascript",
+                    "UTF-8",
+                    ByteArrayInputStream(cachedPatchedBaseJsBytes)
+                )
+            }
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", YouTubeSessionConfig.DESKTOP_WEB_UA)
+                .get()
+                .build()
+            val rawJs = YouTubeSessionConfig.anonymousOkHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                resp.body?.string()
+            } ?: return null
+
+            val patched = patchBaseJsForEmbedPot(rawJs) ?: return null
+            val bytes = patched.toByteArray(Charsets.UTF_8)
+            cachedPatchedBaseJsUrl = url
+            cachedPatchedBaseJsBytes = bytes
+            WebResourceResponse("application/javascript", "UTF-8", ByteArrayInputStream(bytes))
+        } catch (e: Exception) {
+            Log.w(TAG, "Embed base.js intercept failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun patchBaseJsForEmbedPot(js: String): String? {
+        val match = EMBED_POT_FN_REGEX.find(js) ?: return null
+        val start = match.range.first
+        var depth = 0
+        var seenBrace = false
+        var end = -1
+        for (i in start until js.length) {
+            val ch = js[i]
+            if (ch == '{') {
+                depth++
+                seenBrace = true
+            } else if (ch == '}') {
+                depth--
+                if (seenBrace && depth == 0) {
+                    end = i + 1
+                    break
+                }
+            }
+        }
+        if (end <= start) return null
+
+        val fnSrc = js.substring(start, end)
+        val openBraceIdx = fnSrc.indexOf('{')
+        val eqIdx = fnSrc.indexOf('=')
+        if (openBraceIdx <= 0 || eqIdx <= 0 || eqIdx >= openBraceIdx) return null
+        val fnName = fnSrc.substring(0, eqIdx).trim()
+        if (fnName.isBlank()) return null
+
+        val injectedBody = fnSrc.substring(0, openBraceIdx + 1) +
+            "window.__gbPotCtx=arguments[0];" +
+            fnSrc.substring(openBraceIdx + 1)
+        val wrapper = buildString {
+            append(injectedBody)
+            append(";window.__gbPotRaw=").append(fnName).append(";\n")
+            append(fnName).append("=function(a,b){var r=window.__gbPotRaw(a,b);")
+            append("try{if(r&&r.length>16){GrabAllEmbedPot.onPotEvent('ctx_ready','len='+r.length);}}catch(e){}")
+            append("return r;};\n")
+            append("window.__gbPotMint=function(id){try{return(window.__gbPotRaw&&window.__gbPotCtx)?String(window.__gbPotRaw(window.__gbPotCtx,id)||''):'';}catch(e){return '';}};\n")
+            append("try{GrabAllEmbedPot.onPotEvent('patch_ready','');}catch(e){}\n")
+        }
+        return js.substring(0, start) + wrapper + js.substring(end)
+    }
+
+    private fun evalEmbedMint(wv: WebView, identifier: String): String? {
+        val latch = CountDownLatch(1)
+        var rawResult: String? = null
+        mainHandler.post {
+            try {
+                wv.evaluateJavascript(
+                    "(window.__gbPotMint?window.__gbPotMint(${JSONObject.quote(identifier)}):'')"
+                ) { value ->
+                    rawResult = value
+                    latch.countDown()
+                }
+            } catch (_: Exception) {
+                latch.countDown()
+            }
+        }
+        val ok = try {
+            latch.await(5, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+            false
+        }
+        if (!ok) return null
+        val trimmed = rawResult?.trim() ?: return null
+        if (trimmed.isEmpty() || trimmed == "null") return null
+        return try {
+            JSONObject("{\"v\":$trimmed}").optString("v").trim().takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            trimmed.trim('"').takeIf { it.isNotBlank() }
+        }
+    }
+
+    private fun recordEmbedFailure(reason: String) {
+        lastError = reason
+        val count = ++embedConsecutiveFailures
+        if (count >= MAX_CONSECUTIVE_FAILURES) {
+            embedCooldownUntilElapsedMs = SystemClock.elapsedRealtime() + FAILURE_COOLDOWN_MS
+        }
+        Log.w(TAG, "Embed PO token failure #$count: $reason")
+    }
+
+    private fun destroyWebViewSafely(wv: WebView, bridgeName: String) {
         try {
-            wv.removeJavascriptInterface("GrabAllPotBridge")
+            wv.removeJavascriptInterface(bridgeName)
             wv.stopLoading()
             wv.clearHistory()
             wv.loadUrl("about:blank")

@@ -1771,7 +1771,7 @@ object YouTubeInnerTube {
     }
 
     @Volatile
-    private var preferredPotBindingKind: Int = 0 // 0 = dataSyncId, 1 = visitorData, 2 = videoId
+    private var preferredPotBindingKind: Int = 2 // 0 = dataSyncId, 1 = visitorData, 2 = videoId (default)
 
     /**
      * Resolves full 144p-4K streams using our ~165ms native V8 `base.js` solver:
@@ -2084,9 +2084,9 @@ object YouTubeInnerTube {
         val visitorBinding = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData?.takeIf { it.isNotBlank() }
 
         val allOrdered = listOfNotNull(
-            dataSyncBinding?.let { 0 to it },
+            2 to videoId,
             visitorBinding?.let { 1 to it },
-            2 to videoId
+            dataSyncBinding?.let { 0 to it }
         )
         val preferred = allOrdered.filter { it.first == preferredPotBindingKind }
         val rest = allOrdered.filter { it.first != preferredPotBindingKind }
@@ -2094,20 +2094,41 @@ object YouTubeInnerTube {
         val candidateBindings = (preferred + rest).filter { seenIds.add(it.second) }
 
         var triedAnyPot = false
-        for ((kind, bindingId) in candidateBindings) {
-            val pot = YouTubePoTokenProvider.mintPoToken(context, bindingId) ?: continue
+
+        fun tryToken(pot: String?, label: String, winKind: Int? = null): VideoStreamInfo? {
+            if (pot.isNullOrBlank()) return null
             triedAnyPot = true
             val withPot = attachPoTokenToStreamInfo(baseInfo, pot)
             val verified = verifyAdaptiveAudioAndVideo(withPot, userAgent, origin)
             if (verified != null) {
-                preferredPotBindingKind = kind
-                Log.d(TAG, "$sourceClient verified with GVS PO token (bindingKind=$kind)")
-                return ResolveResult(verified)
+                if (winKind != null) preferredPotBindingKind = winKind
+                Log.d(TAG, "$sourceClient verified with GVS PO token ($label)")
+                return verified
             }
+            return null
         }
 
-        // If BotGuard PO token wasn't available, still probe the un-tokenized URLs
-        // (16 KB real chunk read) in case this IP doesn't enforce GVS PO tokens.
+        // For MWEB, YouTube's own signed-in embed base.js PO token works best; try it first.
+        if (sourceClient == "MWEB") {
+            val embedPot = YouTubePoTokenProvider.mintEmbedPoToken(context, videoId, videoId)
+            tryToken(embedPot, "embed:videoId")?.let { return ResolveResult(it) }
+        }
+
+        // Try BotGuard Waa PO tokens (videoId -> visitorData -> dataSyncId).
+        for ((kind, bindingId) in candidateBindings) {
+            val pot = YouTubePoTokenProvider.mintPoToken(context, bindingId)
+            tryToken(pot, "bg:kind=$kind", winKind = kind)?.let { return ResolveResult(it) }
+        }
+
+        // For WEB_CREATOR / WEB_REMIX, if BotGuard Waa tokens were rejected on this VPN,
+        // fall back to YouTube's live embed base.js PO-token minter (carries signed-in cookies).
+        if (sourceClient != "MWEB") {
+            val embedPot = YouTubePoTokenProvider.mintEmbedPoToken(context, videoId, videoId)
+            tryToken(embedPot, "embed:videoId")?.let { return ResolveResult(it) }
+        }
+
+        // If neither PO token provider produced a token, still verify the un-tokenized
+        // URLs with a full 2 MB chunk probe in case this IP doesn't enforce GVS PO tokens.
         if (!triedAnyPot) {
             val verified = verifyAdaptiveAudioAndVideo(baseInfo, userAgent, origin)
             if (verified != null) {
@@ -2132,12 +2153,16 @@ object YouTubeInnerTube {
         )
     }
 
+    private val CLEN_PARAM_REGEX = Regex("""[?&]clen=(\d+)""")
+
     /**
-     * Lightweight ~180ms GoogleVideo 16 KB chunk probe: matches `YouTubeChunkedDataSource`
-     * (`&range=0-16383` for query-style `videoplayback?` URLs, `Range: bytes=0-16383` for
-     * path-style HLS segments) and verifies BOTH HTTP 2xx AND at least 1 real payload byte.
-     * Catches HTTP 403 missing-PO-token adaptive traps, HTTP 500 honeypot itags, and empty 200s
-     * BEFORE ExoPlayer starts (preventing silent fallback to 360p muxed).
+     * Realistic GoogleVideo chunk probe: matches `YouTubeChunkedDataSource`'s exact
+     * 2 MB chunk range (`&range=0-2097151`, clamped to `clen - 1`) and reads ONLY the
+     * first byte before closing the socket (so < 1 KB is transferred on the wire!).
+     *
+     * Probing a full 2 MB range (instead of 16 KB) bypasses GoogleVideo's unauthenticated
+     * MP4/WebM header grace window so HTTP 403 PO-token rejections and HTTP 500 honeypot
+     * itags are caught 100% reliably BEFORE ExoPlayer starts.
      */
     private fun isStreamUrlRejected(
         url: String,
@@ -2147,8 +2172,14 @@ object YouTubeInnerTube {
         return try {
             val isQueryVideoPlayback = url.contains("googlevideo.com/videoplayback?", ignoreCase = true)
             val hasRangeQuery = url.contains("range=", ignoreCase = true)
+            val clen = CLEN_PARAM_REGEX.find(url)?.groupValues?.getOrNull(1)?.toLongOrNull()
+            val probeEnd = if (clen != null && clen > 1L) {
+                minOf(clen - 1L, 2_097_151L)
+            } else {
+                2_097_151L
+            }
             val probeUrl = if (isQueryVideoPlayback && !hasRangeQuery) {
-                "$url&range=0-16383"
+                "$url&range=0-$probeEnd"
             } else {
                 url
             }
@@ -2627,6 +2658,7 @@ object YouTubeInnerTube {
         val details = root.optJSONObject("videoDetails")
         val title = extractPlayerTitle(root, details).ifBlank { "YouTube Video" }
         val channel = extractPlayerChannel(root, details)
+        val channelId = details?.optString("channelId").orEmpty().takeIf { it.startsWith("UC") }.orEmpty()
         val durationSec = details?.optString("lengthSeconds")?.toLongOrNull() ?: 0L
         val views = formatViews(details?.optString("viewCount")?.toLongOrNull())
         val publishDate = extractPlayerPublishDate(root)
@@ -2639,6 +2671,7 @@ object YouTubeInnerTube {
                 videoId = videoId,
                 title = title,
                 channel = channel,
+                channelId = channelId,
                 durationSec = durationSec,
                 viewCount = views,
                 publishDate = publishDate,
@@ -3204,6 +3237,7 @@ object YouTubeInnerTube {
         val details = root.optJSONObject("videoDetails")
         val title = extractPlayerTitle(root, details).ifBlank { "YouTube Video" }
         val channel = extractPlayerChannel(root, details)
+        val channelId = details?.optString("channelId").orEmpty().takeIf { it.startsWith("UC") }.orEmpty()
         val durationSec = details?.optString("lengthSeconds")?.toLongOrNull() ?: 0L
         val views = formatViews(details?.optString("viewCount")?.toLongOrNull())
         val publishDate = extractPlayerPublishDate(root)
@@ -3216,6 +3250,7 @@ object YouTubeInnerTube {
                 videoId = videoId,
                 title = title,
                 channel = channel,
+                channelId = channelId,
                 durationSec = durationSec,
                 viewCount = views,
                 publishDate = publishDate,
@@ -3551,13 +3586,8 @@ object YouTubeInnerTube {
             pythonLibDir = RuntimePaths.pythonLibDir(context),
             pythonPathDir = RuntimePaths.ytDlpBundleDir(context)
         )
-        val ytDlpPot = run {
-            val cfg = YouTubeSessionConfig.ensureWebConfig()
-            val binding = cfg.dataSyncId?.takeIf { it.isNotBlank() }
-                ?: cfg.visitorData?.takeIf { it.isNotBlank() }
-                ?: videoId
-            YouTubePoTokenProvider.mintPoToken(context, binding)
-        }
+        val ytDlpPot = YouTubePoTokenProvider.mintEmbedPoToken(context, videoId, videoId)
+            ?: YouTubePoTokenProvider.mintPoToken(context, videoId)
         val (raw, err) = runner.extractInfoJson(
             "https://www.youtube.com/watch?v=$videoId",
             poToken = ytDlpPot
@@ -3772,6 +3802,7 @@ object YouTubeInnerTube {
                     videoId = videoId,
                     title = root.optString("title").orEmpty().ifBlank { "YouTube Video" },
                     channel = root.optString("uploader", root.optString("channel", "")),
+                    channelId = root.optString("channel_id").orEmpty().takeIf { it.startsWith("UC") }.orEmpty(),
                     durationSec = root.optLong("duration", 0L),
                     viewCount = formatViews(root.optLong("view_count", -1L).takeIf { it >= 0 }),
                     publishDate = formatPublishDate(root.optString("upload_date")),
@@ -4094,6 +4125,11 @@ object YouTubeInnerTube {
                         if (subEntity != null && subEntity.has("subscribed")) {
                             isSubscribed = subEntity.optBoolean("subscribed", isSubscribed)
                         }
+                    }
+                    if (node.has("subscribeButtonViewModel")) {
+                        val sbvm = node.optJSONObject("subscribeButtonViewModel")
+                        val cid = sbvm?.optString("channelId")?.takeIf { it.startsWith("UC") }
+                        if (cid != null && channelId == null) channelId = cid
                     }
                     if (node.has("itemSectionRenderer")) {
                         val sec = node.optJSONObject("itemSectionRenderer")

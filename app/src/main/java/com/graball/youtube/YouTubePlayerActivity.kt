@@ -652,6 +652,15 @@ class YouTubePlayerActivity : AppCompatActivity() {
             timeBar.alpha = if (state.isReadyForSeek) 1.0f else 0.45f
         }
         updateAudioOnlyBannerVisibility(state)
+        // Keep the screen awake while actively watching video, and let it sleep
+        // normally when paused, ended, or in Audio-Only mode (saves battery).
+        val keepScreenAwake = (state.isPlaying || state.isBuffering || state.isLoading) && !state.isAudioOnly
+        playerView.keepScreenOn = keepScreenAwake
+        if (keepScreenAwake) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
 
         val item = state.currentItem
         val info = state.streamInfo
@@ -755,16 +764,29 @@ class YouTubePlayerActivity : AppCompatActivity() {
         audioOnlyBanner.visibility = if (show) View.VISIBLE else View.GONE
     }
 
-    private fun loadRelated(videoId: String) {
-        currentEngagement = null
-        updateEngagementChips(null)
+    private fun loadRelated(videoId: String, attempt: Int = 0) {
+        if (attempt == 0) {
+            currentEngagement = null
+            updateEngagementChips(null)
+        }
         io.execute {
             val (items, engagement) = YouTubeInnerTube.fetchWatchData(this, videoId)
             runOnUiThread {
                 if (!isFinishing && lastRelatedVideoId == videoId) {
-                    relatedAdapter.submitList(items, videoId)
-                    currentEngagement = engagement
-                    updateEngagementChips(engagement)
+                    if (items.isNotEmpty() || attempt > 0) {
+                        relatedAdapter.submitList(items, videoId)
+                    }
+                    if (engagement != null) {
+                        currentEngagement = engagement
+                        updateEngagementChips(engagement)
+                    } else if (attempt == 0) {
+                        // Retry once cleanly if `/next` had a transient hiccup (e.g. VPN switch)
+                        playerView.postDelayed({
+                            if (!isFinishing && lastRelatedVideoId == videoId && currentEngagement == null) {
+                                loadRelated(videoId, attempt = 1)
+                            }
+                        }, 2_000L)
+                    }
                 }
             }
         }
@@ -826,21 +848,35 @@ class YouTubePlayerActivity : AppCompatActivity() {
         return channelLabel
     }
 
+    private fun resolvedChannelId(): String? {
+        val state = YouTubePlaybackService.currentState
+        return currentEngagement?.channelId?.takeIf { it.startsWith("UC") }
+            ?: state.streamInfo?.channelId?.takeIf { it.startsWith("UC") }
+            ?: state.currentItem?.channelId?.takeIf { it.startsWith("UC") }
+    }
+
     private fun openChannelPage() {
-        val cid = currentEngagement?.channelId
+        val cid = resolvedChannelId()
         if (cid.isNullOrBlank()) {
-            Toast.makeText(this, "Channel details are still loading…", Toast.LENGTH_SHORT).show()
+            val vid = YouTubePlaybackService.currentState.currentItem?.id
+            if (!vid.isNullOrBlank()) {
+                loadRelated(vid, attempt = 1)
+            }
+            Toast.makeText(this, "Loading channel details… tap again in a moment", Toast.LENGTH_SHORT).show()
             return
         }
-        val name = currentEngagement?.channelName?.ifBlank {
-            YouTubePlaybackService.currentState.streamInfo?.channel.orEmpty()
-        }.orEmpty()
+        val state = YouTubePlaybackService.currentState
+        val name = currentEngagement?.channelName?.ifBlank { null }
+            ?: state.streamInfo?.channel?.ifBlank { null }
+            ?: state.currentItem?.channel.orEmpty()
+        val avatar = currentEngagement?.channelAvatarUrl?.ifBlank { null }
+            ?: state.currentItem?.channelAvatarUrl.orEmpty()
         startActivity(
             YouTubeChannelActivity.createIntent(
                 context = this,
                 channelId = cid,
                 channelName = name,
-                channelAvatar = currentEngagement?.channelAvatarUrl.orEmpty(),
+                channelAvatar = avatar,
                 isSubscribed = currentEngagement?.isSubscribed == true
             )
         )
@@ -903,13 +939,22 @@ class YouTubePlayerActivity : AppCompatActivity() {
         if (YouTubePlaybackService.currentState.currentItem == null) return
         if (!requireYouTubeLogin()) return
         val prev = currentEngagement
-        val channelId = prev?.channelId
+        val channelId = resolvedChannelId()
         if (channelId.isNullOrBlank()) {
-            openCurrentVideoInWeb()
+            Toast.makeText(this, "Loading channel info… tap Subscribe again in a moment", Toast.LENGTH_SHORT).show()
+            YouTubePlaybackService.currentState.currentItem?.id?.let { loadRelated(it, attempt = 1) }
             return
         }
-        val nextSub = !prev.isSubscribed
-        val optimistic = prev.copy(isSubscribed = nextSub)
+        val nextSub = !(prev?.isSubscribed ?: false)
+        val optimistic = (prev ?: YouTubeInnerTube.VideoEngagement(
+            channelId = channelId,
+            channelName = YouTubePlaybackService.currentState.streamInfo?.channel.orEmpty(),
+            isSubscribed = false,
+            isLiked = false,
+            likeCount = "",
+            commentCount = "",
+            commentsToken = null
+        )).copy(channelId = channelId, isSubscribed = nextSub)
         currentEngagement = optimistic
         updateEngagementChips(optimistic)
 
@@ -928,7 +973,7 @@ class YouTubePlayerActivity : AppCompatActivity() {
                     updateEngagementChips(prev)
                     Toast.makeText(
                         this,
-                        "Couldn't update subscription — try opening in YouTube Web",
+                        "Couldn't update subscription — try signing in again in Settings",
                         Toast.LENGTH_SHORT
                     ).show()
                 }
