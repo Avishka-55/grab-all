@@ -38,6 +38,7 @@ object YouTubeSessionConfig {
         val clientNameId: String,
         val clientVersion: String,
         val identityToken: String?,
+        val dataSyncId: String?,
         val xsrfToken: String?,
         val visitorData: String?,
         val gl: String,
@@ -303,6 +304,10 @@ object YouTubeSessionConfig {
             extractRegexField(html, """"ID_TOKEN"\s*:\s*"([^"]+)"""")
         }.takeIf { it.isNotBlank() }
 
+        val dataSyncId = merged.optString("DATASYNC_ID").ifBlank {
+            extractRegexField(html, """"DATASYNC_ID"\s*:\s*"([^"]+)"""")
+        }.substringBefore("||").trim().takeIf { it.isNotBlank() }
+
         val xsrfToken = merged.optString("XSRF_TOKEN").ifBlank {
             extractRegexField(html, """"XSRF_TOKEN"\s*:\s*"([^"]+)"""")
         }.takeIf { it.isNotBlank() }
@@ -341,6 +346,7 @@ object YouTubeSessionConfig {
             clientNameId = clientNameId,
             clientVersion = clientVersion,
             identityToken = idToken,
+            dataSyncId = dataSyncId,
             xsrfToken = xsrfToken,
             visitorData = visitorData,
             gl = gl,
@@ -401,6 +407,7 @@ object YouTubeSessionConfig {
             clientNameId = "1",
             clientVersion = FALLBACK_WEB_CLIENT_VERSION,
             identityToken = null,
+            dataSyncId = null,
             xsrfToken = null,
             visitorData = null,
             gl = "US",

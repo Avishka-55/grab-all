@@ -1656,14 +1656,17 @@ object YouTubeInnerTube {
         return ResolveResult(null, reason)
     }
 
+    @Volatile
+    private var preferVideoIdPotBinding: Boolean = false
+
     /**
      * Resolves full 144p-4K streams using our ~165ms native V8 `base.js` solver:
-     * - When signed in (`authHeaders != null`): tries `TV_SAMSUNG` (`TVHTML5`) FIRST!
-     *   It requires zero PO token, streams unthrottled via 2 MB range chunks, reaches up to
-     *   4K, AND always exposes ALL separate audio tracks (with explicit Original vs AI-dub
-     *   metadata) — completely eliminating VPN pre-merged HLS foreign dubbing!
-     * - Falls back to `WEB_SAFARI` 144p-1080p HLS (essential for live streams & guest mode),
-     *   and `WEB_EMBEDDED_PLAYER` if `WEB_SAFARI` returns dubbed-only or fails for guests.
+     * - When signed in (`authHeaders != null`): tries `WEB_CREATOR` FIRST with a
+     *   native BotGuard GVS PO Token (`&pot=...`), verified by a 16 KB audio+video
+     *   chunk probe so flagged cloud VPNs get full 144p-4K adaptive streams instead
+     *   of 403 -> 360p muxed fallback.
+     * - Falls back to `TV_SAMSUNG` (`TVHTML5`, zero PO token, 4xx/5xx honeypot-probed),
+     *   then `WEB_REMIX` (with GVS PO Token), `WEB_SAFARI` HLS, and `WEB_EMBEDDED_PLAYER`.
      */
     private fun resolveViaV8(
         context: Context,
@@ -1676,6 +1679,7 @@ object YouTubeInnerTube {
         if (forceRefreshSolver) {
             YouTubeJsSolver.invalidate()
             YouTubeSessionConfig.invalidate()
+            YouTubePoTokenProvider.invalidate()
         }
         val ready = YouTubeJsSolver.ensureReady(context, forceRefresh = forceRefreshSolver)
             ?: return ResolveResult(
@@ -1688,37 +1692,28 @@ object YouTubeInnerTube {
         var effectiveSts = ready.signatureTimestamp
         var lastReason: String? = null
 
-        // 1) When signed in: try WEB_CREATOR FIRST! On heavily bot-checked cloud VPNs
-        //    (Azure / Oracle), YouTube serves poisoned HTTP-500 honeypot itags to TV_SAMSUNG
-        //    and HTTP-403 HLS segments to WEB_SAFARI, while WEB_CREATOR returns clean,
-        //    un-poisoned 1080p/4K adaptive video + audio streams (HTTP 206).
+        // 1) When signed in: try WEB_CREATOR FIRST with a BotGuard GVS PO Token (`&pot=`).
+        //    On heavily bot-checked cloud VPNs (Azure / Oracle), YouTube serves poisoned
+        //    HTTP-500 honeypot itags to TV_SAMSUNG and HTTP-403 HLS segments to WEB_SAFARI,
+        //    while WEB_CREATOR + GVS PO Token unlocks clean 144p-4K adaptive video + audio!
         if (authHeaders != null) {
             val creatorRoot = requestWebCreatorPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             if (creatorRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(
+                val verified = tryPotProtectedAdaptiveClient(
+                    context = context,
                     videoId = videoId,
                     root = creatorRoot,
                     userAgent = WEB_UA,
+                    sourceClient = "WEB_CREATOR",
+                    visitorData = visitorData,
                     authHeaders = authHeaders,
-                    sourceClient = "WEB_CREATOR"
+                    cfg = cfg
                 )
-                if (parsed.info != null &&
-                    parsed.info.videoStreams.isNotEmpty() &&
-                    parsed.info.audioStreams.isNotEmpty()
-                ) {
-                    val audioProbe = parsed.info.bestAudio()?.url
-                    val videoProbe = parsed.info.pickVideoStream(null)?.url ?: parsed.info.videoStreams.first().url
-                    val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, WEB_UA)
-                    val videoBad = !audioBad && isStreamUrlRejected(videoProbe, WEB_UA)
-                    if (!audioBad && !videoBad) {
-                        return parsed
-                    }
-                    Log.w(TAG, "WEB_CREATOR stream probe failed for $videoId; trying TV_SAMSUNG")
-                    lastReason = "WEB_CREATOR stream rejected"
-                } else {
-                    if (lastReason.isNullOrBlank()) lastReason = parsed.error
-                    Log.d(TAG, "WEB_CREATOR V8 note ($videoId): ${parsed.error}")
+                if (verified.info != null) {
+                    return verified
                 }
+                if (lastReason.isNullOrBlank()) lastReason = verified.error
+                Log.w(TAG, "WEB_CREATOR adaptive probe failed ($videoId: ${verified.error}); trying TV_SAMSUNG")
             }
         }
 
@@ -1766,31 +1761,25 @@ object YouTubeInnerTube {
             }
         }
 
-        // 3) When signed in: try WEB_REMIX (YouTube Music player) as a second clean
-        //    authenticated adaptive client before HLS fallback.
+        // 3) When signed in: try WEB_REMIX (YouTube Music player) with the cached
+        //    BotGuard GVS PO Token as a second clean authenticated adaptive client.
         if (authHeaders != null) {
             val remixRoot = requestWebRemixPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             if (remixRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(
+                val verified = tryPotProtectedAdaptiveClient(
+                    context = context,
                     videoId = videoId,
                     root = remixRoot,
                     userAgent = WEB_UA,
+                    sourceClient = "WEB_REMIX",
+                    visitorData = visitorData,
                     authHeaders = authHeaders,
-                    sourceClient = "WEB_REMIX"
+                    cfg = cfg
                 )
-                if (parsed.info != null &&
-                    parsed.info.videoStreams.isNotEmpty() &&
-                    parsed.info.audioStreams.isNotEmpty()
-                ) {
-                    val audioProbe = parsed.info.bestAudio()?.url
-                    val videoProbe = parsed.info.pickVideoStream(null)?.url ?: parsed.info.videoStreams.first().url
-                    val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, WEB_UA)
-                    val videoBad = !audioBad && isStreamUrlRejected(videoProbe, WEB_UA)
-                    if (!audioBad && !videoBad) {
-                        return parsed
-                    }
-                    Log.w(TAG, "WEB_REMIX stream probe rejected for $videoId; trying HLS")
+                if (verified.info != null) {
+                    return verified
                 }
+                Log.w(TAG, "WEB_REMIX adaptive probe failed ($videoId: ${verified.error}); trying HLS")
             }
         }
 
@@ -1873,27 +1862,124 @@ object YouTubeInnerTube {
     )
 
     /**
-     * Lightweight ~150ms GoogleVideo 0-byte range probe: returns true when
-     * GoogleVideo explicitly rejects the stream URL with HTTP 4xx OR 5xx
-     * (including YouTube's HTTP-500 honeypot itags on flagged cloud VPNs), so
-     * [resolveViaV8] immediately skips a rejected client before ExoPlayer.
+     * Parses & verifies a GVS PO-token-enforcing adaptive client (`WEB_CREATOR` / `WEB_REMIX`).
+     * Mints a BotGuard PO token (`&pot=...`), trying session binding (`dataSyncId` / `visitorData`)
+     * and content binding (`videoId`) in self-adapting order, and confirms both adaptive audio
+     * and video pass a real 16 KB chunk read before returning to ExoPlayer.
+     */
+    private fun tryPotProtectedAdaptiveClient(
+        context: Context,
+        videoId: String,
+        root: JSONObject,
+        userAgent: String,
+        sourceClient: String,
+        visitorData: String?,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?,
+        cfg: YouTubeSessionConfig.WebClientConfig
+    ): ResolveResult {
+        val baseParsed = parseDecryptedPlayerRoot(
+            videoId = videoId,
+            root = root,
+            userAgent = userAgent,
+            poToken = null,
+            authHeaders = authHeaders,
+            sourceClient = sourceClient
+        )
+        val baseInfo = baseParsed.info
+            ?: return baseParsed
+        if (baseInfo.videoStreams.isEmpty() || baseInfo.audioStreams.isEmpty()) {
+            return ResolveResult(null, "$sourceClient returned no adaptive streams")
+        }
+
+        val sessionBinding = (if (authHeaders != null) cfg.dataSyncId else null)
+            ?.takeIf { it.isNotBlank() }
+            ?: visitorData?.takeIf { it.isNotBlank() }
+            ?: cfg.visitorData?.takeIf { it.isNotBlank() }
+
+        val candidateBindings = if (preferVideoIdPotBinding) {
+            listOfNotNull(videoId, sessionBinding).distinct()
+        } else {
+            listOfNotNull(sessionBinding, videoId).distinct()
+        }
+
+        var triedAnyPot = false
+        for (bindingId in candidateBindings) {
+            val pot = YouTubePoTokenProvider.mintPoToken(context, bindingId) ?: continue
+            triedAnyPot = true
+            val withPot = attachPoTokenToStreamInfo(baseInfo, pot)
+            val audioProbe = withPot.bestAudio()?.url
+            val videoProbe = withPot.pickVideoStream(null)?.url ?: withPot.videoStreams.first().url
+            val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, userAgent)
+            val videoBad = !audioBad && isStreamUrlRejected(videoProbe, userAgent)
+            if (!audioBad && !videoBad) {
+                preferVideoIdPotBinding = (bindingId == videoId)
+                Log.d(TAG, "$sourceClient verified with GVS PO token (binding=${if (bindingId == videoId) "videoId" else "session"})")
+                return ResolveResult(withPot)
+            }
+        }
+
+        // If BotGuard PO token wasn't available, still probe the un-tokenized URLs
+        // (16 KB real chunk read) in case this IP doesn't enforce GVS PO tokens.
+        if (!triedAnyPot) {
+            val audioProbe = baseInfo.bestAudio()?.url
+            val videoProbe = baseInfo.pickVideoStream(null)?.url ?: baseInfo.videoStreams.first().url
+            val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, userAgent)
+            val videoBad = !audioBad && isStreamUrlRejected(videoProbe, userAgent)
+            if (!audioBad && !videoBad) {
+                return ResolveResult(baseInfo)
+            }
+        }
+
+        return ResolveResult(null, "$sourceClient adaptive stream rejected")
+    }
+
+    private fun attachPoTokenToStreamInfo(info: VideoStreamInfo, poToken: String): VideoStreamInfo {
+        val encodedPot = urlEncode(poToken)
+        fun appendPot(url: String): String {
+            if (url.isBlank() || url.contains("pot=")) return url
+            val sep = if ('?' in url) "&" else "?"
+            return "$url${sep}pot=$encodedPot"
+        }
+        return info.copy(
+            videoStreams = info.videoStreams.map { it.copy(url = appendPot(it.url)) },
+            audioStreams = info.audioStreams.map { it.copy(url = appendPot(it.url)) },
+            muxedStreams = info.muxedStreams.map { it.copy(url = appendPot(it.url)) }
+        )
+    }
+
+    /**
+     * Lightweight ~180ms GoogleVideo 16 KB chunk probe: matches `YouTubeChunkedDataSource`
+     * (`&range=0-16383` for query-style `videoplayback?` URLs, `Range: bytes=0-16383` for
+     * path-style HLS segments) and verifies BOTH HTTP 2xx AND at least 1 real payload byte.
+     * Catches HTTP 403 missing-PO-token adaptive traps, HTTP 500 honeypot itags, and empty 200s
+     * BEFORE ExoPlayer starts (preventing silent fallback to 360p muxed).
      */
     private fun isStreamUrlRejected(url: String, userAgent: String): Boolean {
         return try {
-            val req = Request.Builder()
-                .url(url)
+            val isQueryVideoPlayback = url.contains("googlevideo.com/videoplayback?", ignoreCase = true)
+            val hasRangeQuery = url.contains("range=", ignoreCase = true)
+            val probeUrl = if (isQueryVideoPlayback && !hasRangeQuery) {
+                "$url&range=0-16383"
+            } else {
+                url
+            }
+            val reqBuilder = Request.Builder()
+                .url(probeUrl)
                 .header("User-Agent", userAgent)
-                .header("Range", "bytes=0-0")
                 .header("Accept-Language", "en-US,en;q=0.9")
                 .get()
-                .build()
+            if (!isQueryVideoPlayback || hasRangeQuery) {
+                reqBuilder.header("Range", "bytes=0-16383")
+            }
             val probeClient = anonClient.newBuilder()
                 .connectTimeout(4, TimeUnit.SECONDS)
-                .readTimeout(4, TimeUnit.SECONDS)
-                .callTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.SECONDS)
+                .callTimeout(6, TimeUnit.SECONDS)
                 .build()
-            probeClient.newCall(req).execute().use { resp ->
-                !resp.isSuccessful
+            probeClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (!resp.isSuccessful) return true
+                val firstByte = resp.body?.byteStream()?.read() ?: -1
+                firstByte < 0
             }
         } catch (_: Exception) {
             false

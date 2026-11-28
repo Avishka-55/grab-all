@@ -20,6 +20,7 @@ import com.graball.youtube.ThumbnailLoader
 import com.graball.youtube.YouTubeJsSolver
 import com.graball.youtube.YouTubePlaybackService
 import com.graball.youtube.YouTubePlayerActivity
+import com.graball.youtube.YouTubePoTokenProvider
 import com.graball.youtube.YouTubeSessionConfig
 import com.graball.youtube.YouTubeSubtitleParser
 import java.util.WeakHashMap
@@ -196,6 +197,7 @@ class GrabAllApp : Application() {
                 ThumbnailLoader.evictIdleConnections()
                 YouTubeJsSolver.evictIdleConnections()
                 YouTubeSubtitleParser.evictIdleConnections()
+                YouTubePoTokenProvider.invalidate()
                 YouTubePlaybackService.onNetworkChanged()
             } catch (_: Throwable) {
             }
