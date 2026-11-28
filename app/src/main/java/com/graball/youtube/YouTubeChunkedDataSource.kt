@@ -163,7 +163,23 @@ class YouTubeChunkedDataSource(
             if (e.responseCode == 416) {
                 return C.RESULT_END_OF_INPUT
             }
-            throw e
+            if (e.responseCode == 400 || e.responseCode == 403) {
+                // Edge server rejected synthetic &range= mid-stream -> continue via plain HTTP Range.
+                chunkedMode = false
+                val remaining = if (endExclusive != C.LENGTH_UNSET.toLong()) {
+                    (endExclusive - currentPos).coerceAtLeast(0L)
+                } else {
+                    C.LENGTH_UNSET.toLong()
+                }
+                if (remaining == 0L) return C.RESULT_END_OF_INPUT
+                val resumeSpec = originalSpec!!.buildUpon()
+                    .setPosition(currentPos)
+                    .setLength(remaining)
+                    .build()
+                openUnchunked(resumeSpec)
+            } else {
+                throw e
+            }
         }
         if (!upstreamOpen) return C.RESULT_END_OF_INPUT
         val next = upstream.read(buffer, offset, length)

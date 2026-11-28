@@ -55,6 +55,7 @@ object YouTubeInnerTube {
         "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1"
 
     private const val WEB_REMIX_CLIENT_VERSION = "1.20260707.12.00"
+    private const val WEB_CREATOR_CLIENT_VERSION = "1.20260708.06.00"
 
     private val MUSIC_CHIP_LABELS = setOf(
         "music", "música", "musica", "音乐", "音樂", "موسيقى", "संगीत", "музыка", "musique", "musik"
@@ -1687,9 +1688,44 @@ object YouTubeInnerTube {
         var effectiveSts = ready.signatureTimestamp
         var lastReason: String? = null
 
-        // Try TV_SAMSUNG (TVHTML5 5.x) FIRST — works both signed-in AND in guest mode
-        // with zero PO token, unthrottled 2 MB chunk streaming up to 4K, and full
-        // multi-language Original vs AI-dub audio track metadata!
+        // 1) When signed in: try WEB_CREATOR FIRST! On heavily bot-checked cloud VPNs
+        //    (Azure / Oracle), YouTube serves poisoned HTTP-500 honeypot itags to TV_SAMSUNG
+        //    and HTTP-403 HLS segments to WEB_SAFARI, while WEB_CREATOR returns clean,
+        //    un-poisoned 1080p/4K adaptive video + audio streams (HTTP 206).
+        if (authHeaders != null) {
+            val creatorRoot = requestWebCreatorPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+            if (creatorRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(
+                    videoId = videoId,
+                    root = creatorRoot,
+                    userAgent = WEB_UA,
+                    authHeaders = authHeaders,
+                    sourceClient = "WEB_CREATOR"
+                )
+                if (parsed.info != null &&
+                    parsed.info.videoStreams.isNotEmpty() &&
+                    parsed.info.audioStreams.isNotEmpty()
+                ) {
+                    val audioProbe = parsed.info.bestAudio()?.url
+                    val videoProbe = parsed.info.pickVideoStream(null)?.url ?: parsed.info.videoStreams.first().url
+                    val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, WEB_UA)
+                    val videoBad = !audioBad && isStreamUrlRejected(videoProbe, WEB_UA)
+                    if (!audioBad && !videoBad) {
+                        return parsed
+                    }
+                    Log.w(TAG, "WEB_CREATOR stream probe failed for $videoId; trying TV_SAMSUNG")
+                    lastReason = "WEB_CREATOR stream rejected"
+                } else {
+                    if (lastReason.isNullOrBlank()) lastReason = parsed.error
+                    Log.d(TAG, "WEB_CREATOR V8 note ($videoId): ${parsed.error}")
+                }
+            }
+        }
+
+        // 2) Try TV_SAMSUNG (TVHTML5 5.x) — works both signed-in AND in guest mode
+        //    with zero PO token, unthrottled 2 MB chunk streaming up to 4K, and full
+        //    multi-language Original vs AI-dub audio track metadata.
+        //    Probed for BOTH 4xx AND YouTube's HTTP-500 honeypot itags!
         run {
             var tvRoot = requestTvSamsungPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             val firstStatus = tvRoot?.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
@@ -1716,16 +1752,44 @@ object YouTubeInnerTube {
                 ) {
                     val audioProbe = parsed.info.bestAudio()?.url
                     val videoProbe = parsed.info.pickVideoStream(null)?.url ?: parsed.info.videoStreams.first().url
-                    val audio403 = audioProbe != null && isStreamUrlRejected403(audioProbe, TV_SAMSUNG_UA)
-                    val video403 = !audio403 && isStreamUrlRejected403(videoProbe, TV_SAMSUNG_UA)
-                    if (!audio403 && !video403) {
+                    val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, TV_SAMSUNG_UA)
+                    val videoBad = !audioBad && isStreamUrlRejected(videoProbe, TV_SAMSUNG_UA)
+                    if (!audioBad && !videoBad) {
                         return parsed
                     }
-                    Log.w(TAG, "TVHTML5 stream probe returned HTTP 403 for $videoId; trying WEB_SAFARI HLS")
-                    lastReason = "TV_SAMSUNG stream rejected (HTTP 403)"
+                    Log.w(TAG, "TVHTML5 stream probe rejected (4xx/5xx) for $videoId; trying next client")
+                    lastReason = "TV_SAMSUNG stream rejected"
                 } else {
                     if (lastReason.isNullOrBlank()) lastReason = parsed.error
                     Log.d(TAG, "TVHTML5 V8 note ($videoId): ${parsed.error}")
+                }
+            }
+        }
+
+        // 3) When signed in: try WEB_REMIX (YouTube Music player) as a second clean
+        //    authenticated adaptive client before HLS fallback.
+        if (authHeaders != null) {
+            val remixRoot = requestWebRemixPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+            if (remixRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(
+                    videoId = videoId,
+                    root = remixRoot,
+                    userAgent = WEB_UA,
+                    authHeaders = authHeaders,
+                    sourceClient = "WEB_REMIX"
+                )
+                if (parsed.info != null &&
+                    parsed.info.videoStreams.isNotEmpty() &&
+                    parsed.info.audioStreams.isNotEmpty()
+                ) {
+                    val audioProbe = parsed.info.bestAudio()?.url
+                    val videoProbe = parsed.info.pickVideoStream(null)?.url ?: parsed.info.videoStreams.first().url
+                    val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, WEB_UA)
+                    val videoBad = !audioBad && isStreamUrlRejected(videoProbe, WEB_UA)
+                    if (!audioBad && !videoBad) {
+                        return parsed
+                    }
+                    Log.w(TAG, "WEB_REMIX stream probe rejected for $videoId; trying HLS")
                 }
             }
         }
@@ -1746,10 +1810,14 @@ object YouTubeInnerTube {
                 ) {
                     val variants = parsed.info.hlsVariants
                     val sampleVariantUrl = variants.firstOrNull()?.url
-                    val hls403 = sampleVariantUrl != null && isHlsVariantRejected403(sampleVariantUrl, WEB_SAFARI_UA)
-                    if (hls403) {
-                        Log.w(TAG, "WEB_SAFARI HLS segment probe returned HTTP 403 for $videoId; trying WEB_EMBEDDED_PLAYER")
-                        lastReason = "WEB_SAFARI HLS rejected (HTTP 403)"
+                    val hlsBad = when {
+                        sampleVariantUrl != null -> isHlsVariantRejected(sampleVariantUrl, WEB_SAFARI_UA)
+                        !parsed.info.hlsUrl.isNullOrBlank() -> isHlsMasterRejected(parsed.info.hlsUrl, WEB_SAFARI_UA, authHeaders)
+                        else -> false
+                    }
+                    if (hlsBad) {
+                        Log.w(TAG, "WEB_SAFARI HLS segment probe rejected for $videoId; trying WEB_EMBEDDED_PLAYER")
+                        lastReason = "WEB_SAFARI HLS rejected"
                     } else {
                         val onlyDubbedVariants = variants.isNotEmpty() &&
                             variants.none { it.isOriginalAudio } &&
@@ -1784,10 +1852,10 @@ object YouTubeInnerTube {
                 ) {
                     val probeUrl = parsed.info.bestAudio()?.url
                         ?: parsed.info.videoStreams.firstOrNull()?.url
-                    if (probeUrl == null || !isStreamUrlRejected403(probeUrl, WEB_SAFARI_UA)) {
+                    if (probeUrl == null || !isStreamUrlRejected(probeUrl, WEB_SAFARI_UA)) {
                         return parsed
                     }
-                    Log.w(TAG, "WEB_EMBEDDED_PLAYER stream probe returned HTTP 403 for $videoId")
+                    Log.w(TAG, "WEB_EMBEDDED_PLAYER stream probe rejected for $videoId")
                 }
             }
             if (safariFallback != null) {
@@ -1805,12 +1873,12 @@ object YouTubeInnerTube {
     )
 
     /**
-     * Lightweight ~150ms GoogleVideo 0-byte range probe: returns true ONLY when
-     * GoogleVideo explicitly rejects the decrypted stream URL with HTTP 403, so
-     * [resolveViaV8] can immediately skip a broken/rejected client and fall back
-     * to `WEB_SAFARI` HLS without bouncing through ExoPlayer.
+     * Lightweight ~150ms GoogleVideo 0-byte range probe: returns true when
+     * GoogleVideo explicitly rejects the stream URL with HTTP 4xx OR 5xx
+     * (including YouTube's HTTP-500 honeypot itags on flagged cloud VPNs), so
+     * [resolveViaV8] immediately skips a rejected client before ExoPlayer.
      */
-    private fun isStreamUrlRejected403(url: String, userAgent: String): Boolean {
+    private fun isStreamUrlRejected(url: String, userAgent: String): Boolean {
         return try {
             val req = Request.Builder()
                 .url(url)
@@ -1825,7 +1893,7 @@ object YouTubeInnerTube {
                 .callTimeout(5, TimeUnit.SECONDS)
                 .build()
             probeClient.newCall(req).execute().use { resp ->
-                resp.code == 403
+                !resp.isSuccessful
             }
         } catch (_: Exception) {
             false
@@ -1833,11 +1901,11 @@ object YouTubeInnerTube {
     }
 
     /**
-     * Checks an HLS variant playlist + its first media segment for HTTP 403 so
+     * Checks an HLS variant playlist + its first media segment for non-2xx so
      * broken `/n/` or IP-rejected HLS variants don't pass manifest parsing only
      * to fail immediately inside ExoPlayer.
      */
-    private fun isHlsVariantRejected403(variantUrl: String, userAgent: String): Boolean {
+    private fun isHlsVariantRejected(variantUrl: String, userAgent: String): Boolean {
         return try {
             val probeClient = anonClient.newBuilder()
                 .connectTimeout(4, TimeUnit.SECONDS)
@@ -1851,17 +1919,135 @@ object YouTubeInnerTube {
                 .get()
                 .build()
             val firstSeg = probeClient.newCall(req).execute().use { resp ->
-                if (resp.code == 403) return true
-                if (!resp.isSuccessful) return false
+                if (!resp.isSuccessful) return true
                 resp.body?.string()?.lineSequence()
                     ?.map { it.trim() }
                     ?.firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
             } ?: return false
             val solvedSeg = YouTubeJsSolver.solveUrlNParam(firstSeg)
-            isStreamUrlRejected403(solvedSeg, userAgent)
+            isStreamUrlRejected(solvedSeg, userAgent)
         } catch (_: Exception) {
             false
         }
+    }
+
+    /** Probes a separate-audio HLS master manifest's first variant + first media segment. */
+    private fun isHlsMasterRejected(
+        masterUrl: String,
+        userAgent: String,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?
+    ): Boolean {
+        return try {
+            val probeClient = anonClient.newBuilder()
+                .connectTimeout(4, TimeUnit.SECONDS)
+                .readTimeout(4, TimeUnit.SECONDS)
+                .callTimeout(6, TimeUnit.SECONDS)
+                .build()
+            val reqBuilder = Request.Builder()
+                .url(masterUrl)
+                .header("User-Agent", userAgent)
+                .header("Accept-Language", "en-US,en;q=0.9")
+            if (authHeaders != null) {
+                reqBuilder.header("Cookie", sanitizeCookieHeaderForPlayer(authHeaders.cookieHeader))
+            }
+            val firstVariant = probeClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (!resp.isSuccessful) return true
+                resp.body?.string()?.lineSequence()
+                    ?.map { it.trim() }
+                    ?.firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+            } ?: return false
+            isHlsVariantRejected(YouTubeJsSolver.solveUrlNParam(firstVariant), userAgent)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun requestWebCreatorPlayer(
+        videoId: String,
+        visitorData: String?,
+        signatureTimestamp: Int,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders,
+        cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig()
+    ): JSONObject? {
+        val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
+        val clientObj = JSONObject().apply {
+            put("clientName", "WEB_CREATOR")
+            put("clientVersion", WEB_CREATOR_CLIENT_VERSION)
+            put("hl", "en")
+            put("gl", "US")
+            if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
+        }
+        val body = JSONObject().apply {
+            put("context", JSONObject().apply { put("client", clientObj) })
+            put("videoId", videoId)
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("signatureTimestamp", signatureTimestamp)
+                    put("html5Preference", "HTML5_PREF_WANTS")
+                })
+            })
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+        val baseUrl = if (!cfg.apiKey.isNullOrBlank()) {
+            "https://www.youtube.com/youtubei/v1/player?key=${cfg.apiKey}&prettyPrint=false"
+        } else {
+            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+        }
+        return postInnerTube(
+            url = baseUrl,
+            body = body,
+            userAgent = WEB_UA,
+            clientNameId = "62",
+            clientVersion = WEB_CREATOR_CLIENT_VERSION,
+            visitorData = effectiveVisitor,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        )
+    }
+
+    private fun requestWebRemixPlayer(
+        videoId: String,
+        visitorData: String?,
+        signatureTimestamp: Int,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders,
+        cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig()
+    ): JSONObject? {
+        val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
+        val clientObj = JSONObject().apply {
+            put("clientName", "WEB_REMIX")
+            put("clientVersion", WEB_REMIX_CLIENT_VERSION)
+            put("hl", "en")
+            put("gl", "US")
+            if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
+        }
+        val body = JSONObject().apply {
+            put("context", JSONObject().apply { put("client", clientObj) })
+            put("videoId", videoId)
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("signatureTimestamp", signatureTimestamp)
+                    put("html5Preference", "HTML5_PREF_WANTS")
+                })
+            })
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+        val baseUrl = if (!cfg.apiKey.isNullOrBlank()) {
+            "https://www.youtube.com/youtubei/v1/player?key=${cfg.apiKey}&prettyPrint=false"
+        } else {
+            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+        }
+        return postInnerTube(
+            url = baseUrl,
+            body = body,
+            userAgent = WEB_UA,
+            clientNameId = "67",
+            clientVersion = WEB_REMIX_CLIENT_VERSION,
+            visitorData = effectiveVisitor,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        )
     }
 
     private fun requestTvSamsungPlayer(

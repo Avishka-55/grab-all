@@ -1301,7 +1301,8 @@ class YouTubePlaybackService : MediaSessionService() {
                 ) { status ->
                     mainHandler.post {
                         if (gen == loadGeneration && isLoading) {
-                            loadingStatus = status
+                            val diag = if (recoveryLevel >= 1) lastPlaybackDiagnostic else null
+                            loadingStatus = if (diag != null) "$status\n[$diag]" else status
                             broadcastState()
                         }
                     }
@@ -1409,6 +1410,12 @@ class YouTubePlaybackService : MediaSessionService() {
             if (stallRetries < 1 && index in queue.indices) {
                 stallRetries++
                 loadAtIndex(index, startFromBeginning, resumePos.takeIf { it > 0L }, resetRecoveryCounter = false)
+            } else {
+                val diagClient = cur.sourceClient.ifBlank { "yt" }
+                val diagMode = currentStreamMode?.name ?: "?"
+                val diag = lastPlaybackDiagnostic ?: "$diagClient/$diagMode: BUFFER_TIMEOUT"
+                lastError = "Stream stalled [$diag]. Tap Retry."
+                broadcastState()
             }
         }, 15_000L)
 
