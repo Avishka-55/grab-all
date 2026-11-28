@@ -3,9 +3,12 @@ package com.graball.youtube
 import android.util.Log
 import com.graball.engine.WebViewCookieSync
 import okhttp3.ConnectionPool
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -54,11 +57,30 @@ object YouTubeSessionConfig {
     }
 
     /**
+     * IPv4-first DNS resolver so InnerTube `/youtubei/v1/player` and
+     * `googlevideo.com` media streams always resolve to the same IPv4 VPN exit
+     * instead of splitting IPv4 vs IPv6 (which triggers GoogleVideo HTTP 403).
+     */
+    val ipv4FirstDns: Dns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            val all = Dns.SYSTEM.lookup(hostname)
+            if (all.size <= 1) return all
+            val v4 = ArrayList<InetAddress>(all.size)
+            val other = ArrayList<InetAddress>(all.size)
+            for (addr in all) {
+                if (addr is Inet4Address) v4.add(addr) else other.add(addr)
+            }
+            return if (v4.isEmpty()) all else v4 + other
+        }
+    }
+
+    /**
      * OkHttp client sharing the live WebView [android.webkit.CookieManager]
      * cookie store. Use this for authenticated YouTube page & InnerTube calls.
      */
     val sharedOkHttpClient: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(WebViewCookieSync.okHttpCookieJar)
+        .dns(ipv4FirstDns)
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
         .writeTimeout(8, TimeUnit.SECONDS)
@@ -73,10 +95,28 @@ object YouTubeSessionConfig {
      * (`VISIONOS`, `ANDROID_VR`, `IOS`) and autocomplete suggestions.
      */
     val anonymousOkHttpClient: OkHttpClient = OkHttpClient.Builder()
+        .dns(ipv4FirstDns)
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
         .writeTimeout(8, TimeUnit.SECONDS)
         .callTimeout(18, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .pingInterval(25, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(8, 45, TimeUnit.SECONDS))
+        .build()
+
+    /**
+     * Dedicated streaming OkHttp client for ExoPlayer ([YouTubeOkHttpDataSource]):
+     * shares the exact same IPv4-first DNS, HTTP/2, TLS, and VPN socket-eviction
+     * lifecycle as InnerTube, with no overall `callTimeout` so long streams never abort.
+     */
+    val mediaStreamingOkHttpClient: OkHttpClient = OkHttpClient.Builder()
+        .dns(ipv4FirstDns)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .retryOnConnectionFailure(true)
         .pingInterval(25, TimeUnit.SECONDS)
         .connectionPool(ConnectionPool(8, 45, TimeUnit.SECONDS))
@@ -89,6 +129,10 @@ object YouTubeSessionConfig {
         }
         try {
             anonymousOkHttpClient.connectionPool.evictAll()
+        } catch (_: Exception) {
+        }
+        try {
+            mediaStreamingOkHttpClient.connectionPool.evictAll()
         } catch (_: Exception) {
         }
     }

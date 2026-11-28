@@ -94,7 +94,8 @@ data class VideoStreamInfo(
     val audioStreams: List<StreamFormat>,
     val muxedStreams: List<StreamFormat>,
     val userAgent: String,
-    val captionTracks: List<CaptionTrack> = emptyList()
+    val captionTracks: List<CaptionTrack> = emptyList(),
+    val sourceClient: String = ""
 ) {
     /** Distinct playable video heights sorted descending (e.g. 2160, 1440, 1080, 720, 480, 360). */
     fun availableHeights(): List<Int> {

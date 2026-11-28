@@ -66,6 +66,7 @@ object YouTubeJsSolver {
     )
 
     private val http = OkHttpClient.Builder()
+        .dns(YouTubeSessionConfig.ipv4FirstDns)
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
         .writeTimeout(8, TimeUnit.SECONDS)

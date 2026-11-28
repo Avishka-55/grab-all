@@ -1682,7 +1682,9 @@ object YouTubeInnerTube {
                 "V8 JS solver unavailable (${YouTubeJsSolver.lastError.ifBlank { "unknown" }})"
             )
         val cfg = YouTubeSessionConfig.ensureWebConfig(forceRefresh = forceRefreshSolver)
-        var effectiveSts = cfg.signatureTimestamp ?: ready.signatureTimestamp
+        // Always prefer the exact signatureTimestamp extracted from the active V8 base.js
+        // so sts and the V8 cipher solver can never drift out of sync during A/B rollouts.
+        var effectiveSts = ready.signatureTimestamp
         var lastReason: String? = null
 
         // Try TV_SAMSUNG (TVHTML5 5.x) FIRST — works both signed-in AND in guest mode
@@ -1701,13 +1703,22 @@ object YouTubeInnerTube {
                 }
             }
             if (tvRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(videoId, tvRoot, TV_SAMSUNG_UA, authHeaders = authHeaders)
+                val parsed = parseDecryptedPlayerRoot(
+                    videoId = videoId,
+                    root = tvRoot,
+                    userAgent = TV_SAMSUNG_UA,
+                    authHeaders = authHeaders,
+                    sourceClient = "TV_SAMSUNG"
+                )
                 if (parsed.info != null &&
                     parsed.info.videoStreams.isNotEmpty() &&
                     parsed.info.audioStreams.isNotEmpty()
                 ) {
-                    val probeUrl = parsed.info.bestAudio()?.url ?: parsed.info.videoStreams.first().url
-                    if (!isStreamUrlRejected403(probeUrl, TV_SAMSUNG_UA)) {
+                    val audioProbe = parsed.info.bestAudio()?.url
+                    val videoProbe = parsed.info.pickVideoStream(null)?.url ?: parsed.info.videoStreams.first().url
+                    val audio403 = audioProbe != null && isStreamUrlRejected403(audioProbe, TV_SAMSUNG_UA)
+                    val video403 = !audio403 && isStreamUrlRejected403(videoProbe, TV_SAMSUNG_UA)
+                    if (!audio403 && !video403) {
                         return parsed
                     }
                     Log.w(TAG, "TVHTML5 stream probe returned HTTP 403 for $videoId; trying WEB_SAFARI HLS")
@@ -1723,29 +1734,49 @@ object YouTubeInnerTube {
             var safariFallback: ResolveResult? = null
             val safariRoot = requestWebSafariPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             if (safariRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(videoId, safariRoot, WEB_SAFARI_UA, authHeaders = authHeaders)
+                val parsed = parseDecryptedPlayerRoot(
+                    videoId = videoId,
+                    root = safariRoot,
+                    userAgent = WEB_SAFARI_UA,
+                    authHeaders = authHeaders,
+                    sourceClient = "WEB_SAFARI"
+                )
                 if (parsed.info != null &&
                     (parsed.info.hlsVariants.isNotEmpty() || !parsed.info.hlsUrl.isNullOrBlank())
                 ) {
                     val variants = parsed.info.hlsVariants
-                    val onlyDubbedVariants = variants.isNotEmpty() &&
-                        variants.none { it.isOriginalAudio } &&
-                        variants.all { it.isDubbedOrDescriptive }
-                    if (!onlyDubbedVariants) {
-                        return parsed
+                    val sampleVariantUrl = variants.firstOrNull()?.url
+                    val hls403 = sampleVariantUrl != null && isHlsVariantRejected403(sampleVariantUrl, WEB_SAFARI_UA)
+                    if (hls403) {
+                        Log.w(TAG, "WEB_SAFARI HLS segment probe returned HTTP 403 for $videoId; trying WEB_EMBEDDED_PLAYER")
+                        lastReason = "WEB_SAFARI HLS rejected (HTTP 403)"
+                    } else {
+                        val onlyDubbedVariants = variants.isNotEmpty() &&
+                            variants.none { it.isOriginalAudio } &&
+                            variants.all { it.isDubbedOrDescriptive }
+                        if (!onlyDubbedVariants) {
+                            return parsed
+                        }
+                        Log.d(TAG, "WEB_SAFARI returned only dubbed HLS variants for $videoId; trying WEB_EMBEDDED_PLAYER")
+                        safariFallback = parsed
                     }
-                    Log.d(TAG, "WEB_SAFARI returned only dubbed HLS variants for $videoId; trying WEB_EMBEDDED_PLAYER")
-                    safariFallback = parsed
+                } else {
+                    if (lastReason.isNullOrBlank()) lastReason = parsed.error
+                    Log.d(TAG, "WEB_SAFARI HLS note ($videoId): ${parsed.error}")
                 }
-                if (lastReason.isNullOrBlank()) lastReason = parsed.error
-                Log.d(TAG, "WEB_SAFARI HLS note ($videoId): ${parsed.error}")
             }
 
             // Guest-mode / dubbed-HLS safety fallback: WEB_EMBEDDED_PLAYER requires no PO token
             // for direct HTTPS adaptive video + multi-language audio on embeddable videos.
             val embeddedRoot = requestWebEmbeddedPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             if (embeddedRoot != null) {
-                val parsed = parseDecryptedPlayerRoot(videoId, embeddedRoot, WEB_SAFARI_UA, authHeaders = authHeaders)
+                val parsed = parseDecryptedPlayerRoot(
+                    videoId = videoId,
+                    root = embeddedRoot,
+                    userAgent = WEB_SAFARI_UA,
+                    authHeaders = authHeaders,
+                    sourceClient = "WEB_EMBEDDED"
+                )
                 if (parsed.info != null &&
                     ((parsed.info.videoStreams.isNotEmpty() && parsed.info.audioStreams.isNotEmpty()) ||
                         parsed.info.hlsVariants.isNotEmpty() ||
@@ -1796,6 +1827,38 @@ object YouTubeInnerTube {
             probeClient.newCall(req).execute().use { resp ->
                 resp.code == 403
             }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Checks an HLS variant playlist + its first media segment for HTTP 403 so
+     * broken `/n/` or IP-rejected HLS variants don't pass manifest parsing only
+     * to fail immediately inside ExoPlayer.
+     */
+    private fun isHlsVariantRejected403(variantUrl: String, userAgent: String): Boolean {
+        return try {
+            val probeClient = anonClient.newBuilder()
+                .connectTimeout(4, TimeUnit.SECONDS)
+                .readTimeout(4, TimeUnit.SECONDS)
+                .callTimeout(6, TimeUnit.SECONDS)
+                .build()
+            val req = Request.Builder()
+                .url(variantUrl)
+                .header("User-Agent", userAgent)
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .get()
+                .build()
+            val firstSeg = probeClient.newCall(req).execute().use { resp ->
+                if (resp.code == 403) return true
+                if (!resp.isSuccessful) return false
+                resp.body?.string()?.lineSequence()
+                    ?.map { it.trim() }
+                    ?.firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+            } ?: return false
+            val solvedSeg = YouTubeJsSolver.solveUrlNParam(firstSeg)
+            isStreamUrlRejected403(solvedSeg, userAgent)
         } catch (_: Exception) {
             false
         }
@@ -1955,7 +2018,8 @@ object YouTubeInnerTube {
         root: JSONObject,
         userAgent: String,
         poToken: String? = null,
-        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders? = null,
+        sourceClient: String = ""
     ): ResolveResult {
         val playStatus = root.optJSONObject("playabilityStatus")
         val status = playStatus?.optString("status") ?: ""
@@ -2031,7 +2095,8 @@ object YouTubeInnerTube {
                 audioStreams = audioStreams,
                 muxedStreams = muxedStreams,
                 userAgent = userAgent,
-                captionTracks = captions
+                captionTracks = captions,
+                sourceClient = sourceClient
             )
         )
     }
@@ -2605,7 +2670,8 @@ object YouTubeInnerTube {
                 audioStreams = audioStreams,
                 muxedStreams = muxedStreams,
                 userAgent = userAgent,
-                captionTracks = captions
+                captionTracks = captions,
+                sourceClient = clientName
             )
         )
     }
@@ -3146,7 +3212,8 @@ object YouTubeInnerTube {
                     audioStreams = audioStreams,
                     muxedStreams = muxedStreams,
                     userAgent = detectedUa,
-                    captionTracks = captions
+                    captionTracks = captions,
+                    sourceClient = "yt-dlp"
                 )
             )
         } catch (e: Exception) {

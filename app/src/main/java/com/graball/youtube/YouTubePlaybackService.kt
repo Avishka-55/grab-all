@@ -29,7 +29,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
@@ -176,6 +175,7 @@ class YouTubePlaybackService : MediaSessionService() {
     private var streamReachedReady = false
     private var pendingSeekPositionMs: Long? = null
     private var autoRecoveryAttempts = 0
+    private var lastPlaybackDiagnostic: String? = null
 
     // Background pre-resolved streams (up to 2 upcoming queue tracks, 15m TTL)
     // plus Audio-Only ~20s byte pre-buffering (~384 KB) & cover art pre-warming
@@ -322,12 +322,11 @@ class YouTubePlaybackService : MediaSessionService() {
     private fun prebufferAudioBytes(audioUrl: String, userAgent: String, genSnapshot: Int): Boolean {
         val cache = getOrCreateMediaCache(applicationContext) ?: return false
         return try {
-            val httpFactory = DefaultHttpDataSource.Factory()
-                .setUserAgent(userAgent)
-                .setDefaultRequestProperties(mapOf("Accept-Language" to "en-US,en;q=0.9"))
-                .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(8_000)
-                .setReadTimeoutMs(10_000)
+            val httpFactory = YouTubeOkHttpDataSource.Factory(
+                callFactory = YouTubeSessionConfig.mediaStreamingOkHttpClient,
+                userAgent = userAgent,
+                defaultRequestProperties = mapOf("Accept-Language" to "en-US,en;q=0.9")
+            )
             val chunkedFactory = YouTubeChunkedDataSource.Factory(httpFactory)
             val cacheDataSource = CacheDataSource.Factory()
                 .setCache(cache)
@@ -478,13 +477,18 @@ class YouTubePlaybackService : MediaSessionService() {
                                 evictStreamFromCache(info)
                             }
                         }
+                        val httpErr = error.cause as? HttpDataSource.InvalidResponseCodeException
+                        val diagClient = info?.sourceClient?.ifBlank { null } ?: "yt"
+                        val diagMode = currentStreamMode?.name ?: "?"
+                        val diagCode = httpErr?.let { "HTTP ${it.responseCode}" }
+                            ?: "${error.errorCodeName}${error.cause?.javaClass?.simpleName?.let { "/$it" } ?: ""}"
+                        lastPlaybackDiagnostic = "$diagClient/$diagMode: $diagCode"
                         if (info != null && error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
                             evictStreamFromCache(info)
                             // Remember the format that was rejected (query ?itag= OR HLS /itag/95/)
                             // so the fresh re-resolve doesn't pick the same dead itag again.
-                            val http = error.cause as? HttpDataSource.InvalidResponseCodeException
-                            if (http != null && (http.responseCode == 403 || http.responseCode == 416)) {
-                                val uri = http.dataSpec.uri
+                            if (httpErr != null && (httpErr.responseCode == 403 || httpErr.responseCode == 416)) {
+                                val uri = httpErr.dataSpec.uri
                                 val badItag = uri.getQueryParameter("itag")?.toIntOrNull()
                                     ?: PATH_ITAG_REGEX.find(uri.toString())?.groupValues?.getOrNull(1)?.toIntOrNull()
                                 badItag?.let {
@@ -519,7 +523,8 @@ class YouTubePlaybackService : MediaSessionService() {
                             )
                             return
                         }
-                        lastError = "Playback failed (${error.errorCodeName}${error.cause?.javaClass?.simpleName?.let { " / $it" } ?: ""}). Tap Retry or Download."
+                        val diagSuffix = lastPlaybackDiagnostic?.let { " [$it]" } ?: ""
+                        lastError = "Playback failed$diagSuffix. Tap Retry or Download."
                         broadcastState()
                     }
                 })
@@ -1219,6 +1224,7 @@ class YouTubePlaybackService : MediaSessionService() {
         if (resetRecoveryCounter) {
             autoRecoveryAttempts = 0
             stallRetries = 0
+            lastPlaybackDiagnostic = null
             failedItags.clear()
             failedItagsVideoId = null
             selectedAudioTrackId = null
@@ -1247,7 +1253,8 @@ class YouTubePlaybackService : MediaSessionService() {
                 loadGeneration++
                 isLoading = false
                 loadingStatus = null
-                lastError = "Taking too long to load. Tap Retry."
+                val diagSuffix = lastPlaybackDiagnostic?.let { " [$it]" } ?: ""
+                lastError = "Taking too long to load$diagSuffix. Tap Retry."
                 broadcastState()
             }
         }, watchdogMs)
@@ -1507,12 +1514,11 @@ class YouTubePlaybackService : MediaSessionService() {
         playImmediately: Boolean
     ): Boolean {
         val p = player ?: return false
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(info.userAgent)
-            .setDefaultRequestProperties(mapOf("Accept-Language" to "en-US,en;q=0.9"))
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(12_000)
-            .setReadTimeoutMs(15_000)
+        val httpFactory = YouTubeOkHttpDataSource.Factory(
+            callFactory = YouTubeSessionConfig.mediaStreamingOkHttpClient,
+            userAgent = info.userAgent,
+            defaultRequestProperties = mapOf("Accept-Language" to "en-US,en;q=0.9")
+        )
 
         // Wrap GoogleVideo requests in 2 MB bounded `&range=start-end` chunks to
         // completely bypass YouTube's single-connection throttle on VPN/tv_samsung.
