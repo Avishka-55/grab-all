@@ -10,6 +10,7 @@ import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import com.graball.engine.WebViewCookieSync
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -74,6 +75,9 @@ object YouTubePoTokenProvider {
 
     @Volatile
     private var integrityExpiresAtElapsedMs: Long = 0L
+
+    @Volatile
+    private var integrityWasLoggedIn: Boolean = false
 
     @Volatile
     private var consecutiveFailures: Int = 0
@@ -194,14 +198,19 @@ object YouTubePoTokenProvider {
     }
 
     private fun ensureIntegrityReady(appContext: Context, forceRefresh: Boolean): Boolean {
+        val loggedInNow = WebViewCookieSync.hasLoggedInYouTubeSession()
         val now = SystemClock.elapsedRealtime()
-        if (!forceRefresh && webView != null && now < integrityExpiresAtElapsedMs) {
+        if (!forceRefresh && webView != null && now < integrityExpiresAtElapsedMs &&
+            integrityWasLoggedIn == loggedInNow
+        ) {
             return true
         }
 
         synchronized(initLock) {
             val now2 = SystemClock.elapsedRealtime()
-            if (!forceRefresh && webView != null && now2 < integrityExpiresAtElapsedMs) {
+            if (!forceRefresh && webView != null && now2 < integrityExpiresAtElapsedMs &&
+                integrityWasLoggedIn == loggedInNow
+            ) {
                 return true
             }
 
@@ -212,7 +221,8 @@ object YouTubePoTokenProvider {
             }
             integrityExpiresAtElapsedMs = 0L
 
-            val challenge = fetchChallenge() ?: run {
+            val authHeaders = if (loggedInNow) WebViewCookieSync.buildYouTubeAuthHeaders(appContext) else null
+            val challenge = fetchChallenge(authHeaders) ?: run {
                 recordFailure(lastError.ifBlank { "create_challenge_failed" })
                 return false
             }
@@ -228,7 +238,7 @@ object YouTubePoTokenProvider {
                 return false
             }
 
-            val integrity = fetchIntegrityToken(bgResp) ?: run {
+            val integrity = fetchIntegrityToken(bgResp, authHeaders) ?: run {
                 mainHandler.post { destroyWebViewSafely(wv) }
                 recordFailure(lastError.ifBlank { "generate_it_failed" })
                 return false
@@ -244,11 +254,12 @@ object YouTubePoTokenProvider {
 
             val effectiveTtlSec = (ttlSec - SAFETY_MARGIN_SEC).coerceIn(MIN_TTL_SEC, MAX_TTL_SEC)
             webView = wv
+            integrityWasLoggedIn = loggedInNow
             integrityExpiresAtElapsedMs = SystemClock.elapsedRealtime() + effectiveTtlSec * 1000L
             consecutiveFailures = 0
             cooldownUntilElapsedMs = 0L
             lastError = ""
-            Log.d(TAG, "BotGuard integrity ready (ttl=${effectiveTtlSec}s)")
+            Log.d(TAG, "BotGuard integrity ready (ttl=${effectiveTtlSec}s, auth=$loggedInNow)")
             return true
         }
     }
@@ -262,18 +273,29 @@ object YouTubePoTokenProvider {
         Log.w(TAG, "PO token failure #$count: $reason")
     }
 
-    private fun postJnn(url: String, jsonBody: String): String? {
+    private fun postJnn(
+        url: String,
+        jsonBody: String,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?
+    ): String? {
         return try {
-            val req = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url(url)
                 .header("User-Agent", YouTubeSessionConfig.DESKTOP_WEB_UA)
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json+protobuf")
+                .header("Origin", "https://www.youtube.com")
+                .header("Referer", "https://www.youtube.com/")
                 .header("x-goog-api-key", JNN_API_KEY)
                 .header("x-user-agent", "grpc-web-javascript/0.1")
                 .post(jsonBody.toRequestBody(PROTO_JSON_MEDIA))
-                .build()
-            YouTubeSessionConfig.anonymousOkHttpClient.newCall(req).execute().use { resp ->
+            if (authHeaders != null) {
+                reqBuilder.header("Cookie", authHeaders.cookieHeader)
+                reqBuilder.header("Authorization", authHeaders.authorizationHeader)
+                reqBuilder.header("X-Origin", "https://www.youtube.com")
+                reqBuilder.header("X-Goog-AuthUser", "0")
+            }
+            YouTubeSessionConfig.anonymousOkHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     lastError = "jnn_http_${resp.code}"
                     return null
@@ -286,8 +308,8 @@ object YouTubePoTokenProvider {
         }
     }
 
-    private fun fetchChallenge(): ChallengeData? {
-        val raw = postJnn(CREATE_URL, "[\"$REQUEST_KEY\"]") ?: return null
+    private fun fetchChallenge(authHeaders: WebViewCookieSync.YouTubeAuthHeaders?): ChallengeData? {
+        val raw = postJnn(CREATE_URL, "[\"$REQUEST_KEY\"]", authHeaders) ?: return null
         return try {
             val top = JSONArray(raw)
             val inner: JSONArray = if (top.length() > 1 && top.opt(1) is String) {
@@ -338,12 +360,15 @@ object YouTubePoTokenProvider {
         }
     }
 
-    private fun fetchIntegrityToken(bgResponse: String): Pair<String, Long>? {
+    private fun fetchIntegrityToken(
+        bgResponse: String,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?
+    ): Pair<String, Long>? {
         val body = JSONArray().apply {
             put(REQUEST_KEY)
             put(bgResponse)
         }.toString()
-        val raw = postJnn(GENERATE_IT_URL, body) ?: return null
+        val raw = postJnn(GENERATE_IT_URL, body, authHeaders) ?: return null
         return try {
             val arr = JSONArray(raw)
             val tokenRaw = arr.optString(0)

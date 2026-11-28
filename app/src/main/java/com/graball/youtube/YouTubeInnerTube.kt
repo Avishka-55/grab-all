@@ -54,6 +54,14 @@ object YouTubeInnerTube {
     private const val TV_SAMSUNG_UA =
         "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1"
 
+    private const val TV_API_CLIENT_VERSION = "7.20260707.07.00"
+    private const val TV_API_UA =
+        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"
+
+    private const val MWEB_CLIENT_VERSION = "2.20260708.05.00"
+    private const val MWEB_UA =
+        "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+
     private const val WEB_REMIX_CLIENT_VERSION = "1.20260707.12.00"
     private const val WEB_CREATOR_CLIENT_VERSION = "1.20260708.06.00"
 
@@ -88,6 +96,12 @@ object YouTubeInnerTube {
         val error: String? = null
     )
 
+    data class CommentSortOption(
+        val title: String,
+        val continuationToken: String,
+        val selected: Boolean = false
+    )
+
     data class VideoEngagement(
         val channelId: String?,
         val channelName: String,
@@ -100,13 +114,15 @@ object YouTubeInnerTube {
         val channelAvatarUrl: String = "",
         val topCommentPreview: String = "",
         val publishDate: String = "",
-        val viewCount: String = ""
+        val viewCount: String = "",
+        val commentSortOptions: List<CommentSortOption> = emptyList()
     )
 
     data class CommentsPage(
         val comments: List<YtComment>,
         val continuationToken: String?,
-        val createCommentParams: String? = null
+        val createCommentParams: String? = null,
+        val sortOptions: List<CommentSortOption> = emptyList()
     )
 
     enum class ChannelTab(val params: String) {
@@ -129,7 +145,24 @@ object YouTubeInnerTube {
         val author: String,
         val text: String,
         val timeText: String,
-        val likes: String
+        val likes: String,
+        val commentId: String = "",
+        val authorAvatarUrl: String = "",
+        val isChannelOwner: Boolean = false,
+        val isVerified: Boolean = false,
+        val isPinned: Boolean = false,
+        val isCreatorHearted: Boolean = false,
+        val heartTooltip: String = "",
+        val likeCountLiked: String = "",
+        val isLiked: Boolean = false,
+        val isDisliked: Boolean = false,
+        val likeActionParams: String? = null,
+        val unlikeActionParams: String? = null,
+        val dislikeActionParams: String? = null,
+        val undislikeActionParams: String? = null,
+        val replyCountText: String = "",
+        val repliesContinuationToken: String? = null,
+        val createReplyParams: String? = null
     )
 
     data class FeedChip(
@@ -1218,7 +1251,7 @@ object YouTubeInnerTube {
         return items.filter { !it.isPlaylist }.take(30)
     }
 
-    /** Fetches paginated comments for a video using its `/next` continuation token. */
+    /** Fetches paginated comments (or replies) using a `/next` continuation token. */
     fun fetchCommentsPaged(context: Context, continuationToken: String): CommentsPage {
         val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
         val cfg = YouTubeSessionConfig.ensureWebConfig()
@@ -1233,12 +1266,93 @@ object YouTubeInnerTube {
             webConfig = cfg
         ) ?: return CommentsPage(emptyList(), null)
 
-        val out = mutableListOf<YtComment>()
-        val seen = mutableSetOf<String>()
-        collectComments(root, out, seen)
-        val next = findContinuationToken(root)?.takeIf { it != continuationToken }
+        val comments = parseCommentsFromResponse(root)
+        val next = findPageContinuationToken(root, continuationToken)
         val createParams = findCreateCommentParams(root)
-        return CommentsPage(comments = out.take(40), continuationToken = next, createCommentParams = createParams)
+        val sortOptions = extractCommentSortOptions(root)
+        return CommentsPage(
+            comments = comments.take(50),
+            continuationToken = next,
+            createCommentParams = createParams,
+            sortOptions = sortOptions
+        )
+    }
+
+    /** Fetches paginated replies to a specific comment thread. */
+    fun fetchCommentReplies(context: Context, continuationToken: String): CommentsPage =
+        fetchCommentsPaged(context, continuationToken)
+
+    /**
+     * Performs a signed-in comment Like, Unlike, Dislike, or Undislike action via
+     * `/youtubei/v1/comment/perform_comment_action`.
+     */
+    fun performCommentAction(context: Context, actionParams: String): Pair<Boolean, String> {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+            ?: return false to "Sign in to YouTube first (👤 on the home screen)"
+        if (actionParams.isBlank()) return false to "Action unavailable for this comment"
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val body = JSONObject().apply {
+            put("context", webContext(cfg))
+            put("actions", JSONArray().put(actionParams))
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/comment/perform_comment_action?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        ) ?: return false to "Network error updating comment"
+        root.optJSONObject("error")?.let {
+            return false to it.optString("message").ifBlank { "YouTube rejected the action" }
+        }
+        val results = root.optJSONArray("actionResults")
+        if (results != null && results.length() > 0) {
+            val status = results.optJSONObject(0)?.optString("status").orEmpty()
+            if (status == "STATUS_SUCCEEDED" || status.isBlank()) return true to "Updated"
+            return false to "Couldn't update comment ($status)"
+        }
+        return true to "Updated"
+    }
+
+    /**
+     * Posts a reply to an existing comment via
+     * `/youtubei/v1/comment/create_comment_reply`.
+     */
+    fun postCommentReply(
+        context: Context,
+        createReplyParams: String,
+        text: String
+    ): Pair<Boolean, String> {
+        val authHeaders = WebViewCookieSync.buildYouTubeAuthHeaders(context)
+            ?: return false to "Sign in to YouTube first (👤 on the home screen)"
+        val cfg = YouTubeSessionConfig.ensureWebConfig()
+        val body = JSONObject().apply {
+            put("context", webContext(cfg))
+            put("commentText", text)
+            put("createReplyParams", createReplyParams)
+        }
+        val root = postInnerTube(
+            url = "https://www.youtube.com/youtubei/v1/comment/create_comment_reply?prettyPrint=false",
+            body = body,
+            authHeaders = authHeaders,
+            webConfig = cfg
+        ) ?: return false to "Couldn't post reply — check your connection or sign in again"
+        root.optJSONObject("error")?.let {
+            return false to it.optString("message").ifBlank { "YouTube rejected the reply" }
+        }
+        val actions = root.optJSONArray("actions")
+        if (actions != null) {
+            for (i in 0 until actions.length()) {
+                if (actions.optJSONObject(i)?.has("createCommentReplyAction") == true) {
+                    return true to "Reply posted"
+                }
+            }
+        }
+        val status = root.optString("actionResult")
+        return if ((actions != null && actions.length() > 0) || status.isNotBlank()) {
+            true to "Reply posted"
+        } else {
+            false to "YouTube didn't confirm the reply — try again"
+        }
     }
 
     private fun findCreateCommentParams(node: Any?): String? {
@@ -1657,16 +1771,15 @@ object YouTubeInnerTube {
     }
 
     @Volatile
-    private var preferVideoIdPotBinding: Boolean = false
+    private var preferredPotBindingKind: Int = 0 // 0 = dataSyncId, 1 = visitorData, 2 = videoId
 
     /**
      * Resolves full 144p-4K streams using our ~165ms native V8 `base.js` solver:
-     * - When signed in (`authHeaders != null`): tries `WEB_CREATOR` FIRST with a
-     *   native BotGuard GVS PO Token (`&pot=...`), verified by a 16 KB audio+video
-     *   chunk probe so flagged cloud VPNs get full 144p-4K adaptive streams instead
-     *   of 403 -> 360p muxed fallback.
-     * - Falls back to `TV_SAMSUNG` (`TVHTML5`, zero PO token, 4xx/5xx honeypot-probed),
-     *   then `WEB_REMIX` (with GVS PO Token), `WEB_SAFARI` HLS, and `WEB_EMBEDDED_PLAYER`.
+     * - When signed in (`authHeaders != null`): tries `WEB_CREATOR` -> `MWEB` with
+     *   authenticated BotGuard GVS PO Tokens (`&pot=...`), verified by a 16 KB
+     *   audio+video chunk probe (including Opus fallback if M4A is rejected).
+     * - Falls back to `TV_SAMSUNG` & `TV_API` (`TVHTML5`, zero PO token, 4xx/5xx probed),
+     *   then `WEB_REMIX` (with PO token), `WEB_SAFARI` HLS, and `WEB_EMBEDDED_PLAYER`.
      */
     private fun resolveViaV8(
         context: Context,
@@ -1692,10 +1805,7 @@ object YouTubeInnerTube {
         var effectiveSts = ready.signatureTimestamp
         var lastReason: String? = null
 
-        // 1) When signed in: try WEB_CREATOR FIRST with a BotGuard GVS PO Token (`&pot=`).
-        //    On heavily bot-checked cloud VPNs (Azure / Oracle), YouTube serves poisoned
-        //    HTTP-500 honeypot itags to TV_SAMSUNG and HTTP-403 HLS segments to WEB_SAFARI,
-        //    while WEB_CREATOR + GVS PO Token unlocks clean 144p-4K adaptive video + audio!
+        // 1) When signed in: try WEB_CREATOR FIRST with an authenticated BotGuard GVS PO Token.
         if (authHeaders != null) {
             val creatorRoot = requestWebCreatorPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             if (creatorRoot != null) {
@@ -1713,7 +1823,27 @@ object YouTubeInnerTube {
                     return verified
                 }
                 if (lastReason.isNullOrBlank()) lastReason = verified.error
-                Log.w(TAG, "WEB_CREATOR adaptive probe failed ($videoId: ${verified.error}); trying TV_SAMSUNG")
+                Log.w(TAG, "WEB_CREATOR adaptive probe failed ($videoId: ${verified.error}); trying MWEB")
+            }
+
+            // 1b) Try MWEB (iPad Safari) with the same warm BotGuard GVS PO Token.
+            val mwebRoot = requestMwebPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+            if (mwebRoot != null) {
+                val verified = tryPotProtectedAdaptiveClient(
+                    context = context,
+                    videoId = videoId,
+                    root = mwebRoot,
+                    userAgent = MWEB_UA,
+                    sourceClient = "MWEB",
+                    visitorData = visitorData,
+                    authHeaders = authHeaders,
+                    cfg = cfg
+                )
+                if (verified.info != null) {
+                    return verified
+                }
+                if (lastReason.isNullOrBlank()) lastReason = verified.error
+                Log.w(TAG, "MWEB adaptive probe failed ($videoId: ${verified.error}); trying TV_SAMSUNG")
             }
         }
 
@@ -1745,14 +1875,11 @@ object YouTubeInnerTube {
                     parsed.info.videoStreams.isNotEmpty() &&
                     parsed.info.audioStreams.isNotEmpty()
                 ) {
-                    val audioProbe = parsed.info.bestAudio()?.url
-                    val videoProbe = parsed.info.pickVideoStream(null)?.url ?: parsed.info.videoStreams.first().url
-                    val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, TV_SAMSUNG_UA)
-                    val videoBad = !audioBad && isStreamUrlRejected(videoProbe, TV_SAMSUNG_UA)
-                    if (!audioBad && !videoBad) {
-                        return parsed
+                    val checked = verifyAdaptiveAudioAndVideo(parsed.info, TV_SAMSUNG_UA, origin = null)
+                    if (checked != null) {
+                        return ResolveResult(checked)
                     }
-                    Log.w(TAG, "TVHTML5 stream probe rejected (4xx/5xx) for $videoId; trying next client")
+                    Log.w(TAG, "TVHTML5 stream probe rejected (4xx/5xx) for $videoId; trying TV_API")
                     lastReason = "TV_SAMSUNG stream rejected"
                 } else {
                     if (lastReason.isNullOrBlank()) lastReason = parsed.error
@@ -1761,8 +1888,32 @@ object YouTubeInnerTube {
             }
         }
 
+        // 2b) Try TV_API (TVHTML5 7.x Cobalt) — zero PO token, alternate TV pool.
+        run {
+            val tvApiRoot = requestTvApiPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
+            if (tvApiRoot != null) {
+                val parsed = parseDecryptedPlayerRoot(
+                    videoId = videoId,
+                    root = tvApiRoot,
+                    userAgent = TV_API_UA,
+                    authHeaders = authHeaders,
+                    sourceClient = "TV_API"
+                )
+                if (parsed.info != null &&
+                    parsed.info.videoStreams.isNotEmpty() &&
+                    parsed.info.audioStreams.isNotEmpty()
+                ) {
+                    val checked = verifyAdaptiveAudioAndVideo(parsed.info, TV_API_UA, origin = null)
+                    if (checked != null) {
+                        return ResolveResult(checked)
+                    }
+                    Log.w(TAG, "TV_API stream probe rejected for $videoId; trying next client")
+                }
+            }
+        }
+
         // 3) When signed in: try WEB_REMIX (YouTube Music player) with the cached
-        //    BotGuard GVS PO Token as a second clean authenticated adaptive client.
+        //    BotGuard GVS PO Token as an additional clean authenticated adaptive client.
         if (authHeaders != null) {
             val remixRoot = requestWebRemixPlayer(videoId, visitorData, effectiveSts, authHeaders, cfg)
             if (remixRoot != null) {
@@ -1862,10 +2013,47 @@ object YouTubeInnerTube {
     )
 
     /**
-     * Parses & verifies a GVS PO-token-enforcing adaptive client (`WEB_CREATOR` / `WEB_REMIX`).
-     * Mints a BotGuard PO token (`&pot=...`), trying session binding (`dataSyncId` / `visitorData`)
-     * and content binding (`videoId`) in self-adapting order, and confirms both adaptive audio
-     * and video pass a real 16 KB chunk read before returning to ExoPlayer.
+     * Verifies both adaptive audio and video pass a real 16 KB chunk read.
+     * If the preferred M4A audio stream is rejected (e.g. HTTP 403 on itag 140)
+     * while an alternate codec (e.g. Opus WebM itag 251) passes, filters out the
+     * rejected codec so ExoPlayer plays full 144p-4K adaptive cleanly!
+     */
+    private fun verifyAdaptiveAudioAndVideo(
+        info: VideoStreamInfo,
+        userAgent: String,
+        origin: String?
+    ): VideoStreamInfo? {
+        val videoProbe = info.pickVideoStream(null)?.url ?: info.videoStreams.firstOrNull()?.url
+        if (videoProbe == null || isStreamUrlRejected(videoProbe, userAgent, origin)) {
+            return null
+        }
+        val primaryAudio = info.bestAudio() ?: return null
+        if (!isStreamUrlRejected(primaryAudio.url, userAgent, origin)) {
+            return info
+        }
+        val primaryIsMp4 = primaryAudio.mimeType.contains("mp4", ignoreCase = true) ||
+            primaryAudio.mimeType.contains("aac", ignoreCase = true)
+        val altPool = info.audioStreams.filter { fmt ->
+            val isMp4 = fmt.mimeType.contains("mp4", ignoreCase = true) ||
+                fmt.mimeType.contains("aac", ignoreCase = true)
+            isMp4 != primaryIsMp4
+        }
+        if (altPool.isNotEmpty()) {
+            val altInfo = info.copy(audioStreams = altPool)
+            val altAudio = altInfo.bestAudio()
+            if (altAudio != null && !isStreamUrlRejected(altAudio.url, userAgent, origin)) {
+                Log.d(TAG, "${info.sourceClient}: switched audio codec (itag ${primaryAudio.itag} rejected -> itag ${altAudio.itag} OK)")
+                return altInfo
+            }
+        }
+        return null
+    }
+
+    /**
+     * Parses & verifies a GVS PO-token-enforcing adaptive client (`WEB_CREATOR` / `MWEB` / `WEB_REMIX`).
+     * Mints an authenticated BotGuard PO token (`&pot=...`), trying all 3 bindings
+     * (`dataSyncId`, `visitorData`, `videoId`) in self-adapting order, and confirms both
+     * adaptive audio and video pass a real 16 KB chunk read before returning to ExoPlayer.
      */
     private fun tryPotProtectedAdaptiveClient(
         context: Context,
@@ -1891,42 +2079,39 @@ object YouTubeInnerTube {
             return ResolveResult(null, "$sourceClient returned no adaptive streams")
         }
 
-        val sessionBinding = (if (authHeaders != null) cfg.dataSyncId else null)
-            ?.takeIf { it.isNotBlank() }
-            ?: visitorData?.takeIf { it.isNotBlank() }
-            ?: cfg.visitorData?.takeIf { it.isNotBlank() }
+        val origin = if (sourceClient == "MWEB") "https://m.youtube.com" else "https://www.youtube.com"
+        val dataSyncBinding = (if (authHeaders != null) cfg.dataSyncId else null)?.takeIf { it.isNotBlank() }
+        val visitorBinding = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData?.takeIf { it.isNotBlank() }
 
-        val candidateBindings = if (preferVideoIdPotBinding) {
-            listOfNotNull(videoId, sessionBinding).distinct()
-        } else {
-            listOfNotNull(sessionBinding, videoId).distinct()
-        }
+        val allOrdered = listOfNotNull(
+            dataSyncBinding?.let { 0 to it },
+            visitorBinding?.let { 1 to it },
+            2 to videoId
+        )
+        val preferred = allOrdered.filter { it.first == preferredPotBindingKind }
+        val rest = allOrdered.filter { it.first != preferredPotBindingKind }
+        val seenIds = mutableSetOf<String>()
+        val candidateBindings = (preferred + rest).filter { seenIds.add(it.second) }
 
         var triedAnyPot = false
-        for (bindingId in candidateBindings) {
+        for ((kind, bindingId) in candidateBindings) {
             val pot = YouTubePoTokenProvider.mintPoToken(context, bindingId) ?: continue
             triedAnyPot = true
             val withPot = attachPoTokenToStreamInfo(baseInfo, pot)
-            val audioProbe = withPot.bestAudio()?.url
-            val videoProbe = withPot.pickVideoStream(null)?.url ?: withPot.videoStreams.first().url
-            val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, userAgent)
-            val videoBad = !audioBad && isStreamUrlRejected(videoProbe, userAgent)
-            if (!audioBad && !videoBad) {
-                preferVideoIdPotBinding = (bindingId == videoId)
-                Log.d(TAG, "$sourceClient verified with GVS PO token (binding=${if (bindingId == videoId) "videoId" else "session"})")
-                return ResolveResult(withPot)
+            val verified = verifyAdaptiveAudioAndVideo(withPot, userAgent, origin)
+            if (verified != null) {
+                preferredPotBindingKind = kind
+                Log.d(TAG, "$sourceClient verified with GVS PO token (bindingKind=$kind)")
+                return ResolveResult(verified)
             }
         }
 
         // If BotGuard PO token wasn't available, still probe the un-tokenized URLs
         // (16 KB real chunk read) in case this IP doesn't enforce GVS PO tokens.
         if (!triedAnyPot) {
-            val audioProbe = baseInfo.bestAudio()?.url
-            val videoProbe = baseInfo.pickVideoStream(null)?.url ?: baseInfo.videoStreams.first().url
-            val audioBad = audioProbe != null && isStreamUrlRejected(audioProbe, userAgent)
-            val videoBad = !audioBad && isStreamUrlRejected(videoProbe, userAgent)
-            if (!audioBad && !videoBad) {
-                return ResolveResult(baseInfo)
+            val verified = verifyAdaptiveAudioAndVideo(baseInfo, userAgent, origin)
+            if (verified != null) {
+                return ResolveResult(verified)
             }
         }
 
@@ -1954,7 +2139,11 @@ object YouTubeInnerTube {
      * Catches HTTP 403 missing-PO-token adaptive traps, HTTP 500 honeypot itags, and empty 200s
      * BEFORE ExoPlayer starts (preventing silent fallback to 360p muxed).
      */
-    private fun isStreamUrlRejected(url: String, userAgent: String): Boolean {
+    private fun isStreamUrlRejected(
+        url: String,
+        userAgent: String,
+        origin: String? = null
+    ): Boolean {
         return try {
             val isQueryVideoPlayback = url.contains("googlevideo.com/videoplayback?", ignoreCase = true)
             val hasRangeQuery = url.contains("range=", ignoreCase = true)
@@ -1968,6 +2157,10 @@ object YouTubeInnerTube {
                 .header("User-Agent", userAgent)
                 .header("Accept-Language", "en-US,en;q=0.9")
                 .get()
+            if (!origin.isNullOrBlank()) {
+                reqBuilder.header("Origin", origin)
+                reqBuilder.header("Referer", "$origin/")
+            }
             if (!isQueryVideoPlayback || hasRangeQuery) {
                 reqBuilder.header("Range", "bytes=0-16383")
             }
@@ -2046,6 +2239,97 @@ object YouTubeInnerTube {
         } catch (_: Exception) {
             false
         }
+    }
+
+    private fun requestMwebPlayer(
+        videoId: String,
+        visitorData: String?,
+        signatureTimestamp: Int,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders,
+        cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig()
+    ): JSONObject? {
+        val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
+        val clientObj = JSONObject().apply {
+            put("clientName", "MWEB")
+            put("clientVersion", MWEB_CLIENT_VERSION)
+            put("userAgent", "$MWEB_UA,gzip(gfe)")
+            put("hl", "en")
+            put("gl", "US")
+            if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
+        }
+        val body = JSONObject().apply {
+            put("context", JSONObject().apply { put("client", clientObj) })
+            put("videoId", videoId)
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("signatureTimestamp", signatureTimestamp)
+                    put("html5Preference", "HTML5_PREF_WANTS")
+                })
+            })
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+        val baseUrl = if (!cfg.apiKey.isNullOrBlank()) {
+            "https://m.youtube.com/youtubei/v1/player?key=${cfg.apiKey}&prettyPrint=false"
+        } else {
+            "https://m.youtube.com/youtubei/v1/player?prettyPrint=false"
+        }
+        return postInnerTube(
+            url = baseUrl,
+            body = body,
+            userAgent = MWEB_UA,
+            clientNameId = "2",
+            clientVersion = MWEB_CLIENT_VERSION,
+            visitorData = effectiveVisitor,
+            authHeaders = authHeaders,
+            webConfig = null
+        )
+    }
+
+    private fun requestTvApiPlayer(
+        videoId: String,
+        visitorData: String?,
+        signatureTimestamp: Int,
+        authHeaders: WebViewCookieSync.YouTubeAuthHeaders?,
+        cfg: YouTubeSessionConfig.WebClientConfig = YouTubeSessionConfig.ensureWebConfig()
+    ): JSONObject? {
+        val effectiveVisitor = visitorData?.takeIf { it.isNotBlank() } ?: cfg.visitorData
+        val clientObj = JSONObject().apply {
+            put("clientName", "TVHTML5")
+            put("clientVersion", TV_API_CLIENT_VERSION)
+            put("userAgent", TV_API_UA)
+            put("hl", "en")
+            put("gl", "US")
+            if (!effectiveVisitor.isNullOrBlank()) put("visitorData", effectiveVisitor)
+        }
+        val body = JSONObject().apply {
+            put("context", JSONObject().apply { put("client", clientObj) })
+            put("videoId", videoId)
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("signatureTimestamp", signatureTimestamp)
+                    put("html5Preference", "HTML5_PREF_WANTS")
+                })
+            })
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+        val baseUrl = if (!cfg.apiKey.isNullOrBlank()) {
+            "https://www.youtube.com/youtubei/v1/player?key=${cfg.apiKey}&prettyPrint=false"
+        } else {
+            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+        }
+        return postInnerTube(
+            url = baseUrl,
+            body = body,
+            userAgent = TV_API_UA,
+            clientNameId = "7",
+            clientVersion = TV_API_CLIENT_VERSION,
+            visitorData = effectiveVisitor,
+            authHeaders = authHeaders,
+            webConfig = null,
+            useAnonymousClient = (authHeaders == null)
+        )
     }
 
     private fun requestWebCreatorPlayer(
@@ -2768,11 +3052,13 @@ object YouTubeInnerTube {
             val obj = p.obj
             val mime = obj.optString("mimeType")
             val itag = obj.optInt("itag", 0)
-            val height = obj.optInt("height", 0)
+            val rawW = obj.optInt("width", 0)
+            val rawH = obj.optInt("height", 0)
             val bitrate = obj.optInt("bitrate", 0)
             val contentLength = obj.optString("contentLength").toLongOrNull()
                 ?: obj.optLong("contentLength", 0L).coerceAtLeast(0L)
-            val qualityLabel = obj.optString("qualityLabel", if (height > 0) "${height}p" else "")
+            val qualityLabel = obj.optString("qualityLabel", if (rawH > 0) "${rawH}p" else "")
+            val height = VideoStreamInfo.resolveQualityHeight(rawW, rawH, qualityLabel)
             val isVideo = mime.startsWith("video/")
             val isAudio = mime.startsWith("audio/")
             val audioMeta = if (isAudio || p.isMuxedDefault) extractInnerTubeAudioMeta(obj, finalUrl) else EMPTY_AUDIO_META
@@ -3210,11 +3496,13 @@ object YouTubeInnerTube {
             if (!url.startsWith("http")) continue
             val mime = obj.optString("mimeType")
             val itag = obj.optInt("itag", 0)
-            val height = obj.optInt("height", 0)
+            val rawW = obj.optInt("width", 0)
+            val rawH = obj.optInt("height", 0)
             val bitrate = obj.optInt("bitrate", 0)
             val contentLength = obj.optString("contentLength").toLongOrNull()
                 ?: obj.optLong("contentLength", 0L).coerceAtLeast(0L)
-            val qualityLabel = obj.optString("qualityLabel", if (height > 0) "${height}p" else "")
+            val qualityLabel = obj.optString("qualityLabel", if (rawH > 0) "${rawH}p" else "")
+            val height = VideoStreamInfo.resolveQualityHeight(rawW, rawH, qualityLabel)
             val isVideo = mime.startsWith("video/")
             val isAudio = mime.startsWith("audio/")
             val audioMeta = if (isAudio || isMuxedDefault) extractInnerTubeAudioMeta(obj, url) else EMPTY_AUDIO_META
@@ -3263,7 +3551,17 @@ object YouTubeInnerTube {
             pythonLibDir = RuntimePaths.pythonLibDir(context),
             pythonPathDir = RuntimePaths.ytDlpBundleDir(context)
         )
-        val (raw, err) = runner.extractInfoJson("https://www.youtube.com/watch?v=$videoId")
+        val ytDlpPot = run {
+            val cfg = YouTubeSessionConfig.ensureWebConfig()
+            val binding = cfg.dataSyncId?.takeIf { it.isNotBlank() }
+                ?: cfg.visitorData?.takeIf { it.isNotBlank() }
+                ?: videoId
+            YouTubePoTokenProvider.mintPoToken(context, binding)
+        }
+        val (raw, err) = runner.extractInfoJson(
+            "https://www.youtube.com/watch?v=$videoId",
+            poToken = ytDlpPot
+        )
         if (raw == null) {
             if (err.contains("CANNOT LINK EXECUTABLE", ignoreCase = true)) {
                 Log.w(TAG, "yt-dlp fallback linker error: $err")
@@ -3293,7 +3591,10 @@ object YouTubeInnerTube {
                 val vcodec = f.optString("vcodec", "none")
                 val acodec = f.optString("acodec", "none")
                 val ext = f.optString("ext", "")
-                val height = f.optInt("height", 0)
+                val rawW = f.optInt("width", 0)
+                val rawH = f.optInt("height", 0)
+                val formatNote = f.optString("format_note")
+                val height = VideoStreamInfo.resolveQualityHeight(rawW, rawH, formatNote)
                 val tbr = (f.optDouble("tbr", 0.0) * 1000.0).toInt()
                 val fileSize = f.optLong("filesize", 0L).takeIf { it > 0L }
                     ?: f.optLong("filesize_approx", 0L).coerceAtLeast(0L)
@@ -3721,6 +4022,7 @@ object YouTubeInnerTube {
         var topCommentPreview = ""
         var publishDate = ""
         var viewCount = ""
+        var commentSortOptions: List<CommentSortOption> = emptyList()
 
         fun scan(node: Any?) {
             when (node) {
@@ -3824,6 +4126,9 @@ object YouTubeInnerTube {
                             if (c.isNotBlank() && commentCount.isBlank()) commentCount = c
                             val token = findContinuationToken(panel)
                             if (!token.isNullOrBlank() && commentsToken == null) commentsToken = token
+                            if (commentSortOptions.isEmpty()) {
+                                commentSortOptions = extractCommentSortOptions(panel)
+                            }
                         }
                     }
                     val keys = node.keys()
@@ -3854,71 +4159,351 @@ object YouTubeInnerTube {
             channelAvatarUrl = channelAvatarUrl,
             topCommentPreview = topCommentPreview,
             publishDate = publishDate,
-            viewCount = viewCount
+            viewCount = viewCount,
+            commentSortOptions = commentSortOptions
         )
     }
 
-    private fun collectComments(
-        node: Any?,
-        out: MutableList<YtComment>,
-        seen: MutableSet<String>
-    ) {
+    private fun extractCommentSortOptions(node: Any?): List<CommentSortOption> {
+        val out = mutableListOf<CommentSortOption>()
+        fun scan(cur: Any?) {
+            when (cur) {
+                is JSONObject -> {
+                    if (cur.has("sortFilterSubMenuRenderer")) {
+                        val items = cur.optJSONObject("sortFilterSubMenuRenderer")
+                            ?.optJSONArray("subMenuItems")
+                        if (items != null) {
+                            for (i in 0 until items.length()) {
+                                val item = items.optJSONObject(i) ?: continue
+                                val title = item.optString("title").trim()
+                                val token = item.optJSONObject("serviceEndpoint")
+                                    ?.optJSONObject("continuationCommand")
+                                    ?.optString("token")
+                                    .orEmpty()
+                                val selected = item.optBoolean("selected", false)
+                                if (title.isNotBlank() && token.isNotBlank() && out.none { it.title == title }) {
+                                    out.add(CommentSortOption(title, token, selected))
+                                }
+                            }
+                        }
+                    }
+                    val keys = cur.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        if (k in AD_KEYS) continue
+                        scan(cur.opt(k))
+                    }
+                }
+                is JSONArray -> {
+                    for (i in 0 until cur.length()) scan(cur.opt(i))
+                }
+            }
+        }
+        scan(node)
+        return out
+    }
+
+    /**
+     * Finds the next-page continuation token on a comments / replies page,
+     * skipping `commentRepliesRenderer` tokens so page scrolling loads more
+     * comments instead of accidentally fetching the first comment's replies!
+     */
+    private fun findPageContinuationToken(root: JSONObject, currentToken: String): String? {
+        val candidates = mutableListOf<String>()
+        fun scan(node: Any?) {
+            when (node) {
+                is JSONObject -> {
+                    if (node.has("continuationItemRenderer")) {
+                        val cir = node.optJSONObject("continuationItemRenderer")
+                        val tok = cir?.optJSONObject("continuationEndpoint")
+                            ?.optJSONObject("continuationCommand")
+                            ?.optString("token")
+                            .orEmpty()
+                            .ifBlank {
+                                cir?.optJSONObject("button")
+                                    ?.optJSONObject("buttonRenderer")
+                                    ?.optJSONObject("command")
+                                    ?.optJSONObject("continuationCommand")
+                                    ?.optString("token")
+                                    .orEmpty()
+                            }
+                        if (tok.isNotBlank() && tok != currentToken) {
+                            candidates.add(tok)
+                        }
+                    }
+                    val keys = node.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        if (k in AD_KEYS || k == "replies" || k == "commentRepliesRenderer") continue
+                        scan(node.opt(k))
+                    }
+                }
+                is JSONArray -> {
+                    for (i in 0 until node.length()) scan(node.opt(i))
+                }
+            }
+        }
+        scan(root)
+        return candidates.lastOrNull()
+    }
+
+    private fun extractPerformActionParam(cmdObj: JSONObject?): String? {
+        if (cmdObj == null) return null
+        val direct = cmdObj.optJSONObject("performCommentActionEndpoint")?.optString("action").orEmpty()
+        if (direct.isNotBlank()) return direct
+        val inner = cmdObj.optJSONObject("innertubeCommand")
+            ?.optJSONObject("performCommentActionEndpoint")
+            ?.optString("action")
+            .orEmpty()
+        return inner.takeIf { it.isNotBlank() }
+    }
+
+    private fun extractCreateReplyParam(node: Any?): String? {
         when (node) {
             is JSONObject -> {
-                // Modern YouTube commentEntityPayload (2024-2026 InnerTube format)
-                if (node.has("commentEntityPayload")) {
-                    val p = node.optJSONObject("commentEntityPayload")
-                    val props = p?.optJSONObject("properties")
-                    val authorObj = p?.optJSONObject("author")
-                    val toolbar = p?.optJSONObject("toolbar")
-                    val text = props?.optJSONObject("content")?.optString("content").orEmpty().trim()
-                    val author = authorObj?.optString("displayName").orEmpty().trim()
-                    val timeText = props?.optString("publishedTime").orEmpty().trim()
-                    val likes = toolbar?.optString("likeCountNotliked").orEmpty().trim()
-                    val key = props?.optString("commentId").orEmpty().ifBlank { "$author|$text" }
-                    if (text.isNotBlank() && seen.add(key)) {
-                        out.add(
-                            YtComment(
-                                author = author.ifBlank { "YouTube User" },
-                                text = text,
-                                timeText = timeText,
-                                likes = likes
-                            )
-                        )
-                    }
-                }
-                // Legacy commentRenderer fallback
-                if (node.has("commentRenderer")) {
-                    val c = node.optJSONObject("commentRenderer")
-                    val text = extractText(c?.optJSONObject("contentText"))
-                    val author = extractText(c?.optJSONObject("authorText"))
-                    val timeText = extractText(c?.optJSONObject("publishedTimeText"))
-                    val likes = extractText(c?.optJSONObject("voteCount"))
-                    val key = c?.optString("commentId").orEmpty().ifBlank { "$author|$text" }
-                    if (text.isNotBlank() && seen.add(key)) {
-                        out.add(
-                            YtComment(
-                                author = author.ifBlank { "YouTube User" },
-                                text = text,
-                                timeText = timeText,
-                                likes = likes
-                            )
-                        )
-                    }
-                }
+                val direct = node.optString("createReplyParams")
+                if (direct.isNotBlank()) return direct
                 val keys = node.keys()
                 while (keys.hasNext()) {
                     val k = keys.next()
                     if (k in AD_KEYS) continue
-                    collectComments(node.opt(k), out, seen)
+                    extractCreateReplyParam(node.opt(k))?.let { return it }
                 }
             }
             is JSONArray -> {
                 for (i in 0 until node.length()) {
-                    collectComments(node.opt(i), out, seen)
+                    extractCreateReplyParam(node.opt(i))?.let { return it }
                 }
             }
         }
+        return null
+    }
+
+    /**
+     * Parses YouTube's modern entity-mutation comments (`commentThreadRenderer` +
+     * `commentViewModel` joined with `commentEntityPayload`, `engagementToolbarStateEntityPayload`,
+     * and `engagementToolbarSurfaceEntityPayload`) as well as legacy `commentRenderer` fallback.
+     */
+    private fun parseCommentsFromResponse(root: JSONObject): List<YtComment> {
+        val commentPayloads = LinkedHashMap<String, JSONObject>()
+        val toolbarStates = HashMap<String, JSONObject>()
+        val toolbarSurfaces = HashMap<String, JSONObject>()
+        val commentSurfaces = HashMap<String, JSONObject>()
+
+        data class ViewModelRef(
+            val commentKey: String,
+            val commentId: String,
+            val toolbarStateKey: String,
+            val toolbarSurfaceKey: String,
+            val commentSurfaceKey: String,
+            val isPinned: Boolean,
+            val replyCountLabel: String,
+            val repliesToken: String?
+        )
+
+        val orderedRefs = mutableListOf<ViewModelRef>()
+        val seenCommentIds = mutableSetOf<String>()
+        val legacyComments = mutableListOf<YtComment>()
+
+        fun extractCvmRef(
+            cvmObj: JSONObject,
+            replyCountLabel: String = "",
+            repliesToken: String? = null
+        ) {
+            val inner = cvmObj.optJSONObject("commentViewModel") ?: cvmObj
+            val commentKey = inner.optString("commentKey")
+            val commentId = inner.optString("commentId")
+            val dedupeKey = commentId.ifBlank { commentKey }
+            if (dedupeKey.isBlank() || !seenCommentIds.add(dedupeKey)) return
+            val isPinned = inner.has("pinnedText") ||
+                inner.optString("pinnedText").isNotBlank() ||
+                extractText(inner.optJSONObject("pinnedText")).isNotBlank()
+            orderedRefs.add(
+                ViewModelRef(
+                    commentKey = commentKey,
+                    commentId = commentId,
+                    toolbarStateKey = inner.optString("toolbarStateKey"),
+                    toolbarSurfaceKey = inner.optString("toolbarSurfaceKey"),
+                    commentSurfaceKey = inner.optString("commentSurfaceKey"),
+                    isPinned = isPinned,
+                    replyCountLabel = replyCountLabel,
+                    repliesToken = repliesToken
+                )
+            )
+        }
+
+        fun scan(node: Any?) {
+            when (node) {
+                is JSONObject -> {
+                    // 1) Collect entity mutations
+                    node.optJSONObject("commentEntityPayload")?.let { p ->
+                        val k = p.optString("key")
+                        if (k.isNotBlank()) commentPayloads[k] = p
+                    }
+                    node.optJSONObject("engagementToolbarStateEntityPayload")?.let { p ->
+                        val k = p.optString("key")
+                        if (k.isNotBlank()) toolbarStates[k] = p
+                    }
+                    node.optJSONObject("engagementToolbarSurfaceEntityPayload")?.let { p ->
+                        val k = p.optString("key")
+                        if (k.isNotBlank()) toolbarSurfaces[k] = p
+                    }
+                    node.optJSONObject("commentSurfaceEntityPayload")?.let { p ->
+                        val k = p.optString("key")
+                        if (k.isNotBlank()) commentSurfaces[k] = p
+                    }
+
+                    // 2) Top-level commentThreadRenderer (carries pinned state + replies continuation token!)
+                    if (node.has("commentThreadRenderer")) {
+                        val thr = node.optJSONObject("commentThreadRenderer")
+                        val cvm = thr?.optJSONObject("commentViewModel")
+                        val rep = thr?.optJSONObject("replies")?.optJSONObject("commentRepliesRenderer")
+                        var repToken: String? = null
+                        var repLabel = ""
+                        if (rep != null) {
+                            repToken = findContinuationToken(rep)
+                            repLabel = extractText(
+                                rep.optJSONObject("viewReplies")?.optJSONObject("buttonRenderer")?.optJSONObject("text")
+                            ).ifBlank {
+                                extractText(rep.optJSONObject("moreText"))
+                            }
+                        }
+                        if (cvm != null) {
+                            extractCvmRef(cvm, repLabel, repToken)
+                        }
+                    }
+
+                    // 3) Standalone commentViewModel (used inside replies pages!)
+                    if (node.has("commentViewModel") && !node.has("commentThreadRenderer")) {
+                        node.optJSONObject("commentViewModel")?.let { extractCvmRef(it) }
+                    }
+
+                    // 4) Legacy commentRenderer fallback
+                    if (node.has("commentRenderer")) {
+                        val c = node.optJSONObject("commentRenderer")
+                        val text = extractText(c?.optJSONObject("contentText"))
+                        val author = extractText(c?.optJSONObject("authorText"))
+                        val timeText = extractText(c?.optJSONObject("publishedTimeText"))
+                        val likes = extractText(c?.optJSONObject("voteCount"))
+                        val avatar = pickThumb(c?.optJSONObject("authorThumbnail"))
+                        val cid = c?.optString("commentId").orEmpty()
+                        val key = cid.ifBlank { "$author|$text" }
+                        if (text.isNotBlank() && seenCommentIds.add("legacy:$key")) {
+                            legacyComments.add(
+                                YtComment(
+                                    author = author.ifBlank { "YouTube User" },
+                                    text = text,
+                                    timeText = timeText,
+                                    likes = likes,
+                                    commentId = cid,
+                                    authorAvatarUrl = avatar,
+                                    isChannelOwner = c?.optBoolean("authorIsChannelOwner", false) == true,
+                                    isPinned = c?.has("pinnedCommentBadge") == true
+                                )
+                            )
+                        }
+                    }
+
+                    val keys = node.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        if (k in AD_KEYS) continue
+                        scan(node.opt(k))
+                    }
+                }
+                is JSONArray -> {
+                    for (i in 0 until node.length()) scan(node.opt(i))
+                }
+            }
+        }
+
+        scan(root)
+
+        fun buildFromPayload(payload: JSONObject, ref: ViewModelRef?): YtComment? {
+            val props = payload.optJSONObject("properties")
+            val authorObj = payload.optJSONObject("author")
+            val toolbar = payload.optJSONObject("toolbar")
+            val text = props?.optJSONObject("content")?.optString("content").orEmpty().trim()
+            if (text.isBlank()) return null
+
+            val commentId = props?.optString("commentId").orEmpty().ifBlank { ref?.commentId.orEmpty() }
+            val author = authorObj?.optString("displayName").orEmpty().trim().ifBlank { "YouTube User" }
+            val rawAvatar = authorObj?.optString("avatarThumbnailUrl").orEmpty().trim()
+            val avatarUrl = if (rawAvatar.startsWith("//")) "https:$rawAvatar" else rawAvatar
+            val isCreator = authorObj?.optBoolean("isCreator", false) == true
+            val isVerified = authorObj?.optBoolean("isVerified", false) == true ||
+                authorObj?.optBoolean("isArtist", false) == true
+            val timeText = props?.optString("publishedTime").orEmpty().trim()
+            val likesNotLiked = toolbar?.optString("likeCountNotliked").orEmpty().trim()
+            val likesLiked = toolbar?.optString("likeCountLiked").orEmpty().trim()
+            val heartTooltip = toolbar?.optString("heartActiveTooltip").orEmpty().trim()
+            val replyCountRaw = toolbar?.optString("replyCount").orEmpty().trim()
+
+            val tbState = ref?.toolbarStateKey?.let { toolbarStates[it] }
+            val likeState = tbState?.optString("likeState").orEmpty()
+            val heartState = tbState?.optString("heartState").orEmpty()
+            val isLiked = likeState == "TOOLBAR_LIKE_STATE_LIKED"
+            val isDisliked = likeState == "TOOLBAR_LIKE_STATE_DISLIKED"
+            val isHearted = heartState == "TOOLBAR_HEART_STATE_HEARTED"
+
+            val tbSurface = ref?.toolbarSurfaceKey?.let { toolbarSurfaces[it] }
+            val cSurface = ref?.commentSurfaceKey?.let { commentSurfaces[it] }
+            val likeParam = extractPerformActionParam(tbSurface?.optJSONObject("likeCommand"))
+            val unlikeParam = extractPerformActionParam(tbSurface?.optJSONObject("unlikeCommand"))
+            val dislikeParam = extractPerformActionParam(tbSurface?.optJSONObject("dislikeCommand"))
+            val undislikeParam = extractPerformActionParam(tbSurface?.optJSONObject("undislikeCommand"))
+            val createReplyParams = extractCreateReplyParam(tbSurface?.optJSONObject("replyCommand"))
+                ?: extractCreateReplyParam(cSurface)
+
+            val replyLabel = ref?.replyCountLabel?.takeIf { it.isNotBlank() }
+                ?: replyCountRaw.takeIf { it.isNotBlank() && it != "0" }?.let {
+                    if (it == "1") "1 reply" else "$it replies"
+                }
+                ?: ""
+
+            return YtComment(
+                author = author,
+                text = text,
+                timeText = timeText,
+                likes = if (isLiked && likesLiked.isNotBlank()) likesLiked else likesNotLiked,
+                commentId = commentId,
+                authorAvatarUrl = avatarUrl,
+                isChannelOwner = isCreator,
+                isVerified = isVerified,
+                isPinned = ref?.isPinned == true,
+                isCreatorHearted = isHearted,
+                heartTooltip = heartTooltip,
+                likeCountLiked = likesLiked,
+                isLiked = isLiked,
+                isDisliked = isDisliked,
+                likeActionParams = likeParam,
+                unlikeActionParams = unlikeParam,
+                dislikeActionParams = dislikeParam,
+                undislikeActionParams = undislikeParam,
+                replyCountText = replyLabel,
+                repliesContinuationToken = ref?.repliesToken,
+                createReplyParams = createReplyParams
+            )
+        }
+
+        val out = mutableListOf<YtComment>()
+        val emittedKeys = mutableSetOf<String>()
+        for (ref in orderedRefs) {
+            val payload = commentPayloads[ref.commentKey] ?: continue
+            val built = buildFromPayload(payload, ref) ?: continue
+            if (emittedKeys.add(ref.commentKey)) {
+                out.add(built)
+            }
+        }
+        // Fallback: any commentEntityPayloads not matched via viewModel refs
+        for ((key, payload) in commentPayloads) {
+            if (key in emittedKeys) continue
+            val built = buildFromPayload(payload, null) ?: continue
+            if (emittedKeys.add(key)) {
+                out.add(built)
+            }
+        }
+        return if (out.isNotEmpty()) out else legacyComments
     }
 
     private fun collectItems(node: Any?, out: MutableList<YtItem>, seen: MutableSet<String>) {

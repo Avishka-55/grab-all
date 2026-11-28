@@ -1123,7 +1123,15 @@ class YouTubePlaybackService : MediaSessionService() {
             ?.substringBefore('(')
             ?.trim()
             .orEmpty()
-        return listOf(res, codec, modeLabel, audioTag).filter { it.isNotBlank() }.joinToString(" · ")
+        val clientTag = currentStreamInfo?.sourceClient?.takeIf { it.isNotBlank() }.orEmpty()
+        val potNote = if (currentStreamMode == StreamMode.MUXED && YouTubePoTokenProvider.lastError.isNotBlank()) {
+            "pot:${YouTubePoTokenProvider.lastError}"
+        } else {
+            ""
+        }
+        return listOf(res, codec, modeLabel, clientTag, audioTag, potNote)
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
     }
 
     fun setQuality(height: Int?) {
@@ -1521,10 +1529,19 @@ class YouTubePlaybackService : MediaSessionService() {
         playImmediately: Boolean
     ): Boolean {
         val p = player ?: return false
+        val streamHeaders = LinkedHashMap<String, String>().apply {
+            put("Accept-Language", "en-US,en;q=0.9")
+            val sc = info.sourceClient
+            if (sc.startsWith("WEB_") || sc == "MWEB") {
+                val originHost = if (sc == "MWEB") "https://m.youtube.com" else "https://www.youtube.com"
+                put("Origin", originHost)
+                put("Referer", "$originHost/")
+            }
+        }
         val httpFactory = YouTubeOkHttpDataSource.Factory(
             callFactory = YouTubeSessionConfig.mediaStreamingOkHttpClient,
             userAgent = info.userAgent,
-            defaultRequestProperties = mapOf("Accept-Language" to "en-US,en;q=0.9")
+            defaultRequestProperties = streamHeaders
         )
 
         // Wrap GoogleVideo requests in 2 MB bounded `&range=start-end` chunks to

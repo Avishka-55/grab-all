@@ -298,22 +298,32 @@ class YtDlpRunner(
      * Drains stderr on a helper thread (preventing pipe buffer deadlock) and
      * enforces a hard timeout so a stalled process can never spin forever.
      */
-    fun extractInfoJson(url: String, timeoutSec: Long = 25L): Pair<String?, String> {
+    fun extractInfoJson(
+        url: String,
+        timeoutSec: Long = 25L,
+        poToken: String? = null
+    ): Pair<String?, String> {
         if (!RuntimeExtractor.ensureExecutable(pythonBinary)) {
             return null to "Python runtime not executable"
         }
         if (quickJsBinary != null && quickJsBinary.exists()) {
             RuntimeExtractor.ensureExecutable(quickJsBinary)
         }
-        // When cookies exist, skip cookie-less visionos and use a single fast
-        // cookie-capable client (`tv_samsung`) with our persistent preprocessed
-        // QuickJS player cache (first run ~15-25s; subsequent runs ~1-3s!).
         val isYt = isYouTubeUrl(url)
         val hasCookies = cookiesFile != null && cookiesFile.exists() && cookiesFile.length() > 0L
         val jsTimeoutSec = maxOf(timeoutSec, 60L)
+        val cleanPot = poToken?.trim()?.takeIf { it.length > 16 }
         val fastAttempts: List<Pair<List<String>, Long>> = when {
-            isYt && hasCookies -> listOf(
+            isYt && hasCookies && cleanPot != null -> listOf(
+                listOf(
+                    "--extractor-args",
+                    "youtube:lang=en;player_client=web_creator,mweb,tv_samsung;po_token=web_creator.gvs+$cleanPot+mweb.gvs+$cleanPot+web.gvs+$cleanPot"
+                ) to jsTimeoutSec,
                 listOf("--extractor-args", "youtube:lang=en;player_client=tv_samsung") to jsTimeoutSec,
+                listOf("--extractor-args", "youtube:lang=en") to jsTimeoutSec
+            )
+            isYt && hasCookies -> listOf(
+                listOf("--extractor-args", "youtube:lang=en;player_client=web_creator,tv_samsung") to jsTimeoutSec,
                 listOf("--extractor-args", "youtube:lang=en") to jsTimeoutSec
             )
             isYt -> listOf(

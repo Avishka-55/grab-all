@@ -258,15 +258,17 @@ data class VideoStreamInfo(
 
     /**
      * Pick a video-only stream matching [targetHeight] (or highest <= targetHeight).
-     * Resolves height FIRST, then prefers H.264 (avc1) -> VP9 -> other within that
-     * height so 144p-1080p use universal H.264 while 1440p & 2160p cleanly pick VP9
-     * instead of getting silently downgraded to 1080p.
+     * Resolves height FIRST, then:
+     * - For playback (`forDownload = false`): prefers **VP9 (`vp09`/`vp9`) -> hardware AV1 (`av01`) -> H.264 (`avc1`)**
+     *   (highest bitrate / 60fps within that tier) so streams look razor-sharp like the official YouTube app.
+     * - For MP4 downloads (`forDownload = true`): keeps universal H.264 (`avc1`) -> VP9 -> other.
      */
     fun pickVideoStream(targetHeight: Int?, forDownload: Boolean = false): StreamFormat? {
         return pickFromCandidates(
             streams = videoStreams,
             targetHeight = targetHeight,
-            autoMaxHeight = if (forDownload) Int.MAX_VALUE else 720
+            autoMaxHeight = if (forDownload) Int.MAX_VALUE else 1080,
+            preferHighQualityCodec = !forDownload
         )
     }
 
@@ -274,7 +276,7 @@ data class VideoStreamInfo(
      * Pick an exact per-resolution HLS variant playlist (e.g. `web_safari` muxed
      * 144p-1080p `.m3u8`), strictly preferring [preferredAudioTrackId] or the
      * video's ORIGINAL language track over AI auto-dubs (like alphabetical `ar`).
-     * Auto mode defaults to crisp 720p (never 360p).
+     * Auto mode defaults to crisp 1080p/720p (never 360p).
      */
     fun pickHlsVariant(targetHeight: Int?, preferredAudioTrackId: String? = null): StreamFormat? {
         if (hlsVariants.isEmpty()) return null
@@ -302,7 +304,8 @@ data class VideoStreamInfo(
         return pickFromCandidates(
             streams = pool,
             targetHeight = targetHeight,
-            autoMaxHeight = 720
+            autoMaxHeight = 1080,
+            preferHighQualityCodec = true
         )
     }
 
@@ -324,7 +327,8 @@ data class VideoStreamInfo(
     private fun pickFromCandidates(
         streams: List<StreamFormat>,
         targetHeight: Int?,
-        autoMaxHeight: Int
+        autoMaxHeight: Int,
+        preferHighQualityCodec: Boolean = true
     ): StreamFormat? {
         if (streams.isEmpty()) return null
         val byHeight = streams
@@ -340,23 +344,63 @@ data class VideoStreamInfo(
                 ?: byHeight.keys.minByOrNull { kotlin.math.abs(it - targetHeight) }!!
         }
         val group = byHeight[chosenHeight].orEmpty()
-        return group.filter { it.mimeType.contains("avc1", ignoreCase = true) }
+        val vp9Best = group.filter {
+            it.mimeType.contains("vp9", ignoreCase = true) ||
+                it.mimeType.contains("vp09", ignoreCase = true)
+        }.maxByOrNull { it.bitrate }
+        val av1Best = if (hasHardwareAv1Decoder) {
+            group.filter { it.mimeType.contains("av01", ignoreCase = true) }
+                .maxByOrNull { it.bitrate }
+        } else {
+            null
+        }
+        val h264Best = group.filter { it.mimeType.contains("avc1", ignoreCase = true) }
             .maxByOrNull { it.bitrate }
-            ?: group.filter {
-                it.mimeType.contains("vp9", ignoreCase = true) ||
-                    it.mimeType.contains("vp09", ignoreCase = true)
-            }.maxByOrNull { it.bitrate }
-            ?: group.maxByOrNull { it.bitrate }
+        val fallbackBest = group.maxByOrNull { it.bitrate }
+
+        return if (preferHighQualityCodec) {
+            vp9Best ?: av1Best ?: h264Best ?: fallbackBest
+        } else {
+            h264Best ?: vp9Best ?: fallbackBest
+        }
     }
 
     companion object {
         private val STANDARD_HEIGHTS = intArrayOf(144, 240, 360, 480, 720, 1080, 1440, 2160)
+        private val QUALITY_LABEL_HEIGHT_REGEX = Regex("""(\d{3,4})p""", RegexOption.IGNORE_CASE)
+
+        val hasHardwareAv1Decoder: Boolean by lazy {
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return@lazy false
+            try {
+                val list = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+                list.codecInfos.any { info ->
+                    !info.isEncoder &&
+                        info.isHardwareAccelerated &&
+                        info.supportedTypes.any { it.equals("video/av01", ignoreCase = true) }
+                }
+            } catch (_: Throwable) {
+                false
+            }
+        }
 
         fun normalizeHeight(rawHeight: Int): Int {
             for (std in STANDARD_HEIGHTS) {
                 if (kotlin.math.abs(rawHeight - std) <= 12) return std
             }
             return rawHeight
+        }
+
+        /**
+         * Resolves the true YouTube quality tier (e.g. 720 for 720x1280 portrait Shorts
+         * AND 1280x534 21:9 ultrawide trailers) instead of raw pixel height.
+         */
+        fun resolveQualityHeight(width: Int, height: Int, qualityLabel: String = ""): Int {
+            val fromLabel = QUALITY_LABEL_HEIGHT_REGEX.find(qualityLabel)?.groupValues?.get(1)?.toIntOrNull()
+            if (fromLabel != null && fromLabel in 144..4320) {
+                return normalizeHeight(fromLabel)
+            }
+            val effective = if (width > 0 && height > 0) minOf(width, height) else height
+            return if (effective > 0) normalizeHeight(effective) else 0
         }
     }
 }
