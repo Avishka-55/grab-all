@@ -59,6 +59,9 @@ class YouTubeActivity : AppCompatActivity() {
         SUBS("📺 Subscriptions")
     }
 
+    private lateinit var collapsibleHeader: LinearLayout
+    private var baseHeaderHeightPx: Int = 0
+    private var lastScrollDy: Int = 0
     private lateinit var searchInput: EditText
     private lateinit var searchClear: TextView
     private lateinit var accountBtn: FrameLayout
@@ -135,6 +138,7 @@ class YouTubeActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_youtube)
 
+        collapsibleHeader = findViewById(R.id.ytCollapsibleHeader)
         searchInput = findViewById(R.id.ytSearchInput)
         searchClear = findViewById(R.id.ytSearchClear)
         accountBtn = findViewById(R.id.ytAccountBtn)
@@ -193,9 +197,11 @@ class YouTubeActivity : AppCompatActivity() {
             override fun afterTextChanged(s: Editable?) {}
         })
         searchInput.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) showCollapsibleHeader(animate = true)
             updateRecentChipsVisibility(hasFocus)
         }
         searchInput.setOnClickListener {
+            showCollapsibleHeader(animate = true)
             updateRecentChipsVisibility(true)
         }
         searchInput.setOnEditorActionListener { _, actionId, _ ->
@@ -238,6 +244,7 @@ class YouTubeActivity : AppCompatActivity() {
         )
         tabViews.forEach { (tab, view) ->
             view.setOnClickListener {
+                showCollapsibleHeader(animate = true)
                 if (tab == Tab.EXPLORE && currentTab == Tab.EXPLORE && openPlaylist == null) {
                     recycler.smoothScrollToPosition(0)
                     refreshCurrentExploreFeed()
@@ -350,8 +357,10 @@ class YouTubeActivity : AppCompatActivity() {
         val layoutManager = LinearLayoutManager(this)
         recycler.layoutManager = layoutManager
         recycler.adapter = adapter
+        setupCollapsibleHeader(layoutManager)
         recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                updateCollapsibleHeaderOnScroll(rv, dy)
                 if (dy <= 0) return
                 if (openPlaylist != null) return
                 if (currentTab == Tab.BOOKMARKS) {
@@ -365,6 +374,12 @@ class YouTubeActivity : AppCompatActivity() {
                 val lastVisible = layoutManager.findLastVisibleItemPosition()
                 if (total > 0 && lastVisible >= total - 6) {
                     loadMoreCurrentFeed()
+                }
+            }
+
+            override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
+                if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                    snapCollapsibleHeader(rv)
                 }
             }
         })
@@ -592,6 +607,7 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun selectTab(tab: Tab) {
+        showCollapsibleHeader(animate = true)
         currentTab = tab
         isOpeningPlaylist = false
         openPlaylist = null
@@ -656,6 +672,131 @@ class YouTubeActivity : AppCompatActivity() {
                 recentRow.visibility = View.GONE
             }
             false
+        }
+    }
+
+    private fun setupCollapsibleHeader(layoutManager: LinearLayoutManager) {
+        val dp = resources.displayMetrics.density
+        val baseTopPad = (8 * dp).toInt()
+        val refreshTravel = (56 * dp).toInt()
+        val syncHeaderPadding = {
+            // Exclude the floating autocomplete dropdown from list top-padding so
+            // typing in search overlays the feed without jumping list items.
+            val suggH = if (suggestionsBox.visibility == View.VISIBLE) suggestionsBox.height else 0
+            val newHeaderH = (collapsibleHeader.height - suggH).coerceAtLeast(0)
+            if (newHeaderH > 0 && newHeaderH != baseHeaderHeightPx) {
+                val oldHeaderH = baseHeaderHeightPx
+                val wasAtTop = !recycler.canScrollVertically(-1) ||
+                    (layoutManager.findFirstVisibleItemPosition() == 0 &&
+                        (layoutManager.findViewByPosition(0)?.top ?: 0) >= oldHeaderH)
+                baseHeaderHeightPx = newHeaderH
+                val targetPad = newHeaderH + baseTopPad
+                if (recycler.paddingTop != targetPad) {
+                    recycler.setPadding(
+                        recycler.paddingLeft,
+                        targetPad,
+                        recycler.paddingRight,
+                        recycler.paddingBottom
+                    )
+                    if (wasAtTop && oldHeaderH > 0) {
+                        recycler.scrollToPosition(0)
+                    }
+                }
+                skeletonList.setPadding(
+                    skeletonList.paddingLeft,
+                    targetPad,
+                    skeletonList.paddingRight,
+                    skeletonList.paddingBottom
+                )
+                emptyView.setPadding(
+                    emptyView.paddingLeft,
+                    newHeaderH + (24 * dp).toInt(),
+                    emptyView.paddingRight,
+                    emptyView.paddingBottom
+                )
+                swipeRefresh.setProgressViewOffset(false, newHeaderH, newHeaderH + refreshTravel)
+                // Keep translation clamped if header shrank (e.g. closing playlist banner)
+                val minT = -newHeaderH.toFloat()
+                if (collapsibleHeader.translationY < minT) {
+                    collapsibleHeader.translationY = minT
+                }
+            }
+        }
+        collapsibleHeader.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if ((bottom - top) != (oldBottom - oldTop)) {
+                syncHeaderPadding()
+            }
+        }
+        collapsibleHeader.post { syncHeaderPadding() }
+    }
+
+    /**
+     * Pure GPU-composited (`translationY` only, zero layout passes) YouTube-style
+     * quick-return scroll handler: hides search + tabs + chips pixel-for-pixel
+     * on downward scroll for maximum full-screen visibility, and glides them
+     * straight back on upward scroll.
+     */
+    private fun updateCollapsibleHeaderOnScroll(rv: RecyclerView, dy: Int) {
+        if (dy == 0) return
+        val h = baseHeaderHeightPx.toFloat()
+        if (h <= 0f) return
+        if (searchInput.hasFocus() || suggestionsBox.visibility == View.VISIBLE) {
+            if (collapsibleHeader.translationY != 0f) {
+                collapsibleHeader.animate().cancel()
+                collapsibleHeader.translationY = 0f
+            }
+            return
+        }
+        if (!rv.canScrollVertically(-1)) {
+            if (collapsibleHeader.translationY != 0f) {
+                collapsibleHeader.animate().cancel()
+                collapsibleHeader.translationY = 0f
+            }
+            lastScrollDy = 0
+            return
+        }
+        // Don't collapse when the feed has too few items to meaningfully scroll.
+        if (dy > 0 && rv.computeVerticalScrollRange() <= rv.height + (h * 0.5f).toInt()) {
+            return
+        }
+        lastScrollDy = dy
+        collapsibleHeader.animate().cancel()
+        val nextY = (collapsibleHeader.translationY - dy).coerceIn(-h, 0f)
+        if (nextY != collapsibleHeader.translationY) {
+            collapsibleHeader.translationY = nextY
+        }
+    }
+
+    private fun snapCollapsibleHeader(rv: RecyclerView) {
+        val h = baseHeaderHeightPx.toFloat()
+        if (h <= 0f) return
+        val cur = collapsibleHeader.translationY
+        if (cur == 0f || cur == -h) return
+        val shouldShow = !rv.canScrollVertically(-1) ||
+            searchInput.hasFocus() ||
+            suggestionsBox.visibility == View.VISIBLE ||
+            lastScrollDy < 0 ||
+            (-cur) < h * 0.4f
+        val target = if (shouldShow) 0f else -h
+        collapsibleHeader.animate()
+            .translationY(target)
+            .setDuration(160L)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .start()
+    }
+
+    private fun showCollapsibleHeader(animate: Boolean = true) {
+        if (!::collapsibleHeader.isInitialized) return
+        collapsibleHeader.animate().cancel()
+        if (collapsibleHeader.translationY == 0f) return
+        if (animate) {
+            collapsibleHeader.animate()
+                .translationY(0f)
+                .setDuration(180L)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .start()
+        } else {
+            collapsibleHeader.translationY = 0f
         }
     }
 
@@ -1449,6 +1590,7 @@ class YouTubeActivity : AppCompatActivity() {
         updateSwipeRefreshEnabled()
 
         // Instant optimistic open: show Playlist Header immediately + pulsing skeleton cards
+        showCollapsibleHeader(animate = false)
         playlistBanner.visibility = View.VISIBLE
         playlistTitle.text = playlistItem.title.ifBlank { "Playlist" }
         playlistMeta.text = listOf(playlistItem.channel, playlistItem.videoCount.ifBlank { "Loading tracks…" })
@@ -1488,6 +1630,7 @@ class YouTubeActivity : AppCompatActivity() {
     }
 
     private fun closePlaylistView() {
+        showCollapsibleHeader(animate = true)
         ++requestGen
         isOpeningPlaylist = false
         openPlaylist = null

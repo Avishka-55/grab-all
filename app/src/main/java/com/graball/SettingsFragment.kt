@@ -10,7 +10,10 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -51,6 +54,10 @@ class SettingsFragment : Fragment(), MainActivity.TabFragment {
     private lateinit var logoutBtn: TextView
     private lateinit var cacheSizeText: TextView
     private lateinit var ytDlpVersionText: TextView
+    private lateinit var batteryRow: View
+    private lateinit var batteryDivider: View
+    private lateinit var batteryStatusText: TextView
+    private lateinit var batteryBtn: TextView
     private lateinit var appVersionText: TextView
     private lateinit var appUpdateStatusText: TextView
     private lateinit var appUpdateBtn: TextView
@@ -77,6 +84,10 @@ class SettingsFragment : Fragment(), MainActivity.TabFragment {
         logoutBtn = view.findViewById(R.id.settingsLogoutButton)
         cacheSizeText = view.findViewById(R.id.settingsCacheSize)
         ytDlpVersionText = view.findViewById(R.id.settingsYtDlpVersion)
+        batteryRow = view.findViewById(R.id.rowBatteryOpt)
+        batteryDivider = view.findViewById(R.id.dividerBatteryOpt)
+        batteryStatusText = view.findViewById(R.id.settingsBatteryStatus)
+        batteryBtn = view.findViewById(R.id.settingsBatteryBtn)
         appVersionText = view.findViewById(R.id.settingsAppVersion)
         appUpdateStatusText = view.findViewById(R.id.settingsAppUpdateStatus)
         appUpdateBtn = view.findViewById(R.id.settingsCheckAppUpdate)
@@ -214,6 +225,17 @@ class SettingsFragment : Fragment(), MainActivity.TabFragment {
             showYtDlpSheet()
         }
 
+        // ---- Background Battery Unrestricted Row (API 23+) ----
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            batteryRow.visibility = View.GONE
+            batteryDivider.visibility = View.GONE
+        } else {
+            val openBatteryPrompt = View.OnClickListener { requestBatteryExemption() }
+            batteryRow.setOnClickListener(openBatteryPrompt)
+            batteryBtn.setOnClickListener(openBatteryPrompt)
+            refreshBatteryRow()
+        }
+
         // ---- App Update Row + Quiet Notification Switch ----
         appVersionText.text = "GrabAll v${AppUpdateChecker.currentVersionName(ctx)}"
         appUpdateBtn.setOnClickListener { onAppUpdateActionClicked() }
@@ -234,11 +256,71 @@ class SettingsFragment : Fragment(), MainActivity.TabFragment {
 
     override fun onResume() {
         super.onResume()
+        refreshBatteryRow()
         refreshAllAsync()
     }
 
     override fun onTabSelected() {
+        refreshBatteryRow()
         refreshAllAsync()
+    }
+
+    private fun refreshBatteryRow() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val ctx = context ?: return
+        if (!::batteryStatusText.isInitialized) return
+        val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val unrestricted = pm?.isIgnoringBatteryOptimizations(ctx.packageName) == true
+        if (unrestricted) {
+            batteryStatusText.text = "Unrestricted — screen-locked downloads & audio protected ✓"
+            batteryStatusText.setTextColor(ContextCompat.getColor(ctx, R.color.graball_subtext))
+            batteryBtn.text = "Allowed ✓"
+            batteryBtn.setBackgroundResource(R.drawable.yt_chip_bg)
+            batteryBtn.setTextColor(ContextCompat.getColor(ctx, R.color.graball_subtext))
+        } else {
+            batteryStatusText.text = "Tap Allow so screen-locked downloads & audio don't pause"
+            batteryStatusText.setTextColor(ContextCompat.getColor(ctx, R.color.graball_orange))
+            batteryBtn.text = "Allow"
+            batteryBtn.setBackgroundResource(R.drawable.btn_orange)
+            batteryBtn.setTextColor(ContextCompat.getColor(ctx, R.color.graball_text))
+        }
+    }
+
+    @android.annotation.SuppressLint("BatteryLife")
+    private fun requestBatteryExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val ctx = context ?: return
+        val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val unrestricted = pm?.isIgnoringBatteryOptimizations(ctx.packageName) == true
+        val intents = if (!unrestricted) {
+            listOf(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:${ctx.packageName}")
+                ),
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:${ctx.packageName}")
+                )
+            )
+        } else {
+            listOf(
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:${ctx.packageName}")
+                )
+            )
+        }
+        for (intent in intents) {
+            try {
+                startActivity(intent)
+                return
+            } catch (_: Exception) {
+            }
+        }
+        Toast.makeText(ctx, "Open Android Settings → Apps → GrabAll → Battery", Toast.LENGTH_LONG).show()
     }
 
     override fun onDestroy() {
